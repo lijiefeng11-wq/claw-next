@@ -12,6 +12,7 @@ import { MAX_IMAGE_BYTES } from "../core/protocol.js";
 import type { PlatformPage } from "./platformWorkspace.js";
 import { dispatchPageClick, type PageClickResult } from "./pddClick.js";
 import { PddMessageWatcher } from "./pddMessageWatcher.js";
+import { popupSweepScript, type PopupSweepMode, type PopupSweepResult } from "./pddPopups.js";
 
 const LOGIN_URL = "https://mms.pinduoduo.com/chat-merchant/index.html";
 
@@ -418,6 +419,14 @@ const SCAN = `(() => {
 type Scan = { items: { key: string; unread: boolean; active: boolean }[]; freshBuyer: boolean };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** 自动清理平台引导弹窗的间隔。 */
+export const POPUP_SWEEP_INTERVAL_MS = 2000;
+/** 清理脚本须在提交后这么久内开始执行，每次点击前也核对；过了就不点击（页面忙时排队迟到的旧脚本不改变页面）。 */
+export const POPUP_SWEEP_START_MS = 1500;
+/** 清理脚本这么久仍未结束（页面卡住）：重新加载平台页面；旧文档销毁且已过点击时限后才解除与发送的互斥。 */
+export const POPUP_SWEEP_STUCK_MS = 10_000;
+/** 人工“清理弹窗”最多连清几轮（引导常一层接一层出现）。 */
+const POPUP_MANUAL_ROUNDS = 5;
 
 /** 被动解析的接口（仅 mms.pinduoduo.com）。 */
 const PARSE_PATHS = new Set(["/chats/userinfo/realtime", "/janus/api/customService/queryCustomServiceInfo", "/plateau/chat/list"]);
@@ -484,6 +493,12 @@ export class PddPageAdapter implements PlatformAdapter {
   private optionsPrepared = false;
   /** 进行中的预热；发送与准备开始前先让它在下一步之间停下（不以“忙”拒绝发送）。 */
   private warmRun: { ctrl: AbortController; done: Promise<void> } | null = null;
+  /**
+   * 进行中的弹窗清理（每次有时限）。清理只在没有发送、准备、预热时开始；发送与准备开始前先等它结束，
+   * 所以点击坐标规划期间页面不会因清理而变化。清理关掉了浮层时页面代次加一，未执行的点击按页面已变化放弃。
+   */
+  private popupSweep: Promise<PopupSweepResult | null> | null = null;
+  private readonly popupSeen = new Set<string>();
   private openFailures = new Map<string, { count: number; until: number }>();
   private reloadAt = 0;
   private offChatSince = 0;
@@ -661,10 +676,94 @@ export class PddPageAdapter implements PlatformAdapter {
 
   /** 抢占预热：通知它停下并等它收尾（关闭已打开的对话框、释放页面）。 */
   private async yieldWarm(): Promise<void> {
+    await this.popupIdle();
     const run = this.warmRun;
     if (!run) return;
     run.ctrl.abort();
     await run.done;
+    await this.popupIdle();
+  }
+
+  /** 等进行中的弹窗清理结束。 */
+  private async popupIdle(): Promise<void> {
+    while (this.popupSweep) await this.popupSweep;
+  }
+
+  /**
+   * 在当前页面执行一次弹窗清理；记录点过的按钮，跳过的浮层同一签名只记一次（只有结构与短标题）。
+   * 互斥一直保持到脚本真正结束，或页面文档已销毁（导航、渲染进程退出、页面关闭）且已过脚本的点击时限——
+   * 不按超时解除，所以未结束的清理不会与发送交错。脚本迟迟不结束时重新加载页面，由导航结束它。
+   */
+  private sweepPopupsOnce(win: PlatformPage, mode: PopupSweepMode): Promise<PopupSweepResult | null> {
+    const wc = win.webContents;
+    if (win.isDestroyed() || wc.isLoadingMainFrame()) return Promise.resolve(null);
+    const deadline = Date.now() + POPUP_SWEEP_START_MS;
+    // 文档已销毁或脚本被放弃（执行失败）：等过了点击时限再解除——脚本若因消息乱序落到新文档，开始时也已过时限、不会点击。
+    const afterDeadline = () => new Promise<null>((resolve) => setTimeout(() => resolve(null), Math.max(0, deadline + 200 - Date.now())));
+    let gone = () => {};
+    const pageGone = new Promise<null>((resolve) => (gone = () => void afterDeadline().then(resolve)));
+    const events = ["did-navigate", "render-process-gone", "destroyed"] as const;
+    for (const e of events) wc.on(e as "destroyed", gone);
+    const stuck = setTimeout(() => {
+      if (this.window !== win || win.isDestroyed()) return;
+      console.log(`[${this.shopId}] platform popup sweep stuck: reload page`);
+      this.reload("popup_sweep_stuck", true);
+    }, POPUP_SWEEP_STUCK_MS);
+    let script: Promise<unknown>;
+    try {
+      script = wc.executeJavaScriptInIsolatedWorld(WORLD, [{ code: popupSweepScript(mode, deadline) }]);
+    } catch {
+      script = Promise.resolve(null);
+    }
+    const run = Promise.race([script as Promise<PopupSweepResult>, pageGone])
+      .catch(afterDeadline)
+      .then((r) => {
+        clearTimeout(stuck);
+        for (const e of events) wc.removeListener(e as "destroyed", gone);
+        if (!r || !Array.isArray(r.dismissed) || !Array.isArray(r.seen)) return null;
+        if (r.expired) console.log(`[${this.shopId}] platform popup sweep expired: page busy, nothing clicked after deadline`);
+        if (r.dismissed.length) this.watchEpoch++;
+        for (const d of r.dismissed) console.log(`[${this.shopId}] platform popup dismissed mode=${mode} label=${d.label} layer=${d.layer}`);
+        for (const v of r.seen) {
+          const key = `${v.why}|${v.layer}|${v.title ?? ""}`;
+          if (this.popupSeen.has(key) || this.popupSeen.size >= 50) continue;
+          this.popupSeen.add(key);
+          console.log(`[${this.shopId}] platform popup kept why=${v.why} layer=${v.layer} title=${v.title ?? "-"}`);
+        }
+        return r;
+      });
+    const tracked: Promise<PopupSweepResult | null> = run.finally(() => {
+      if (this.popupSweep === tracked) this.popupSweep = null;
+    });
+    this.popupSweep = tracked;
+    return tracked;
+  }
+
+  /** 定时自动清理：只在已登录的聊天页、没有发送/准备/预热、页面未在加载时进行。 */
+  private autoPopups(win: PlatformPage) {
+    if (this.window !== win || win.isDestroyed() || this.popupSweep || this.sending || this.outgoing || this.warmRun) return;
+    if (!this.tracker.status(true).logged_in || win.webContents.isLoadingMainFrame() || !win.webContents.getURL().startsWith(LOGIN_URL)) return;
+    void this.sweepPopupsOnce(win, "auto");
+  }
+
+  /**
+   * 人工“清理弹窗”：连清最多 5 轮（每轮间隔 0.4 秒），另外处理浮层里的“关闭 / 取消”与任意浮层的关闭图标。
+   * 发送进行中返回 pdd_send_busy；发送在两轮之间开始时就此停止。
+   */
+  async dismissPopups(): Promise<{ dismissed: number } | { blocked: string }> {
+    const win = this.window;
+    if (!win || win.isDestroyed()) return { blocked: "platform_window_closed" };
+    if (this.sending || this.outgoing) return { blocked: "pdd_send_busy" };
+    let dismissed = 0;
+    for (let round = 0; round < POPUP_MANUAL_ROUNDS; round++) {
+      await this.popupIdle();
+      if (this.window !== win || win.isDestroyed() || this.sending || this.outgoing || this.warmRun) break;
+      const r = await this.sweepPopupsOnce(win, "manual");
+      if (!r?.dismissed.length) break;
+      dismissed += r.dismissed.length;
+      await sleep(400);
+    }
+    return { dismissed };
   }
 
   private reload(why: string, force = false) {
@@ -911,6 +1010,8 @@ export class PddPageAdapter implements PlatformAdapter {
     win.webContents.on("responsive", () => onPage((h) => h.responsive()));
     const healthTimer = setInterval(() => this.healthTick(win), 1000);
     win.on("closed", () => clearInterval(healthTimer));
+    const popupTimer = setInterval(() => this.autoPopups(win), POPUP_SWEEP_INTERVAL_MS);
+    win.on("closed", () => clearInterval(popupTimer));
     win.webContents.setWindowOpenHandler(({ url }) => {
       if (isAllowedPlatformUrl(url)) void win.loadURL(url);
       return { action: "deny" };
@@ -1149,6 +1250,7 @@ export class PddPageAdapter implements PlatformAdapter {
    * 只在已打开某个对话时进行（相机图标在对话输入区）；不发送任何内容。
    */
   async prepareSendOptions(): Promise<void> {
+    await this.popupIdle();
     if (this.optionsPrepared || this.sending || this.outgoing || !this.window || this.window.isDestroyed()) return;
     if (!this.tracker.status(true).logged_in) return;
     this.sending = true;
@@ -1362,6 +1464,7 @@ export class PddPageAdapter implements PlatformAdapter {
   }
 
   private async instructionsSettled(uid: string, deadline: number) {
+    await this.popupIdle();
     if (this.sending || this.outgoing || !this.instructDue(uid)) return;
     this.sending = true;
     try {
@@ -1442,7 +1545,7 @@ export class PddPageAdapter implements PlatformAdapter {
    * 持有页面期间发送与准备会先抢占它（在下一步之间停下、关闭对话框），所以不会让发送因“忙”被拒。
    */
   async warmConversation(conversationId: string): Promise<void> {
-    if (this.warmRun || this.sending || this.outgoing || !this.window || this.window.isDestroyed()) return;
+    if (this.warmRun || this.popupSweep || this.sending || this.outgoing || !this.window || this.window.isDestroyed()) return;
     if (!/^[0-9]{1,32}$/.test(conversationId) || !this.tracker.status(true).logged_in) return;
     const goodsDue = Date.now() - (this.goodsTabAt.get(conversationId) ?? 0) >= GOODS_TAB_REFRESH_MS;
     if (!goodsDue && !this.instructDue(conversationId)) return;
@@ -1492,7 +1595,7 @@ export class PddPageAdapter implements PlatformAdapter {
    */
   async clickProbe(allow: (uid: string) => boolean): Promise<string> {
     if (!this.window || this.window.isDestroyed() || !this.tracker.status(true).logged_in) return "not_ready";
-    if (this.sending || this.outgoing) return "busy";
+    if (this.sending || this.outgoing || this.popupSweep) return "busy";
     const text = "测试点击（不会发出）";
     const page = this.window, epoch = this.watchEpoch;
     this.sending = true;

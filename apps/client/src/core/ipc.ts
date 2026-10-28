@@ -15,6 +15,7 @@ export const IPC_CHANNELS = [
   "shop:login",
   "shop:logout",
   "shop:reloadPage",
+  "shop:dismissPopups",
   "shop:setMode",
   "app:setStartup",
   "conv:takeover",
@@ -26,13 +27,16 @@ export type IpcChannel = (typeof IPC_CHANNELS)[number];
 export const SIM_ACTIONS = ["set_send_behavior", "toggle_history_gap", "login_as_other", "login_as_expected", "expire_login", "replay_history", "redeliver_last", "agent_reply"] as const;
 export type SimAction = (typeof SIM_ACTIONS)[number];
 
+/** 平台页面可选的缩放比例（渲染页面“页面缩放”的选项；自动适配也只在这些值中选）。 */
+export const PLATFORM_ZOOM_LEVELS = [0.67, 0.75, 0.8, 0.9, 1] as const;
+
 export type ShopInput = { shop_id: string; display_name: string; backend_url: string; platform_shop_id: string; adapter: "mock" | "pdd" };
 
 export type IpcPayload =
   | { channel: "state:get" }
-  | { channel: "workspace:present"; shop_id: string | null; bounds: { x: number; y: number; width: number; height: number } | null }
+  | { channel: "workspace:present"; shop_id: string | null; bounds: { x: number; y: number; width: number; height: number } | null; zoom?: number }
   | { channel: "shop:save"; shop: ShopInput }
-  | { channel: "shop:remove" | "shop:connect" | "shop:disconnect" | "shop:login" | "shop:logout" | "shop:reloadPage"; shop_id: string }
+  | { channel: "shop:remove" | "shop:connect" | "shop:disconnect" | "shop:login" | "shop:logout" | "shop:reloadPage" | "shop:dismissPopups"; shop_id: string }
   | { channel: "shop:setToken"; shop_id: string; token: string }
   | { channel: "shop:setMode"; shop_id: string; mode: ShopMode }
   | { channel: "app:setStartup"; launch_at_login: boolean; restart_on_crash: boolean }
@@ -95,14 +99,16 @@ export function validateIpc(channel: unknown, payload: unknown): IpcPayload {
       if (payload !== undefined && payload !== null) record(payload, []);
       return { channel: ch };
     case "workspace:present": {
-      const v = record(payload, ["shop_id", "bounds"]);
+      const v = record(payload, ["shop_id", "bounds", "zoom"]);
+      if (v.zoom !== undefined && !(PLATFORM_ZOOM_LEVELS as readonly unknown[]).includes(v.zoom)) fail("invalid_workspace_zoom");
       if (v.shop_id === null && v.bounds === null) return { channel: ch, shop_id: null, bounds: null };
       const shop_id = id(v.shop_id, "shop_id");
       const b = record(v.bounds, ["x", "y", "width", "height"]);
       for (const key of ["x", "y", "width", "height"]) {
         if (typeof b[key] !== "number" || !Number.isFinite(b[key]) || (b[key] as number) < 0 || (b[key] as number) > 20000) fail("invalid_workspace_bounds");
       }
-      return { channel: ch, shop_id, bounds: b as { x: number; y: number; width: number; height: number } };
+      const bounds = b as { x: number; y: number; width: number; height: number };
+      return v.zoom === undefined ? { channel: ch, shop_id, bounds } : { channel: ch, shop_id, bounds, zoom: v.zoom as number };
     }
     case "shop:save": {
       const v = record(payload, ["shop"]);
@@ -113,7 +119,8 @@ export function validateIpc(channel: unknown, payload: unknown): IpcPayload {
     case "shop:disconnect":
     case "shop:login":
     case "shop:logout":
-    case "shop:reloadPage": {
+    case "shop:reloadPage":
+    case "shop:dismissPopups": {
       const v = record(payload, ["shop_id"]);
       return { channel: ch, shop_id: id(v.shop_id, "shop_id") };
     }

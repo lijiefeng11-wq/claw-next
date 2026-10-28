@@ -1,6 +1,6 @@
 import { ClientWindow } from "./clientWindow.js";
 import { PlatformWorkspace } from "./platformWorkspace.js";
-import { IpcMainInvokeEvent, Notification, app, dialog, ipcMain, session } from "electron";
+import { IpcMainInvokeEvent, Notification, app, dialog, ipcMain, screen, session } from "electron";
 import { shopAlert, type ShopAlert } from "../core/pageHealth.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -266,7 +266,7 @@ class Controller {
         if (p.shop_id !== null && this.require(p.shop_id).adapter !== "pdd") throw new IpcValidationError("not_platform_shop");
         const z = mainWindow?.webContents.getZoomFactor() ?? 1;
         const b = p.bounds;
-        platformWorkspace?.present(p.shop_id, b ? { x: b.x * z, y: b.y * z, width: b.width * z, height: b.height * z } : null);
+        platformWorkspace?.present(p.shop_id, b ? { x: b.x * z, y: b.y * z, width: b.width * z, height: b.height * z } : null, p.zoom ?? 1);
         return undefined;
       }
       case "shop:save": {
@@ -326,6 +326,14 @@ class Controller {
         const blocked = adapter.reloadPage();
         if (blocked) throw new IpcValidationError(blocked);
         return this.state();
+      }
+      case "shop:dismissPopups": {
+        this.require(p.shop_id);
+        const adapter = this.slots.get(p.shop_id)?.adapter;
+        if (!adapter?.dismissPopups) throw new IpcValidationError("platform_window_closed");
+        const result = await adapter.dismissPopups();
+        if ("blocked" in result) throw new IpcValidationError(result.blocked);
+        return result;
       }
       case "shop:setMode": {
         const config = this.require(p.shop_id);
@@ -441,9 +449,11 @@ function hardenSessions() {
 }
 
 function createWindow() {
+  // 平台页面需要较大空间：默认铺满主屏工作区（不超过 1680×1050），最小 1100×700。
+  const work = screen.getPrimaryDisplay().workAreaSize;
   mainWindow = new ClientWindow({
-    width: 1360,
-    height: 880,
+    width: Math.max(1100, Math.min(1680, work.width)),
+    height: Math.max(700, Math.min(1050, work.height)),
     minWidth: 1100,
     minHeight: 700,
     title: "Claw-Next 登录收发客户端",

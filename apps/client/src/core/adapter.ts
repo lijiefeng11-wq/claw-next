@@ -110,6 +110,8 @@ export interface PlatformAdapter {
   sendOptionsSettled?(conversationId: string, timeoutMs: number): Promise<void>;
   /** 人工重新加载平台页面；返回阻止原因，成功为 null。 */
   reloadPage?(): string | null;
+  /** 人工“清理弹窗”：关闭平台页面上的引导 / 广告浮层（不发送、不碰聊天输入区）。返回关闭个数或阻止原因。 */
+  dismissPopups?(): Promise<{ dismissed: number } | { blocked: string }>;
   /**
    * 预热（同上条件）：该买家没有进行中的处理时调用，在后台补齐下一条消息要用的候选（只做界面操作，不发送）。
    * 必须可被发送与准备抢占：它们开始前先让预热在下一步之间停下，而不是以“忙”拒绝。
