@@ -71,6 +71,8 @@ export type EventRecord = {
   body: string;
   has_images?: boolean;
   has_orders?: boolean;
+  /** 请求体含商品快照（只在内存，含订单商品标题）；重启后不重投。 */
+  has_goods?: boolean;
   /** 请求体含发送候选（只在内存）；重启后不重投。 */
   has_send_options?: boolean;
   history_complete: boolean;
@@ -131,7 +133,7 @@ export function describeRecord(rec: JournalRec, previous: EventSnapshot | null, 
     case "note":
       return `note conv=${refs.conv(rec.conversation_id)} msg=${tail(rec.message_id)} reason=${rec.reason}`;
     case "event":
-      return `event created event_ref=${refs.event(rec.event.event_id)} conv=${refs.conv(rec.event.conversation_id)} msg=${tail(rec.event.message_id)} rev=${rec.event.context_revision} history_complete=${rec.event.history_complete} supported=${rec.event.text_only} images=${rec.event.has_images ? 1 : 0} orders=${rec.event.has_orders ? 1 : 0} options=${rec.event.has_send_options ? 1 : 0}${rec.event.budget_ms !== undefined ? ` budget_ms=${rec.event.budget_ms}` : ""}`;
+      return `event created event_ref=${refs.event(rec.event.event_id)} conv=${refs.conv(rec.event.conversation_id)} msg=${tail(rec.event.message_id)} rev=${rec.event.context_revision} history_complete=${rec.event.history_complete} supported=${rec.event.text_only} images=${rec.event.has_images ? 1 : 0} orders=${rec.event.has_orders ? 1 : 0} goods=${rec.event.has_goods ? 1 : 0} options=${rec.event.has_send_options ? 1 : 0}${rec.event.budget_ms !== undefined ? ` budget_ms=${rec.event.budget_ms}` : ""}`;
     case "event_stage":
       return `event stage event_ref=${refs.event(rec.event_id)} stage=${rec.stage}${rec.error ? ` error=${rec.error}` : ""}`;
     case "snapshot": {

@@ -43,7 +43,16 @@ export type OrderSummary = {
   observed_at: number;
 };
 
-export type ContextOrder = OrderSummary & { order_ref: string };
+export type ContextOrder = OrderSummary & { order_ref: string; items?: OrderItem[] };
+
+/** 契约“商品快照（1.2 草案）”：能力名与提交字段。 */
+export const CAP_GOODS_SNAPSHOT = "goods_snapshot";
+export type GoodsEvidence =
+  | { source: "order"; order_ref: string; observed_at: number }
+  | { source: "goods_card"; message_id: string; card_price?: string; observed_at: number };
+export type GoodsSnapshot = { goods_ref: string; title: string; evidence: GoodsEvidence[] };
+/** 订单明细：goods_ref 只在该商品进入 context.goods 时出现。 */
+export type OrderItem = { goods_ref?: string; goods_title: string; sku?: string; quantity?: number };
 
 /** 契约“聊天页附加发送”：心跳能力名。 */
 export const CAP_SEND_ITEM = "send_item";
@@ -74,7 +83,7 @@ export type EventRequest = {
   received_at: number;
   /** 契约 A：仅在本租约确认 reply_deadline 后提交；冻结后不再改变。 */
   remaining_budget_ms?: number;
-  context: { history_complete: boolean; messages: ContextMessage[]; orders?: ContextOrder[]; send_options?: SendOptions };
+  context: { history_complete: boolean; messages: ContextMessage[]; orders?: ContextOrder[]; goods?: GoodsSnapshot[]; send_options?: SendOptions };
 };
 
 /** send_item 不附文字，text 为空串；item 只在 send_item 时存在。 */

@@ -3,8 +3,18 @@
 
 import type { OrderSummary, OrderLogistics } from "./protocol.js";
 
-/** 本机订单记录：key 是平台订单号，只在本机用于去重与生成引用。 */
-export type PlatformOrder = { key: string; summary: OrderSummary };
+/**
+ * 本机订单记录：key 是平台订单号，只在本机用于去重与生成引用。
+ * goods：订单明细（最多 MAX_ORDER_GOODS 条，保持页面顺序；平台商品编号只在本机作为商品身份），
+ * 供商品快照（契约“商品快照（1.2 草案）”）使用；只在能力 goods_snapshot 确认后随订单提交为 items。
+ */
+export type PlatformOrder = { key: string; summary: OrderSummary; goods?: OrderGoods[] };
+/**
+ * title 是提交用的显示标题（已清理、限 200 字）。exact 表示显示标题与页面原标题（只规整空白）逐字相同：
+ * 清理或截断改动过的标题不能作为“完全相同标题”的身份，没有编号时该明细不归入任何商品条目。
+ */
+export type OrderGoods = { goods_id: string | null; title: string; exact?: boolean; sku?: string; quantity?: number };
+export const MAX_ORDER_GOODS = 5;
 
 export const MAX_ORDERS = 10;
 const MAX_TRACES = 5;
@@ -107,6 +117,7 @@ export function parseOrderList(request: unknown, response: unknown, observedAt: 
     if (!key) continue;
     const goods = Array.isArray(o.orderGoodsList) ? o.orderGoodsList[0] : o.orderGoodsList;
     const qty = goods?.goodsNumber;
+    const items = orderGoods(o.orderGoodsList);
     const t = traces(o.traceInfoList);
     const tracking = clip(o.trackingNumber, 200, false);
     const latest = newest(o.traceInfoList);
@@ -129,9 +140,29 @@ export function parseOrderList(request: unknown, response: unknown, observedAt: 
         logistics,
         observed_at: observedAt,
       }),
+      ...(items.length ? { goods: items } : {}),
     });
   }
   return { buyer, orders };
+}
+
+/**
+ * 订单明细：只看页面订单里的前 MAX_ORDER_GOODS 条（按位置，不用后面的条目补位）；
+ * 其中标题缺失或含网址的跳过，编号只认纯数字；exact 记录显示标题是否未被清理或截断（见 OrderGoods）。
+ */
+function orderGoods(list: unknown): OrderGoods[] {
+  const out: OrderGoods[] = [];
+  for (const g of ((Array.isArray(list) ? list : [list]) as Record<string, any>[]).slice(0, MAX_ORDER_GOODS)) {
+    if (!g || typeof g !== "object") continue;
+    const title = clip(g.goodsName, 200);
+    if (!title || /https?:\/\/|www\./i.test(title)) continue;
+    const raw = typeof g.goodsName === "string" ? g.goodsName.replace(/\s+/g, " ").trim() : "";
+    const rawId = g.goodsId;
+    const goods_id = (typeof rawId === "number" && Number.isSafeInteger(rawId) && rawId > 0) || (typeof rawId === "string" && /^[0-9]{1,32}$/.test(rawId)) ? String(rawId) : null;
+    const qty = g.goodsNumber;
+    out.push(compact({ goods_id, title, exact: title === raw, sku: clip(g.spec, 200), quantity: Number.isInteger(qty) && qty > 0 ? qty : undefined }));
+  }
+  return out;
 }
 
 /** 物流详情（chats/shippingDetail）：按快递单号对应到已读到的订单。 */
@@ -169,7 +200,7 @@ const SHIPPING_PATH = "/chats/shippingDetail";
  * 物流单号/订单号对应到已归属的订单），与当前选中的对话无关；对应不上的直接丢弃。
  */
 export class PddOrderBook {
-  private readonly books = new Map<string, Map<string, OrderSummary>>();
+  private readonly books = new Map<string, Map<string, { summary: OrderSummary; goods?: OrderGoods[] }>>();
   private readonly owner = new Map<string, string>();
   private readonly tracking = new Map<string, string>();
   private readonly inflight = new Map<string, number>();
@@ -233,7 +264,7 @@ export class PddOrderBook {
         const prevOwner = this.owner.get(o.key);
         if (prevOwner && prevOwner !== list.buyer) continue;
         this.owner.set(o.key, list.buyer);
-        book.set(o.key, o.summary);
+        book.set(o.key, { summary: o.summary, ...(o.goods ? { goods: o.goods } : {}) });
         if (o.summary.logistics?.tracking_number) this.tracking.set(o.summary.logistics.tracking_number, o.key);
       }
       this.emit(list.buyer);
@@ -245,17 +276,17 @@ export class PddOrderBook {
       const book = this.book(buyer);
       const cur = book.get(key);
       if (!cur) return;
-      book.set(key, { ...cur, logistics: lg });
+      book.set(key, { ...cur, summary: { ...cur.summary, logistics: lg } });
       this.emit(buyer);
     } else if (NOTE_PATHS.has(path)) {
       const n = parseNoteQuery(request, response);
       const buyer = n ? this.owner.get(n.key) : undefined;
       const cur = n && buyer ? this.books.get(buyer)?.get(n.key) : undefined;
       if (!n || !buyer || !cur) return;
-      const next = { ...cur };
+      const next = { ...cur.summary };
       if (n.note) next.note = n.note;
       else delete next.note;
-      this.books.get(buyer)!.set(n.key, next);
+      this.books.get(buyer)!.set(n.key, { ...cur, summary: next });
       this.emit(buyer);
     }
   }
@@ -267,8 +298,8 @@ export class PddOrderBook {
   }
 
   private emit(buyer: string) {
-    const orders = [...(this.books.get(buyer) ?? new Map<string, OrderSummary>()).entries()]
-      .map(([key, summary]) => ({ key, summary }))
+    const orders: PlatformOrder[] = [...(this.books.get(buyer) ?? new Map<string, { summary: OrderSummary; goods?: OrderGoods[] }>()).entries()]
+      .map(([key, v]) => ({ key, summary: v.summary, ...(v.goods ? { goods: v.goods } : {}) }))
       .sort((a, b) => (b.summary.order_time ?? 0) - (a.summary.order_time ?? 0))
       .slice(0, MAX_ORDERS);
     this.onChange(buyer, orders);
