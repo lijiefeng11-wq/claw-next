@@ -2,6 +2,7 @@
  * 商品快照（契约“商品快照（1.2 草案）”）：把本次提交的订单明细与商品卡片消息归为 context.goods，并生成订单明细 items。
  *
  * - 身份：有平台商品编号按编号，没有编号按完全相同的标题；两种身份不合并（同名不代表同一件）。
+ *   没有编号时只有与页面原标题逐字相同（未被清理、截断）的标题才作身份，否则该明细不归入商品条目。
  *   goods_ref 由调用方用店铺、对话与身份键做摘要，同一对话内不随版本变化；平台商品编号不进入输出。
  * - 来源只取本次实际提交的内容：订单前 5 条明细（解析时已限定）、本次上下文里的商品卡片消息。
  * - 规格、件数只放订单明细；evidence 只说明“哪笔订单 / 哪条卡片消息里有这件商品”。
@@ -37,16 +38,19 @@ export function goodsIdentity(goodsId: string | null, title: string): string {
   return goodsId ? `id:${goodsId}` : `title:${title}`;
 }
 
-type Line = { key: string; title: string; sku?: string; quantity?: number };
+/** key 为 null：没有编号、标题又被清理或截断过，无法确定身份——明细照列，但不归入任何商品条目。 */
+type Line = { key: string | null; title: string; sku?: string; quantity?: number };
 
 function orderLines(o: SnapshotOrder): Line[] {
   const out: Line[] = [];
   for (const g of o.goods.slice(0, MAX_ORDER_ITEMS)) {
-    const title = exactTitle(g.title);
+    const title = cleanText(g.title);
     if (!title) continue;
+    // 标题身份只认与页面原标题逐字相同的标题（exact）；有损清理、截断后的显示标题不作身份。
+    const key = g.goods_id ? goodsIdentity(g.goods_id, title) : g.exact === true && exactTitle(g.title) === title ? goodsIdentity(null, title) : null;
     const sku = cleanText(g.sku);
     const quantity = Number.isInteger(g.quantity) && (g.quantity as number) > 0 ? g.quantity : undefined;
-    out.push({ key: goodsIdentity(g.goods_id, title), title, ...(sku ? { sku } : {}), ...(quantity ? { quantity } : {}) });
+    out.push({ key, title, ...(sku ? { sku } : {}), ...(quantity ? { quantity } : {}) });
   }
   return out;
 }
@@ -64,7 +68,7 @@ export function buildGoodsSnapshot(input: { orders: SnapshotOrder[]; messages: C
     const ls = orderLines(o);
     if (!ls.length) continue;
     lines.set(o.order_ref, ls);
-    for (const l of ls) add(l.key, l.title, `order:${o.order_ref}`, { source: "order", order_ref: o.order_ref, observed_at: o.observed_at });
+    for (const l of ls) if (l.key) add(l.key, l.title, `order:${o.order_ref}`, { source: "order", order_ref: o.order_ref, observed_at: o.observed_at });
   }
   for (const m of input.messages) {
     if (m.kind !== "card" || m.card?.type !== "goods" || !Number.isFinite(m.created_at)) continue;
@@ -86,7 +90,7 @@ export function buildGoodsSnapshot(input: { orders: SnapshotOrder[]; messages: C
   // 被 MAX_EVIDENCE 截掉的订单来源不影响 items：items 照常列出明细，goods_ref 只看商品是否进入 goods。
   const items = new Map<string, OrderItem[]>();
   for (const [orderRef, ls] of lines) {
-    items.set(orderRef, ls.map((l) => ({ ...(refs.has(l.key) ? { goods_ref: refs.get(l.key)! } : {}), goods_title: l.title, ...(l.sku ? { sku: l.sku } : {}), ...(l.quantity ? { quantity: l.quantity } : {}) })));
+    items.set(orderRef, ls.map((l) => ({ ...(l.key && refs.has(l.key) ? { goods_ref: refs.get(l.key)! } : {}), goods_title: l.title, ...(l.sku ? { sku: l.sku } : {}), ...(l.quantity ? { quantity: l.quantity } : {}) })));
   }
   return { goods, items };
 }

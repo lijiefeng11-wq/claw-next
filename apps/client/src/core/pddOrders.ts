@@ -9,7 +9,11 @@ import type { OrderSummary, OrderLogistics } from "./protocol.js";
  * 供商品快照（契约“商品快照（1.2 草案）”）使用；只在能力 goods_snapshot 确认后随订单提交为 items。
  */
 export type PlatformOrder = { key: string; summary: OrderSummary; goods?: OrderGoods[] };
-export type OrderGoods = { goods_id: string | null; title: string; sku?: string; quantity?: number };
+/**
+ * title 是提交用的显示标题（已清理、限 200 字）。exact 表示显示标题与页面原标题（只规整空白）逐字相同：
+ * 清理或截断改动过的标题不能作为“完全相同标题”的身份，没有编号时该明细不归入任何商品条目。
+ */
+export type OrderGoods = { goods_id: string | null; title: string; exact?: boolean; sku?: string; quantity?: number };
 export const MAX_ORDER_GOODS = 5;
 
 export const MAX_ORDERS = 10;
@@ -144,7 +148,7 @@ export function parseOrderList(request: unknown, response: unknown, observedAt: 
 
 /**
  * 订单明细：只看页面订单里的前 MAX_ORDER_GOODS 条（按位置，不用后面的条目补位）；
- * 其中标题缺失或含网址的跳过，编号只认纯数字。
+ * 其中标题缺失或含网址的跳过，编号只认纯数字；exact 记录显示标题是否未被清理或截断（见 OrderGoods）。
  */
 function orderGoods(list: unknown): OrderGoods[] {
   const out: OrderGoods[] = [];
@@ -152,10 +156,11 @@ function orderGoods(list: unknown): OrderGoods[] {
     if (!g || typeof g !== "object") continue;
     const title = clip(g.goodsName, 200);
     if (!title || /https?:\/\/|www\./i.test(title)) continue;
+    const raw = typeof g.goodsName === "string" ? g.goodsName.replace(/\s+/g, " ").trim() : "";
     const rawId = g.goodsId;
     const goods_id = (typeof rawId === "number" && Number.isSafeInteger(rawId) && rawId > 0) || (typeof rawId === "string" && /^[0-9]{1,32}$/.test(rawId)) ? String(rawId) : null;
     const qty = g.goodsNumber;
-    out.push(compact({ goods_id, title, sku: clip(g.spec, 200), quantity: Number.isInteger(qty) && qty > 0 ? qty : undefined }));
+    out.push(compact({ goods_id, title, exact: title === raw, sku: clip(g.spec, 200), quantity: Number.isInteger(qty) && qty > 0 ? qty : undefined }));
   }
   return out;
 }

@@ -29,9 +29,46 @@ describe("订单明细解析", () => {
     assert.equal(o.summary.goods_title, "虚构商品甲");
     assert.deepEqual(o.goods!.map((g) => g.title), ["虚构商品甲", "虚构商品乙", "虚构商品丁", "虚构商品戊"]);
     assert.ok(o.goods!.length <= MAX_ORDER_GOODS);
-    assert.deepEqual(o.goods![0], { goods_id: "501", title: "虚构商品甲", sku: "红色 L", quantity: 2 });
+    assert.deepEqual(o.goods![0], { goods_id: "501", title: "虚构商品甲", exact: true, sku: "红色 L", quantity: 2 });
     const single = parseOrderList({ uid: "9001" }, { success: true, result: { orders: [{ uid: 9001, orderSn: "sn-2", orderGoodsList: { goodsId: "x1", goodsName: "虚构商品丙" } }] } }, 1);
-    assert.deepEqual(single!.orders[0].goods, [{ goods_id: null, title: "虚构商品丙" }]);
+    assert.deepEqual(single!.orders[0].goods, [{ goods_id: null, title: "虚构商品丙", exact: true }]);
+  });
+});
+
+describe("无编号明细的标题身份", () => {
+  const parse = (goods: Record<string, unknown>[]) =>
+    parseOrderList({ uid: "9001" }, { success: true, result: { orders: [{ uid: 9001, orderSn: "sn-1", orderGoodsList: goods }] } }, 100)!.orders[0];
+  const snap = (o: ReturnType<typeof parse>) => buildGoodsSnapshot({ orders: [order("o-1", 100, o.goods!)], messages: [] }, ref);
+
+  test("超长标题被截断后不作身份：前 200 字相同、结尾不同的两条明细不合并", () => {
+    const o = parse([{ goodsName: "虚".repeat(200) + "甲" }, { goodsName: "虚".repeat(200) + "乙" }]);
+    assert.ok(o.goods!.every((g) => g.exact === false));
+    const { goods, items } = snap(o);
+    assert.equal(goods.length, 0);
+    assert.equal(items.get("o-1")!.length, 2);
+    assert.ok(items.get("o-1")!.every((i) => i.goods_ref === undefined));
+  });
+
+  test("隐去数字后显示相同的标题不作身份：两条明细不合并", () => {
+    const o = parse([{ goodsName: "虚构型号12345678" }, { goodsName: "虚构型号87654321" }]);
+    assert.deepEqual(o.goods!.map((g) => [g.title, g.exact]), [["虚构型号[已隐去]", false], ["虚构型号[已隐去]", false]]);
+    const { goods, items } = snap(o);
+    assert.equal(goods.length, 0);
+    assert.ok(items.get("o-1")!.every((i) => i.goods_ref === undefined));
+  });
+
+  test("未被改动的标题（只规整空白）可作身份，并与同名商品卡片合并", () => {
+    const o = parse([{ goodsName: "  虚构遮阳挡  " }]);
+    assert.deepEqual(o.goods, [{ goods_id: null, title: "虚构遮阳挡", exact: true }]);
+    const { goods, items } = buildGoodsSnapshot({ orders: [order("o-1", 100, o.goods!)], messages: [card("m-1", "虚构遮阳挡", 50)] }, ref);
+    assert.deepEqual(goods.map((g) => [g.goods_ref, g.evidence.map((e) => e.source)]), [[ref("title:虚构遮阳挡"), ["order", "goods_card"]]]);
+    assert.equal(items.get("o-1")![0].goods_ref, ref("title:虚构遮阳挡"));
+  });
+
+  test("未标明 exact 的无编号明细不作身份（缺省按不可靠处理）", () => {
+    const { goods, items } = buildGoodsSnapshot({ orders: [order("o-1", 100, [{ goods_id: null, title: "虚构商品" }])], messages: [] }, ref);
+    assert.equal(goods.length, 0);
+    assert.deepEqual(items.get("o-1"), [{ goods_title: "虚构商品" }]);
   });
 });
 
