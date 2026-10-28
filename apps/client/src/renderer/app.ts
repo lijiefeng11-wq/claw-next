@@ -298,7 +298,8 @@
   function renderPlatformBar(entry: ShopEntry): HTMLElement {
     const id = entry.config.shop_id;
     const v = entry.view;
-    const pageOpen = !!entry.platform;
+    // 平台页面是否真的开着：退出登录、页面关闭后适配器仍在，但状态里没有 page。
+    const pageOpen = !!entry.platform?.page;
     return h(
       "div",
       { class: "pbar" },

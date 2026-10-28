@@ -494,8 +494,11 @@ export class PddPageAdapter implements PlatformAdapter {
   /** 进行中的预热；发送与准备开始前先让它在下一步之间停下（不以“忙”拒绝发送）。 */
   private warmRun: { ctrl: AbortController; done: Promise<void> } | null = null;
   /**
-   * 进行中的弹窗清理（每次有时限）。清理只在没有发送、准备、预热时开始；发送与准备开始前先等它结束，
+   * 进行中的弹窗清理。清理只在没有发送、准备、预热时开始；发送与准备开始前先等它结束，
    * 所以点击坐标规划期间页面不会因清理而变化。清理关掉了浮层时页面代次加一，未执行的点击按页面已变化放弃。
+   * 占用页面的规则：等待（await）只是等，不算占用。多个等待者可能同时被唤醒，所以每个入口都要在最后一次 await
+   * 返回后的同一同步段里复核“没有清理 / 预热 / 发送”并立即置 sending（或启动清理），中间不得再 await；
+   * 复核不通过就继续等（do … while）。清理的启动（sweepPopupsOnce）同步设置 popupSweep。
    */
   private popupSweep: Promise<PopupSweepResult | null> | null = null;
   private readonly popupSeen = new Set<string>();
@@ -756,7 +759,7 @@ export class PddPageAdapter implements PlatformAdapter {
     if (this.sending || this.outgoing) return { blocked: "pdd_send_busy" };
     let dismissed = 0;
     for (let round = 0; round < POPUP_MANUAL_ROUNDS; round++) {
-      await this.popupIdle();
+      do await this.popupIdle(); while (this.popupSweep);
       if (this.window !== win || win.isDestroyed() || this.sending || this.outgoing || this.warmRun) break;
       const r = await this.sweepPopupsOnce(win, "manual");
       if (!r?.dismissed.length) break;
@@ -1131,7 +1134,8 @@ export class PddPageAdapter implements PlatformAdapter {
 
   async send(request: SendRequest): Promise<SendResult> {
     const notSent = (reason: string): SendResult => ({ status: "not_sent", reason });
-    await this.yieldWarm();
+    // 占用页面：等清理与预热结束后，在 await 返回的同一同步段里复核并置 sending（见 popupSweep 说明）。
+    do await this.yieldWarm(); while (this.popupSweep || this.warmRun);
     if (!this.window || this.window.isDestroyed()) return notSent("platform_window_closed");
     if (!this.tracker.status(true).logged_in) return notSent("platform_logged_out");
     if (this.sending || this.outgoing) return notSent("pdd_send_busy");
@@ -1250,7 +1254,7 @@ export class PddPageAdapter implements PlatformAdapter {
    * 只在已打开某个对话时进行（相机图标在对话输入区）；不发送任何内容。
    */
   async prepareSendOptions(): Promise<void> {
-    await this.popupIdle();
+    do await this.popupIdle(); while (this.popupSweep);
     if (this.optionsPrepared || this.sending || this.outgoing || !this.window || this.window.isDestroyed()) return;
     if (!this.tracker.status(true).logged_in) return;
     this.sending = true;
@@ -1273,7 +1277,8 @@ export class PddPageAdapter implements PlatformAdapter {
    */
   async sendItem(request: SendItemRequest): Promise<SendResult> {
     const notSent = (reason: string): SendResult => ({ status: "not_sent", reason });
-    await this.yieldWarm();
+    // 占用页面：等清理与预热结束后，在 await 返回的同一同步段里复核并置 sending（见 popupSweep 说明）。
+    do await this.yieldWarm(); while (this.popupSweep || this.warmRun);
     if (!this.window || this.window.isDestroyed()) return notSent("platform_window_closed");
     if (!this.tracker.status(true).logged_in) return notSent("platform_logged_out");
     if (this.sending || this.outgoing) return notSent("pdd_send_busy");
@@ -1464,7 +1469,7 @@ export class PddPageAdapter implements PlatformAdapter {
   }
 
   private async instructionsSettled(uid: string, deadline: number) {
-    await this.popupIdle();
+    do await this.popupIdle(); while (this.popupSweep);
     if (this.sending || this.outgoing || !this.instructDue(uid)) return;
     this.sending = true;
     try {

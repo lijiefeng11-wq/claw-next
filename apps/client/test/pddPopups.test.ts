@@ -130,6 +130,40 @@ describe("平台引导弹窗清理", () => {
     assert.equal(adapter.popupSweep, null);
   });
 
+  // 两个等待者（人工清理与发送）同时被同一次清理结束唤醒：发送必须在 await 返回后的同步段里复核，
+  // 人工清理若先启动了下一轮清理，发送要继续等它结束，绝不能在清理进行中占用页面、开始规划点击。
+  for (const kind of ["send", "sendItem"] as const) {
+    test(`自动清理结束时人工清理与 ${kind} 同时等待：${kind} 不会在清理进行中占用页面`, async () => {
+      const { adapter, win, calls, settle, pendingCount } = harness();
+      const seen: { sweep: boolean; sending: boolean }[] = [];
+      adapter.openConversation = async () => {
+        seen.push({ sweep: !!adapter.popupSweep, sending: adapter.sending });
+        return "test_stop_before_click";
+      };
+      adapter.autoPopups(win);
+      assert.equal(pendingCount(), 1);
+      const manual = adapter.dismissPopups();
+      const sent: Promise<{ status: string; reason?: string }> =
+        kind === "send"
+          ? adapter.send({ conversation_id: "9001", text: "虚构回复", attempt_id: "a-1" })
+          : adapter.sendItem({ conversation_id: "9001", option: { type: "video", key: "video:1", name: "虚构视频", observed_at: 1 }, attempt_id: "a-1", deadline: Date.now() / 1000 + 10, recheck: () => null });
+      await tick();
+      settle(one); // 自动清理结束，两个等待者同时被唤醒
+      // 人工清理若开始了下一轮，让它在若干轮事件后结束；期间发送不得进入页面操作。
+      for (let i = 0; i < 20 && pendingCount() === 0; i++) await tick();
+      if (pendingCount()) {
+        assert.deepEqual(seen, [], "人工清理进行中，发送不应开始");
+        await tick();
+        settle(none);
+      }
+      assert.deepEqual(await sent, { status: "not_sent", reason: "test_stop_before_click" });
+      await manual;
+      assert.equal(seen.length, 1);
+      assert.deepEqual(seen[0], { sweep: false, sending: true });
+      assert.ok(calls.filter((c) => c === "sweep:manual").length <= 1);
+    });
+  }
+
   test("跳过的浮层同一签名只记一次日志", async () => {
     const { adapter, win, settle } = harness();
     const logs: string[] = [];
