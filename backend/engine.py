@@ -13,6 +13,10 @@ from .content import model_content
 MAX_RESPONSE_BYTES = 65536
 MAX_DECISION_REASON = 600
 TEST_PROMPT = "This is a harmless connectivity check. Reply with the single word OK."
+# The connectivity probe uses the same completion budget as the decision path so
+# reasoning-capable local models that spend tokens thinking before answering are
+# not reported as unreachable.
+MAX_COMPLETION_TOKENS = 1024
 
 
 def decision(action, reason, text=""):
@@ -264,7 +268,7 @@ def model_decide(context, settings, config, allow_send=False, *, deadline_monoto
         request_body = {"model": slot["model"],
                         "messages": [{"role": "system", "content": system},
                                      {"role": "user", "content": model_content(model_context)}],
-                        "response_format": {"type": "json_object"}, "temperature": 0, "max_tokens": 1024, "stream": False}
+                        "response_format": {"type": "json_object"}, "temperature": 0, "max_tokens": MAX_COMPLETION_TOKENS, "stream": False}
         started = time.monotonic()
         diagnostics.emit("model_attempt", slot=name)
         try:
@@ -339,7 +343,7 @@ def test_slot(config, name):
     body = {"model": slot["model"],
             "messages": [{"role": "system", "content": TEST_PROMPT},
                          {"role": "user", "content": "ping"}],
-            "max_tokens": 16, "temperature": 0, "stream": False}
+            "max_tokens": MAX_COMPLETION_TOKENS, "temperature": 0, "stream": False}
     try:
         data = _post(_slot_spec(config, name), body)
         _completion_text(data)

@@ -190,7 +190,9 @@ class FailoverTests(unittest.TestCase):
 
     def test_test_slot_uses_a_harmless_synthetic_prompt(self):
         self.primary.queue(completion("OK"))
-        result = test_slot(config(slot(self.primary.base_url)), "primary")
+        before = config(slot(self.primary.base_url))
+        snapshot = json.dumps(before, sort_keys=True)
+        result = test_slot(before, "primary")
         self.assertTrue(result["ok"])
         self.assertEqual(result["reason"], "ok")
         self.assertEqual(result["slot"], "primary")
@@ -201,6 +203,44 @@ class FailoverTests(unittest.TestCase):
         self.assertIn("connectivity check", joined)
         self.assertNotIn("Shop policy", joined)
         self.assertEqual(self.primary.count(), 1)
+        # The probe never rewrites the saved configuration.
+        self.assertEqual(json.dumps(before, sort_keys=True), snapshot)
+
+    def test_test_slot_allows_reasoning_before_final_content(self):
+        def reasoning_response(spec, body):
+            # Simulate a model that spends 64 tokens reasoning before its answer.
+            answered = body["max_tokens"] > 64
+            return {"choices": [{"message": {
+                "reasoning_content": "synthetic private reasoning",
+                "content": "OK" if answered else ""},
+                "finish_reason": "stop" if answered else "length"}]}
+
+        for name in ("primary", "backup"):
+            with self.subTest(slot=name), patch("backend.engine._post", side_effect=reasoning_response) as post:
+                result = test_slot(config(slot(self.primary.base_url), slot(self.backup.base_url)), name)
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["reason"], "ok")
+                self.assertEqual(set(result), {"slot", "version", "ok", "reason", "latency_ms"})
+                post.assert_called_once()
+                self.assertEqual(post.call_args.args[0]["timeout_seconds"], FAST_TIMEOUT)
+                self.assertNotIn("synthetic private reasoning", json.dumps(result))
+
+    def test_test_slot_rejects_empty_or_malformed_success_responses(self):
+        responses = [
+            {"choices": [{"message": {"content": "", "reasoning_content": "private reasoning"},
+                          "finish_reason": "length"}]},
+            {"choices": [{"message": {"content": None}}]},
+            {"choices": [{"message": {"content": "  "}}]},
+            {"choices": [{"message": {"content": ["OK"]}}]},
+            {"choices": []},
+        ]
+        for response in responses:
+            with self.subTest(response=response):
+                self.primary.queue({"raw": json.dumps(response)})
+                result = test_slot(config(slot(self.primary.base_url)), "primary")
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["reason"], "invalid_response")
+                self.assertNotIn("private reasoning", json.dumps(result))
 
     def test_test_slot_reports_safe_failure_codes(self):
         self.primary.queue(http_error(503))
