@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AdapterEvent, HistoryLoad, HistoryResult, ImageFetchResult, PlatformAdapter, PlatformMessage, PlatformSendOption, PlatformStatus, SendItemRequest, SendRequest, SendResult } from "./adapter.js";
-import type { Kind } from "./protocol.js";
+import type { Card, Kind } from "./protocol.js";
 import type { PlatformOrder } from "./pddOrders.js";
 
 export type MockSendBehavior = "confirm" | "fail_before_call" | "timeout_after_call" | "ack_without_id";
@@ -102,7 +102,7 @@ export class MockPlatformAdapter implements PlatformAdapter {
   }
 
   /** 模拟买家发来新消息。stableId=false 模拟平台没有提供可靠消息 ID。 */
-  injectBuyerMessage(input: { conversation_id: string; content: string; kind?: Kind; stableId?: boolean; platform_message_id?: string; image_ref?: string }): PlatformMessage {
+  injectBuyerMessage(input: { conversation_id: string; content: string; kind?: Kind; stableId?: boolean; platform_message_id?: string; image_ref?: string; card?: Card }): PlatformMessage {
     const message: PlatformMessage = {
       conversation_id: input.conversation_id,
       platform_message_id: input.stableId === false ? null : input.platform_message_id ?? `mock-m-${randomUUID().slice(0, 12)}`,
@@ -111,6 +111,7 @@ export class MockPlatformAdapter implements PlatformAdapter {
       content: input.content,
       created_at: this.now(),
       ...(input.image_ref ? { image_ref: input.image_ref } : {}),
+      ...(input.card ? { card: input.card } : {}),
     };
     this.push(message);
     if (this.loggedIn) this.emit({ type: "message", message, live: true });

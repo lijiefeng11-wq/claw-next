@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { AdapterEvent, HistoryResult, PlatformAdapter, PlatformMessage, PlatformSendOption, SendResult } from "./adapter.js";
-import type { PlatformOrder } from "./pddOrders.js";
+import type { OrderGoods, PlatformOrder } from "./pddOrders.js";
+import { buildGoodsSnapshot } from "./goodsSnapshot.js";
 import { BackendClient, BackendError, FetchLike, TransportError } from "./backend.js";
 import { AttemptPhase, ConversationState, EventRecord, Journal, LogRefs, ReceiptRecord, StoredMessage, UnknownCheck, describeRecord } from "./journal.js";
 import {
   Attachment,
+  CAP_GOODS_SNAPSHOT,
   CAP_REPLY_DEADLINE,
   CAP_SEND_ITEM,
   ContextMessage,
@@ -172,7 +174,8 @@ export class ShopRuntime {
     conv: (conversationId) => logRef([this.config.shop_id, "conversation", conversationId]).slice(0, 12),
   };
   /** 每个买家最近读到的订单摘要，只在内存；进程重启后等页面重新加载。 */
-  private readonly orders = new Map<string, { json: string; list: ContextOrder[] }>();
+  /** 每个对话的订单摘要与订单明细（明细只在 goods_snapshot 确认后随订单提交为 items）。 */
+  private readonly orders = new Map<string, { json: string; list: ContextOrder[]; lines: Map<string, OrderGoods[]> }>();
   /** 带图片事件的完整请求体，只在内存；提交成功后释放。 */
   private readonly fullBodies = new Map<string, string>();
   /** 每个买家对话当前可发送的已有内容，只在内存。 */
@@ -312,7 +315,7 @@ export class ShopRuntime {
     if (!session || this.stopped) return;
     const started = this.now();
     try {
-      const lease = await this.backend.heartbeat(this.instanceId, session, [...(this.adapter.sendItem ? [CAP_SEND_ITEM] : []), CAP_REPLY_DEADLINE]);
+      const lease = await this.backend.heartbeat(this.instanceId, session, [...(this.adapter.sendItem ? [CAP_SEND_ITEM] : []), CAP_REPLY_DEADLINE, CAP_GOODS_SNAPSHOT]);
       if (lease.instance_id !== this.instanceId || lease.session_id !== session || lease.shop_id !== this.config.shop_id) {
         this.lease = { state: "error", generation: 0, valid_until: 0, detail: "lease_response_mismatch" };
         return;
@@ -324,6 +327,7 @@ export class ShopRuntime {
       const caps = new Set(lease.capabilities);
       if (caps.has(CAP_SEND_ITEM) !== this.capabilities.has(CAP_SEND_ITEM)) this.log(`capability send_item=${caps.has(CAP_SEND_ITEM)}`);
       if (caps.has(CAP_REPLY_DEADLINE) !== this.capabilities.has(CAP_REPLY_DEADLINE)) this.log(`capability reply_deadline=${caps.has(CAP_REPLY_DEADLINE)}`);
+      if (caps.has(CAP_GOODS_SNAPSHOT) !== this.capabilities.has(CAP_GOODS_SNAPSHOT)) this.log(`capability goods_snapshot=${caps.has(CAP_GOODS_SNAPSHOT)}`);
       this.capabilities = caps;
       if (this.config.mode === "auto" && this.sendItemConfirmed()) void this.adapter.prepareSendOptions?.().catch(() => undefined);
     } catch (err) {
@@ -353,6 +357,11 @@ export class ShopRuntime {
   /** 本租约已确认、且本适配器能执行附加发送。 */
   sendItemConfirmed() {
     return !!this.adapter.sendItem && this.capabilities.has(CAP_SEND_ITEM);
+  }
+
+  /** 契约“商品快照（1.2 草案）”：最近一次成功心跳为本租约确认了 goods_snapshot。 */
+  goodsSnapshotConfirmed() {
+    return this.lease.state === "held" && this.capabilities.has(CAP_GOODS_SNAPSHOT);
   }
 
   /** 契约 A.2：最近一次成功心跳为这一租约（instance+session+generation）确认了 reply_deadline。 */
@@ -400,12 +409,30 @@ export class ShopRuntime {
   /** 订单摘要变化使该对话的旧决定失效（契约“版本”）；订单号只用于生成对话内稳定引用。 */
   private setOrders(conversationId: string, orders: PlatformOrder[]) {
     if (!isIdentifier(conversationId) || this.platformCheck()) return;
-    const list: ContextOrder[] = orders.map((o) => ({ order_ref: "o-" + logRef([this.config.shop_id, "order", conversationId, o.key]).slice(0, 16), ...o.summary }));
-    const json = JSON.stringify(list);
+    const refOf = (key: string) => "o-" + logRef([this.config.shop_id, "order", conversationId, key]).slice(0, 16);
+    const list: ContextOrder[] = orders.map((o) => ({ order_ref: refOf(o.key), ...o.summary }));
+    const lines = new Map(orders.filter((o) => o.goods?.length).map((o) => [refOf(o.key), o.goods!]));
+    // 明细变化同样使旧决定失效（契约“商品快照”：快照变化使 context_revision 递增）。
+    const json = JSON.stringify([list, [...lines]]);
     if (this.orders.get(conversationId)?.json === json) return;
-    this.orders.set(conversationId, { json, list });
+    this.orders.set(conversationId, { json, list, lines });
     this.log(`orders conv=${this.refs.conv(conversationId)} count=${list.length}`);
     if (this.journal.conversations.get(conversationId)?.messages.length) this.journal.bumpRevision(conversationId, "orders");
+  }
+
+  /**
+   * 商品快照：由本次请求里的订单（含本机明细）与消息生成 context.goods，并给有明细的订单加 items。
+   * goods_ref 用店铺、对话与商品身份做摘要，同一对话内稳定；不改动内存里的订单摘要。
+   */
+  private attachGoods(conversationId: string, request: EventRequest) {
+    const stored = this.orders.get(conversationId);
+    const orders = request.context.orders ?? [];
+    const snap = buildGoodsSnapshot(
+      { orders: orders.map((o) => ({ order_ref: o.order_ref, observed_at: o.observed_at, goods: stored?.lines.get(o.order_ref) ?? [] })), messages: request.context.messages },
+      (identity) => "g-" + logRef([this.config.shop_id, "goods", conversationId, identity]).slice(0, 16),
+    );
+    if (snap.goods.length) request.context.goods = snap.goods;
+    if (orders.length && snap.items.size) request.context.orders = orders.map((o) => (snap.items.has(o.order_ref) ? { ...o, items: snap.items.get(o.order_ref) } : o));
   }
 
   /** 候选集合或其私有映射变化使该对话的旧决定失效（契约“聊天页附加发送”）。 */
@@ -630,6 +657,8 @@ export class ShopRuntime {
       received_at: last.received_at,
       context: { history_complete: historyComplete, messages, ...(this.orders.get(conversationId)?.list.length ? { orders: this.orders.get(conversationId)!.list } : {}) },
     };
+    // 契约“商品快照（1.2 草案）”：能力确认后才带 goods 与订单明细 items；来源只取本次提交的消息与订单。
+    if (this.goodsSnapshotConfirmed()) this.attachGoods(conversationId, request);
     const candidates = this.buildSendOptions(conversationId, conv.revision);
     if (candidates) request.context.send_options = candidates.options;
     const images = await measured("images", () => this.latestImages(last));
@@ -653,10 +682,12 @@ export class ShopRuntime {
     const body = JSON.stringify(request);
     if (images.attachments.length) tail.attachments = images.digests as unknown as Attachment[];
     const hasOrders = !!request.context.orders;
+    const hasGoods = !!request.context.goods;
     const hasOptions = !!request.context.send_options;
     delete request.context.orders;
+    delete request.context.goods;
     delete request.context.send_options;
-    const memoryOnly = images.attachments.length > 0 || hasOrders || hasOptions;
+    const memoryOnly = images.attachments.length > 0 || hasOrders || hasGoods || hasOptions;
     const stored = memoryOnly ? JSON.stringify(request) : body;
     if (Buffer.byteLength(stored, "utf8") > MAX_BODY_BYTES || Buffer.byteLength(body, "utf8") > MAX_EVENT_BYTES) return this.journal.note(conversationId, messageId, "body_too_large");
     if (memoryOnly) this.fullBodies.set(request.event_id, body);
@@ -672,6 +703,7 @@ export class ShopRuntime {
       body: stored,
       ...(images.attachments.length ? { has_images: true } : {}),
       ...(hasOrders ? { has_orders: true } : {}),
+      ...(hasGoods ? { has_goods: true } : {}),
       ...(hasOptions ? { has_send_options: true } : {}),
       history_complete: historyComplete,
       text_only: textOnly,
@@ -739,9 +771,9 @@ export class ShopRuntime {
       let attempt = 0;
       for (;;) {
         if (this.stopped || this.expired(ev.conversation_id, ev.message_id, ev)) return;
-        const body = this.fullBodies.get(ev.event_id) ?? (ev.has_images || ev.has_orders || ev.has_send_options ? null : ev.body);
+        const body = this.fullBodies.get(ev.event_id) ?? (ev.has_images || ev.has_orders || ev.has_goods || ev.has_send_options ? null : ev.body);
         if (body === null) {
-          this.journal.setStage(ev.event_id, "rejected", ev.has_images ? "image_not_retained" : ev.has_orders ? "orders_not_retained" : "send_options_not_retained");
+          this.journal.setStage(ev.event_id, "rejected", ev.has_images ? "image_not_retained" : ev.has_orders ? "orders_not_retained" : ev.has_goods ? "goods_not_retained" : "send_options_not_retained");
           this.changed();
           return;
         }

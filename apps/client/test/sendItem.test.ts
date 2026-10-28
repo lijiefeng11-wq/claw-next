@@ -102,8 +102,8 @@ describe("附加发送：能力协商", () => {
   test("新客户端 + 新后台：声明能力、带候选、执行一次并以聊天记录消息编号回执 sent", async () => {
     const fake = fakeBackend({ decide: pick("instruction") });
     const h = await shop(fake);
-    // reply_deadline 是独立能力（契约 A），与 send_item 分开声明。
-    assert.deepEqual(fake.state.heartbeats[0].capabilities, ["send_item", "reply_deadline"]);
+    // reply_deadline（契约 A）与 goods_snapshot（商品快照草案）是独立能力，与 send_item 分开声明。
+    assert.deepEqual(fake.state.heartbeats[0].capabilities, ["send_item", "reply_deadline", "goods_snapshot"]);
     await buyerAsks(h);
     const opts = fake.state.bodies[0].context.send_options;
     assert.equal(opts.instructions.length, 1);
@@ -124,11 +124,11 @@ describe("附加发送：能力协商", () => {
     assert.equal(eventsOf(h.rt)[0].blocked, "capability_not_confirmed");
   });
 
-  test("不能附加发送的客户端 + 新后台：不声明 send_item（只声明独立的 reply_deadline）、不传候选", async () => {
+  test("不能附加发送的客户端 + 新后台：不声明 send_item（只声明独立的 reply_deadline、goods_snapshot）、不传候选", async () => {
     const fake = fakeBackend({ decide: () => ({ action: "none", text: "" }) });
     const h = await shop(fake, { oldClient: true });
     await buyerAsks(h);
-    assert.deepEqual(fake.state.heartbeats[0].capabilities, ["reply_deadline"]);
+    assert.deepEqual(fake.state.heartbeats[0].capabilities, ["reply_deadline", "goods_snapshot"]);
     assert.equal(fake.state.bodies[0].context.send_options, undefined);
     assert.equal(h.rt.sendItemConfirmed(), false);
   });
