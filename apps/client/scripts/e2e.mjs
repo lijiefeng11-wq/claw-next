@@ -307,6 +307,32 @@ try {
     await page.locator("#shop-list").getByText("演示店铺").click();
     await detail.getByRole("heading", { name: "演示店铺" }).waitFor();
   });
+  await step("客户端设置：打包版 Mac 不在“应用程序”文件夹运行时，开机自启 / 崩溃重启不可修改并说明原因", async () => {
+    // 推送虚构的启动设置状态（开发运行的真实状态是“不支持”，提示文字不同，可据此识别被真实状态覆盖后重推）。
+    const expectSettings = async (startup, want) => {
+      const state = { ...fakeBase, app: { ...fakeBase.app, startup: { supported: true, platform: "darwin", launch_at_login: true, restart_on_crash: false, managed: false, ...startup } } };
+      for (let i = 0; i < 5; i++) {
+        await pushState(state);
+        const ok = await page
+          .waitForFunction(
+            (want) => {
+              const box = document.querySelector("#app-settings");
+              const hint = box?.querySelector(".hint");
+              const boxes = [...(box?.querySelectorAll("input[type=checkbox]") ?? [])];
+              if (!hint || boxes.length !== 2 || !hint.textContent.includes(want.hint)) return false;
+              return boxes.every((b) => b.disabled === want.disabled) && hint.classList.contains("error-text") === want.error;
+            },
+            want,
+            { timeout: 1000, polling: 50 },
+          )
+          .then(() => true, () => false);
+        if (ok) return;
+      }
+      throw new Error(`客户端设置不符合预期：${JSON.stringify(want)}`);
+    };
+    await expectSettings({ location_ok: false }, { hint: "拖进“应用程序”文件夹", disabled: true, error: true });
+    await expectSettings({ location_ok: true }, { hint: "开机自启：登录", disabled: false, error: false });
+  });
   await step("弹窗清理脚本（虚构页面）：自动只关引导/活动浮层；人工清理多关普通对话框；违规提醒（含按钮在内层定位容器）、含输入框的对话框与聊天区不碰", async () => {
     const html = `<!doctype html><meta charset="utf-8"><body style="margin:0;font:14px sans-serif">
       <div class="app-root" style="position:fixed;inset:0;z-index:1">

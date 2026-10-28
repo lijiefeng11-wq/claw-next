@@ -1,6 +1,6 @@
 import { ClientWindow } from "./clientWindow.js";
 import { PlatformWorkspace } from "./platformWorkspace.js";
-import { IpcMainInvokeEvent, Notification, app, dialog, ipcMain, screen, session } from "electron";
+import { IpcMainInvokeEvent, Notification, app, dialog, ipcMain, screen, session, shell } from "electron";
 import { shopAlert, type ShopAlert } from "../core/pageHealth.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -354,6 +354,7 @@ class Controller {
         return this.state();
       case "app:setStartup": {
         if (!startup.supported()) throw new IpcValidationError("startup_unsupported");
+        if (!startup.locationOk()) throw new IpcValidationError("startup_needs_applications");
         let r: { needsHandover: boolean };
         try {
           r = startup.apply({ launch_at_login: p.launch_at_login, restart_on_crash: p.restart_on_crash });
@@ -586,13 +587,46 @@ async function devAutoConnect(configPath: string) {
   controller.push();
 }
 
+/**
+ * 提示把客户端移到“应用程序”文件夹。不替用户移动：程序复制的副本仍可能带隔离标记、再次被系统放到临时位置，
+ * 只有用户在访达里亲自拖动才可靠。返回 true 表示用户选择退出去移动（已打开“应用程序”文件夹）。
+ */
+async function askMoveToApplications(): Promise<boolean> {
+  const choice = await dialog.showMessageBox({
+    type: "warning",
+    buttons: ["退出，去移动", "继续使用"],
+    defaultId: 0,
+    cancelId: 1,
+    message: "请把客户端拖到“应用程序”文件夹后再打开",
+    detail:
+      "当前客户端不在“应用程序”文件夹里（例如在“下载”里解压后直接打开）。这样运行时系统会把它放在临时位置，退出或重启后就失效：开机自启、崩溃后自动重启都不会生效，“应用程序”里的旧版本也不会更新。\n\n" +
+      "做法：退出客户端 → 在访达里把解压出来的 Claw-Next-Client 拖进“应用程序”文件夹（提示已有同名应用时选“替换”）→ 从“应用程序”或启动台打开。\n\n" +
+      "选“继续使用”可以照常使用，但这次不能保存开机自启和崩溃重启设置。",
+  });
+  if (choice.response !== 0) {
+    console.log("startup move to Applications postponed");
+    return false;
+  }
+  await shell.openPath("/Applications").catch(() => "");
+  return true;
+}
+
 app.whenReady().then(async () => {
   if (!gotLock) return;
   if (!SMOKE) {
     const decision = startupDecision({ packaged: app.isPackaged, platform: process.platform, settings: startup.store.get(), argv: process.argv });
+    const manual = !(decision.action === "run" && decision.automatic);
     // 手动打开代表用户已经介入：清空重启预算，否则预算耗尽后手动打开也会在交接后被拒。
-    if (app.isPackaged && !(decision.action === "run" && decision.automatic)) startup.budget.reset();
-    if (decision.action === "handover" && !process.argv.includes(ARG_NO_HANDOVER)) {
+    if (app.isPackaged && manual) startup.budget.reset();
+    // Mac：不在“应用程序”文件夹里运行（例如在“下载”里解压后直接打开）时，程序路径写不进系统任务：
+    // 提示用户移过去；选择继续使用则照常运行，但不交接、不改系统任务（syncAtManualStart / apply 也会拒绝）。
+    if (app.isPackaged && manual && !startup.locationOk()) {
+      console.log(`startup app not in Applications folder translocated=${startup.translocated()}`);
+      if (await askMoveToApplications()) {
+        app.quit();
+        return;
+      }
+    } else if (decision.action === "handover" && !process.argv.includes(ARG_NO_HANDOVER)) {
       startup.handover(decision.to);
       return;
     }

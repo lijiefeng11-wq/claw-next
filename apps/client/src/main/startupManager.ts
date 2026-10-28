@@ -12,10 +12,11 @@ import {
   handoverScript,
   launchAgentLocation,
   launchAgentPlist,
+  stableAppLocation,
   startupSupported,
 } from "../core/startup.js";
 
-export type StartupView = { supported: boolean; platform: NodeJS.Platform; launch_at_login: boolean; restart_on_crash: boolean; managed: boolean };
+export type StartupView = { supported: boolean; platform: NodeJS.Platform; launch_at_login: boolean; restart_on_crash: boolean; managed: boolean; location_ok: boolean };
 
 /**
  * 开机自启与崩溃重启的系统操作（只在打包版、macOS / Windows 上生效）。
@@ -45,9 +46,24 @@ export class StartupManager {
     return startupSupported(app.isPackaged, process.platform);
   }
 
+  /** 程序路径能否写进系统任务（见 stableAppLocation）。读不到时按不能处理。 */
+  locationOk(): boolean {
+    try {
+      return stableAppLocation({ platform: process.platform, execPath: process.execPath, inApplications: process.platform === "darwin" ? app.isInApplicationsFolder() : true });
+    } catch {
+      return false;
+    }
+  }
+
+  /** 是否运行在系统临时位置（在“下载”等位置解压后直接打开）。只用于日志。 */
+  translocated(): boolean {
+    return process.execPath.includes("/AppTranslocation/");
+  }
+
   view(): StartupView {
     const s = this.store.get();
-    return { supported: this.supported(), platform: process.platform, launch_at_login: s.launch_at_login, restart_on_crash: s.restart_on_crash, managed: this.managed };
+    const supported = this.supported();
+    return { supported, platform: process.platform, launch_at_login: s.launch_at_login, restart_on_crash: s.restart_on_crash, managed: this.managed, location_ok: !supported || this.locationOk() };
   }
 
   private settingsFile() {
@@ -91,6 +107,8 @@ export class StartupManager {
   /** 非托管启动时把系统状态与设置对齐：卸载可能残留的旧任务并重写任务文件（交接或下次登录时再加载）。 */
   syncAtManualStart() {
     if (!this.supported() || this.managed || process.platform !== "darwin") return;
+    // 程序路径不长期有效时不动系统任务：既不卸载也不改写，避免把临时路径写进去。
+    if (!this.locationOk()) return;
     this.bootout();
     this.writeTaskFiles(this.store.get());
   }
@@ -98,6 +116,7 @@ export class StartupManager {
   /** 保存设置并同步到系统。返回是否需要交接（开启崩溃重启、而本进程不是托管启动的）。 */
   apply(next: StartupSettings): { needsHandover: boolean } {
     if (!this.supported()) throw new Error("startup_unsupported");
+    if (!this.locationOk()) throw new Error("startup_needs_applications");
     const prev = this.store.get();
     this.store.set(next);
     if (next.restart_on_crash && !prev.restart_on_crash) this.budget.reset();
@@ -117,6 +136,11 @@ export class StartupManager {
    */
   handover(to: "launch_agent" | "supervisor") {
     if (to === "launch_agent") {
+      // 调用方已检查；这里再挡一次：不把临时路径写进系统任务。
+      if (!this.locationOk()) {
+        console.log("startup handover skipped: app not in Applications folder");
+        return;
+      }
       const s = this.store.get();
       this.writeTaskFiles(s);
       const where = launchAgentLocation(s);
