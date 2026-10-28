@@ -241,51 +241,69 @@ try {
     await detail.getByRole("heading", { name: "演示店铺" }).waitFor();
   });
   // 在主进程开一个虚构页面窗口（data: 页面，不联网），执行与客户端相同的弹窗清理脚本。
-  // 平台页面开着 / 已关闭（退出登录后适配器仍在、状态里没有 page）时操作栏的按钮。
-  // 不打开拼多多页面：从主进程向界面推送虚构的店铺状态（与后台推送状态走同一通道），只看界面如何呈现。
+  // 平台页面开着 / 已关闭 / 离开会话页时操作栏的按钮。不打开拼多多页面：从主进程向界面推送虚构的店铺状态
+  // （与后台推送状态走同一通道），只看界面如何呈现。每次推送带唯一标记（显示在“平台”状态标签的悬停提示里），
+  // 界面每 5 秒会取一次真实状态覆盖推送的虚构状态：在同一次页面求值里核对“标记在场 + 按钮符合预期 + 操作栏没有超出窗口”，
+  // 被覆盖就重推（最多 5 次）。
+  let fakeSeq = 0;
+  let fakeBase = null;
+  const fakePlatform = (platform) => {
+    const marker = `虚构平台页面状态-${++fakeSeq}`;
+    const state = { ...fakeBase, shops: fakeBase.shops.map((s) => (s.config.shop_id === "demo-pdd" ? { ...s, platform: { logged_in: false, detail: marker, ...platform } } : s)) };
+    return { state, marker };
+  };
+  const pushState = (state) =>
+    electronApp.evaluate(({ webContents }, state) => {
+      for (const wc of webContents.getAllWebContents()) if (wc.getURL().endsWith("/renderer/index.html")) wc.send("state:changed", state);
+    }, state);
+  const expectBar = async ({ state, marker }, want) => {
+    for (let i = 0; i < 5; i++) {
+      await pushState(state);
+      const ok = await page
+        .waitForFunction(
+          ([marker, want]) => {
+            const detailEl = document.querySelector("#detail");
+            const bar = document.querySelector("#detail .pbar");
+            if (!bar || ![...bar.querySelectorAll(".pill[title]")].some((p) => p.getAttribute("title").includes(marker))) return false;
+            const buttons = [...bar.querySelectorAll("button")];
+            const byLabel = (l) => buttons.find((b) => b.textContent.trim() === l);
+            if (!(want.present ?? []).every((l) => byLabel(l))) return false;
+            if ((want.absent ?? []).some((l) => byLabel(l))) return false;
+            if (!(want.enabled ?? []).every((l) => byLabel(l) && !byLabel(l).disabled)) return false;
+            if (!(want.disabled ?? []).every((l) => byLabel(l) && byLabel(l).disabled)) return false;
+            // 操作栏不能超出窗口：按钮右边缘都在工作区内（放不下时应换行，而不是被截断）。
+            const right = detailEl.getBoundingClientRect().right;
+            return buttons.every((b) => b.getBoundingClientRect().right <= right + 1);
+          },
+          [marker, want],
+          { timeout: 1000, polling: 50 },
+        )
+        .then(() => true, () => false);
+      if (ok) return;
+    }
+    throw new Error(`推送 ${marker} 后操作栏不符合预期：${JSON.stringify(want)}`);
+  };
+  const LOGIN = "打开本店工作台 / 登录", SWEEP = "清理弹窗", BACK = "← 后退", CHAT = "回到会话";
+  const OPEN = { page: { state: "ok", gave_up: false } };
   await step("拼多多店铺：页面开着显示“清理弹窗”；退出登录后（页面已关闭）重新显示“打开本店工作台 / 登录”", async () => {
     await page.locator("#shop-list").getByText("虚构拼多多店").click();
     await detail.locator(".pbar h2", { hasText: "虚构拼多多店" }).waitFor();
-    const base = (await page.evaluate(() => window.clawNext.invoke("state:get"))).data;
-    // 每次推送带唯一标记（显示在“平台”状态标签的悬停提示里），用来确认界面呈现的正是这次推送的状态。
-    let seq = 0;
-    const withPage = (open) => {
-      const marker = `虚构平台页面状态-${++seq}`;
-      const state = {
-        ...base,
-        shops: base.shops.map((s) => (s.config.shop_id === "demo-pdd" ? { ...s, platform: { logged_in: false, detail: marker, ...(open ? { page: { state: "ok", gave_up: false } } : {}) } } : s)),
-      };
-      return { state, marker };
-    };
-    const push = (state) =>
-      electronApp.evaluate(({ webContents }, state) => {
-        for (const wc of webContents.getAllWebContents()) if (wc.getURL().endsWith("/renderer/index.html")) wc.send("state:changed", state);
-      }, state);
-    // 界面每 5 秒会取一次真实状态覆盖推送的虚构状态：在同一次页面求值里核对“标记在场 + 应有按钮在、另一个不在”，
-    // 被覆盖就重推（最多 5 次）。
-    const expectAfter = async ({ state, marker }, shown, hidden) => {
-      for (let i = 0; i < 5; i++) {
-        await push(state);
-        const ok = await page
-          .waitForFunction(
-            ([marker, shown, hidden]) => {
-              const bar = document.querySelector("#detail .pbar");
-              if (!bar || ![...bar.querySelectorAll(".pill[title]")].some((p) => p.getAttribute("title").includes(marker))) return false;
-              const labels = [...bar.querySelectorAll("button")].map((b) => b.textContent.trim());
-              return labels.includes(shown) && !labels.includes(hidden);
-            },
-            [marker, shown, hidden],
-            { timeout: 1000, polling: 50 },
-          )
-          .then(() => true, () => false);
-        if (ok) return;
-      }
-      throw new Error(`推送 ${marker} 后操作栏应显示“${shown}”、不显示“${hidden}”`);
-    };
-    const login = "打开本店工作台 / 登录", sweep = "清理弹窗";
-    await expectAfter(withPage(true), sweep, login); // 打开
-    await expectAfter(withPage(false), login, sweep); // 退出登录：适配器仍在、页面已关闭
-    await expectAfter(withPage(true), sweep, login); // 从工作台重新打开
+    fakeBase = (await page.evaluate(() => window.clawNext.invoke("state:get"))).data;
+    await expectBar(fakePlatform({ ...OPEN, nav: { on_chat: true, can_go_back: false } }), { present: [SWEEP], absent: [LOGIN, BACK, CHAT] }); // 打开
+    await expectBar(fakePlatform({}), { present: [LOGIN], absent: [SWEEP, BACK, CHAT] }); // 退出登录：适配器仍在、页面已关闭
+    await expectBar(fakePlatform({ ...OPEN, nav: { on_chat: true, can_go_back: false } }), { present: [SWEEP], absent: [LOGIN] }); // 从工作台重新打开
+  });
+  await step("拼多多店铺：离开会话页时显示“后退 / 回到会话”，在会话页或页面关闭时不显示；最小窗口宽度下操作栏不超出窗口", async () => {
+    const resize = (w, h) => electronApp.evaluate(({ BaseWindow }, [w, h]) => { const win = BaseWindow.getAllWindows().find((x) => !x.isDestroyed()); const before = win.getSize(); win.setSize(w, h); return before; }, [w, h]);
+    const before = await resize(1100, 760); // 主窗口最小宽度
+    await expectBar(fakePlatform({ ...OPEN, nav: { on_chat: false, can_go_back: true } }), { present: [CHAT], enabled: [BACK] });
+    await shot(page, "6-platform-nav-min-width");
+    await resize(...before);
+    await expectBar(fakePlatform({ ...OPEN, nav: { on_chat: false, can_go_back: true } }), { present: [CHAT], enabled: [BACK] });
+    await shot(page, "6-platform-nav");
+    await expectBar(fakePlatform({ ...OPEN, nav: { on_chat: false, can_go_back: false } }), { present: [CHAT], disabled: [BACK] }); // 上一页是登录页或没有记录
+    await expectBar(fakePlatform({ ...OPEN, nav: { on_chat: true, can_go_back: false } }), { present: [SWEEP], absent: [BACK, CHAT] }); // 已回到会话页
+    await expectBar(fakePlatform({ nav: { on_chat: false, can_go_back: true } }), { present: [LOGIN], absent: [BACK, CHAT] }); // 页面已关闭
     await page.locator("#shop-list").getByText("演示店铺").click();
     await detail.getByRole("heading", { name: "演示店铺" }).waitFor();
   });

@@ -31,6 +31,18 @@ test("清理弹窗只接受店铺编号", () => {
   assert.throws(() => validateIpc("shop:dismissPopups", { shop_id: "fixture-a", mode: "all" }), /unexpected_field/);
 });
 
+test("平台页面导航只接受店铺编号与 back / chat", () => {
+  for (const action of ["back", "chat"]) {
+    assert.deepEqual(validateIpc("shop:platformNav", { shop_id: "fixture-a", action }), { channel: "shop:platformNav", shop_id: "fixture-a", action });
+  }
+  for (const action of ["forward", "reload", "url", "", null, 1, "https://mms.pinduoduo.com/x"]) {
+    assert.throws(() => validateIpc("shop:platformNav", { shop_id: "fixture-a", action }), /invalid_nav_action/);
+  }
+  assert.throws(() => validateIpc("shop:platformNav", { shop_id: "../x", action: "back" }), /invalid_shop_id/);
+  assert.throws(() => validateIpc("shop:platformNav", { shop_id: "fixture-a" }));
+  assert.throws(() => validateIpc("shop:platformNav", { shop_id: "fixture-a", action: "chat", url: "https://mms.pinduoduo.com/x" }), /unexpected_field/);
+});
+
 test("渲染页面的缩放档位与主进程一致", () => {
   const src = fs.readFileSync(path.join(__dirname, "..", "..", "src", "renderer", "app.ts"), "utf8");
   const m = /const ZOOM_LEVELS = \[([^\]]+)\]/.exec(src);

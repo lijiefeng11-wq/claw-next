@@ -17,7 +17,7 @@
     conversations: Conv[];
   };
   type ShopConfig = { shop_id: string; display_name: string; backend_url: string; platform_shop_id: string; adapter: "mock" | "pdd"; mode: string };
-  type ShopEntry = { config: ShopConfig; token_set: boolean; running: boolean; error: string | null; platform: { logged_in: boolean; detail: string; page?: { state: string; gave_up: boolean } } | null; alert: { level: "error" | "warn"; text: string } | null; view: View | null };
+  type ShopEntry = { config: ShopConfig; token_set: boolean; running: boolean; error: string | null; platform: { logged_in: boolean; detail: string; page?: { state: string; gave_up: boolean }; nav?: { on_chat: boolean; can_go_back: boolean } } | null; alert: { level: "error" | "warn"; text: string } | null; view: View | null };
   type Startup = { supported: boolean; platform: string; launch_at_login: boolean; restart_on_crash: boolean; managed: boolean };
   type AppState = { app: { secure_storage: boolean; startup?: Startup }; shops: ShopEntry[] };
   type Bridge = { invoke(channel: string, payload?: unknown): Promise<{ ok: boolean; data?: AppState; error?: string }>; onState(cb: (s: AppState) => void): () => void };
@@ -44,6 +44,7 @@
     conversation_required: "请先选择一个对话",
     platform_window_closed: "本店平台页面未打开",
     pdd_send_busy: "本店正在发送，请稍后再试",
+    platform_no_history: "平台页面没有可以后退的记录",
     not_platform_shop: "只有拼多多店铺有平台工作台",
     startup_unsupported: "开机自启与崩溃重启只在打包后的 Mac / Windows 应用中可用",
     startup_apply_failed: "保存启动设置失败，请查看客户端日志",
@@ -300,6 +301,8 @@
     const v = entry.view;
     // 平台页面是否真的开着：退出登录、页面关闭后适配器仍在，但状态里没有 page。
     const pageOpen = !!entry.platform?.page;
+    // 离开会话页（点进售后、订单等页面）时才显示“后退 / 回到会话”：在会话页后退可能退回登录页。
+    const offChat = pageOpen && entry.platform?.nav && !entry.platform.nav.on_chat ? entry.platform.nav : undefined;
     return h(
       "div",
       { class: "pbar" },
@@ -307,6 +310,13 @@
       renderPills(entry),
       modeButtons(entry, true),
       workspaceTabs(entry, true) ?? "",
+      // 后退一步，或直接回到会话页（离开会话页时收不到新消息）。
+      offChat
+        ? h("button", { class: "btn secondary small", type: "button", text: "← 后退", title: "平台页面后退一步", disabled: !offChat.can_go_back, onclick: () => call("shop:platformNav", { shop_id: id, action: "back" }) })
+        : null,
+      offChat
+        ? h("button", { class: "btn small attention", type: "button", text: "回到会话", title: "回到拼多多会话页。离开会话页时收不到新消息，约 30 秒后也会自动返回。", onclick: () => call("shop:platformNav", { shop_id: id, action: "chat" }) })
+        : null,
       h("span", { class: "spacer" }),
       zoomControl(),
       pageOpen

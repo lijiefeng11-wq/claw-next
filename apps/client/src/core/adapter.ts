@@ -12,7 +12,13 @@ export type PlatformStatus = {
   detail: string;
   /** 平台页面生命周期状态（仅真实平台页面存在时提供）。 */
   page?: PageHealthView;
+  /** 平台页面导航状态（仅真实平台页面存在时提供）：是否停在会话页、能否后退。 */
+  nav?: PlatformNav;
 };
+
+export type PlatformNav = { on_chat: boolean; can_go_back: boolean };
+/** 人工导航平台页面：back 后退一步，chat 回到会话页。 */
+export type PlatformNavAction = "back" | "chat";
 
 export type PlatformMessage = {
   conversation_id: string;
@@ -110,6 +116,8 @@ export interface PlatformAdapter {
   sendOptionsSettled?(conversationId: string, timeoutMs: number): Promise<void>;
   /** 人工重新加载平台页面；返回阻止原因，成功为 null。 */
   reloadPage?(): string | null;
+  /** 人工导航平台页面（后退一步 / 回到会话页）；返回阻止原因，成功为 null。发送进行中不导航。 */
+  navigatePlatform?(action: PlatformNavAction): string | null;
   /** 人工“清理弹窗”：关闭平台页面上的引导 / 广告浮层（不发送、不碰聊天输入区）。返回关闭个数或阻止原因。 */
   dismissPopups?(): Promise<{ dismissed: number } | { blocked: string }>;
   /**

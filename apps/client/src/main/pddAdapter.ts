@@ -1,7 +1,7 @@
 import { session } from "electron";
 import fs from "node:fs";
 import path from "node:path";
-import type { AdapterEvent, HistoryLoad, HistoryResult, ImageFetchResult, PlatformAdapter, PlatformStatus, SendItemRequest, SendRequest, SendResult } from "../core/adapter.js";
+import type { AdapterEvent, HistoryLoad, HistoryResult, ImageFetchResult, PlatformAdapter, PlatformNav, PlatformNavAction, PlatformStatus, SendItemRequest, SendRequest, SendResult } from "../core/adapter.js";
 import { buyerFromListKey, decideOutgoing, parseChatList, parseCustomServiceInfo, parseRealtimeUserInfo, parseSendRequest, parseSendResponse } from "../core/pddParse.js";
 import { PddOrderBook } from "../core/pddOrders.js";
 import { PddSessionTracker } from "../core/pddSession.js";
@@ -505,6 +505,8 @@ export class PddPageAdapter implements PlatformAdapter {
   private openFailures = new Map<string, { count: number; until: number }>();
   private reloadAt = 0;
   private offChatSince = 0;
+  /** 最近一次通知界面的平台页面导航状态（noteNav 去重用）。 */
+  private navKey = "";
   private lastSummary = "";
   private recentRequests: { at: number; req: string }[] = [];
   private readonly orders = new PddOrderBook((buyer, orders) => {
@@ -934,7 +936,56 @@ export class PddPageAdapter implements PlatformAdapter {
     const page = this.health.view();
     // 页面异常时以页面状态为准，避免显示“等待登录”掩盖崩溃或无响应。
     const abnormal = page.gave_up || (page.state !== "ok" && page.state !== "loading");
-    return { ...base, detail: abnormal ? page.detail : base.detail, page };
+    return { ...base, detail: abnormal ? page.detail : base.detail, page, nav: this.navState(this.window) };
+  }
+
+  /**
+   * 平台页面是否停在会话页、能否后退（读不到时按“不在会话页、不能后退”处理）。
+   * 只在离开会话页时允许后退，且上一条记录须是平台页面、不是登录页：退回登录页会被当成退出登录。
+   */
+  private navState(win: PlatformPage): PlatformNav {
+    try {
+      if (win.isDestroyed()) return { on_chat: false, can_go_back: false };
+      const wc = win.webContents;
+      const onChat = wc.getURL().startsWith(LOGIN_URL);
+      if (onChat) return { on_chat: true, can_go_back: false };
+      const history = wc.navigationHistory;
+      const index = history.getActiveIndex();
+      const prev = index > 0 ? (history.getEntryAtIndex(index - 1)?.url ?? "") : "";
+      return { on_chat: false, can_go_back: isAllowedPlatformUrl(prev) && !isLoginPage(prev) };
+    } catch {
+      return { on_chat: false, can_go_back: false };
+    }
+  }
+
+  /** 页面导航后：会话页 / 能否后退有变化时通知界面刷新“后退 / 回到会话”按钮；同一状态不重复通知。 */
+  private noteNav(win: PlatformPage) {
+    if (this.window !== win) return;
+    const key = JSON.stringify(this.navState(win));
+    if (key === this.navKey) return;
+    this.navKey = key;
+    this.emit({ type: "status" });
+  }
+
+  /**
+   * 人工导航平台页面：back 后退一步（不满足 navState 的后退条件时拒绝），chat 回到会话页（已在会话页时不重载）。
+   * 发送或待确认发送进行中（sending / outgoing）拒绝；导航使页面代次失效，未执行的点击按页面已变化放弃。
+   */
+  navigatePlatform(action: PlatformNavAction): string | null {
+    const win = this.window;
+    if (!win || win.isDestroyed()) return "platform_window_closed";
+    if (this.sending || this.outgoing) return "pdd_send_busy";
+    const nav = this.navState(win);
+    if (action === "back" && !nav.can_go_back) return "platform_no_history";
+    if (action === "chat" && nav.on_chat) return null;
+    this.watchEpoch++;
+    this.lastActiveUid = null;
+    this.offChatSince = 0;
+    console.log(`[${this.shopId}] platform navigate: ${action}`);
+    this.enableNetwork(win);
+    if (action === "back") win.webContents.navigationHistory.goBack();
+    else void win.loadURL(LOGIN_URL).catch(() => undefined);
+    return null;
   }
 
   /**
@@ -1032,6 +1083,7 @@ export class PddPageAdapter implements PlatformAdapter {
     });
     const onNavigate = (_e: unknown, url: string) => {
       if (isLoginPage(url)) this.tracker.end("platform_logged_out");
+      this.noteNav(win);
     };
     win.webContents.on("did-navigate", onNavigate);
     win.webContents.on("did-navigate-in-page", onNavigate);
@@ -1066,6 +1118,7 @@ export class PddPageAdapter implements PlatformAdapter {
       this.emit({ type: "status" });
     });
     this.window = win;
+    this.navKey = "";
     this.emit({ type: "status" });
     await win.loadURL(LOGIN_URL).catch(() => undefined);
   }
