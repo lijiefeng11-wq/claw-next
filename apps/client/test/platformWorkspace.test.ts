@@ -6,6 +6,10 @@ import { test } from "node:test";
 class FakeWc extends EventEmitter {
   destroyed = false;
   closes = 0;
+  zoom = 1;
+  zoomSets = 0;
+  getZoomFactor() { return this.zoom; }
+  setZoomFactor(z: number) { this.zoom = z; this.zoomSets++; }
   isDestroyed() { return this.destroyed; }
   async loadURL(_url: string) {}
   close(options: unknown) { assert.deepEqual(options, { waitForBeforeUnload: false }); this.closes++; this.destroyed = true; this.emit("destroyed"); }
@@ -117,4 +121,32 @@ test("宿主退出显式关闭全部页面且释放监听和保活", () => {
   assert.equal(a.isDestroyed(), true); assert.equal(b.isDestroyed(), true);
   assert.equal(started.size, 0); assert.equal(owner.listenerCount("resize"), 0);
   assert.throws(() => ws.create("shop-c"), /workspace_disposed/);
+});
+
+test("页面缩放只作用于显示中的平台页；变化时通知适配器，导航后按当前比例重新应用", () => {
+  const { owner, ws } = setup();
+  const a = ws.create("shop-a"), b = ws.create("shop-b"); let resizedA = 0, resizedB = 0;
+  a.on("resized", () => resizedA++); b.on("resized", () => resizedB++);
+  const wcA = a.webContents as unknown as FakeWc, wcB = b.webContents as unknown as FakeWc;
+  ws.present("shop-a", bounds, 0.8);
+  assert.equal(wcA.zoom, 0.8); assert.equal(wcB.zoom, 1);
+  assert.equal(resizedA, 1);
+  // 同尺寸、同比例再次显示不重复设置、不再通知。
+  ws.present("shop-a", bounds, 0.8);
+  assert.equal(wcA.zoomSets, 1); assert.equal(resizedA, 1);
+  // 只改比例（尺寸不变）也要通知：页面布局已变化，未执行的坐标点击须放弃。
+  ws.present("shop-a", bounds, 0.9);
+  assert.equal(wcA.zoom, 0.9); assert.equal(resizedA, 2);
+  // 切店：新显示的页面随之应用当前比例。
+  ws.present("shop-b", bounds, 0.9);
+  assert.equal(wcB.zoom, 0.9); assert.equal(resizedB, 1);
+  // 窗口尺寸变化沿用上次比例；跨站导航后页面比例被重置，导航完成即重新应用。
+  owner.emit("resize");
+  assert.equal(wcB.zoom, 0.9);
+  wcB.zoom = 1; wcB.emit("did-navigate");
+  assert.equal(wcB.zoom, 0.9); assert.equal(resizedB, 2);
+  // 超出范围的比例忽略，保持上次有效值。
+  ws.present("shop-b", bounds, 3);
+  assert.equal(wcB.zoom, 0.9);
+  ws.dispose();
 });

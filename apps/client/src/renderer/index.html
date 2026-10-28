@@ -13,9 +13,12 @@
     </header>
     <div class="layout">
       <aside class="sidebar">
-        <div class="sidebar-title">店铺</div>
+        <div class="sidebar-head">
+          <div class="sidebar-title">店铺</div>
+          <button id="sidebar-toggle" class="icon-btn" type="button" title="收起店铺栏" aria-label="收起店铺栏">«</button>
+        </div>
         <ul id="shop-list" class="shop-list"></ul>
-        <button id="add-shop" class="btn secondary block" type="button">＋ 添加店铺</button>
+        <button id="add-shop" class="btn secondary block" type="button" title="添加店铺">＋<span class="label"> 添加店铺</span></button>
         <div id="storage-note" class="hint"></div>
         <div id="app-settings" class="app-settings"></div>
       </aside>

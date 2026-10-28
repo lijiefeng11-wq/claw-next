@@ -16,6 +16,8 @@ export class PlatformWorkspace {
   private readonly slots = new Map<string, Slot>();
   private selected: string | null = null;
   private requested: WorkspaceBounds | null = null;
+  /** 选中平台页的缩放比例（渲染页面“页面缩放”）；只作用于正在显示的页面，切店时随之应用。 */
+  private zoom = 1;
   private blocker: number | null = null;
   private disposed = false;
   private readonly resize = () => this.present(this.selected, this.requested);
@@ -46,13 +48,17 @@ export class PlatformWorkspace {
     };
     this.slots.set(shopId, slot);
     wc.once("destroyed", () => this.release(shopId, slot));
+    // 跨站导航后 Chromium 按新站点恢复缩放；导航完成后重新应用当前比例。
+    wc.on("did-navigate", this.resize);
+    wc.on("did-finish-load", this.resize);
     if (this.blocker === null) this.blocker = powerSaveBlocker.start("prevent-app-suspension");
     this.resize();
     return slot.page;
   }
 
-  present(shopId: string | null, bounds: WorkspaceBounds | null): void {
+  present(shopId: string | null, bounds: WorkspaceBounds | null, zoom: number = this.zoom): void {
     if (this.disposed || this.owner.isDestroyed()) return;
+    if (Number.isFinite(zoom) && zoom >= 0.5 && zoom <= 1.5) this.zoom = zoom;
     this.selected = shopId;
     this.requested = bounds ? { ...bounds } : null;
     const [width, height] = this.owner.getContentSize();
@@ -68,8 +74,20 @@ export class PlatformWorkspace {
     if (selected && rect && !selected.closed && !selected.wc.isDestroyed()) {
       const before = selected.view.getBounds();
       selected.view.setBounds(rect);
-      if (before.width !== rect.width || before.height !== rect.height) for (const listener of selected.resized) listener();
+      const zoomed = this.applyZoom(selected);
+      // 尺寸或缩放变化都会改变页面布局：通知适配器使页面代次失效，未执行的坐标点击按页面已变化放弃。
+      if (zoomed || before.width !== rect.width || before.height !== rect.height) for (const listener of selected.resized) listener();
       this.owner.contentView.addChildView(selected.view);
+    }
+  }
+
+  private applyZoom(slot: Slot): boolean {
+    try {
+      if (Math.abs(slot.wc.getZoomFactor() - this.zoom) < 0.001) return false;
+      slot.wc.setZoomFactor(this.zoom);
+      return true;
+    } catch {
+      return false;
     }
   }
 

@@ -44,6 +44,7 @@
     conversation_required: "请先选择一个对话",
     platform_window_closed: "本店平台页面未打开",
     pdd_send_busy: "本店正在发送，请稍后再试",
+    not_platform_shop: "只有拼多多店铺有平台工作台",
     startup_unsupported: "开机自启与崩溃重启只在打包后的 Mac / Windows 应用中可用",
     startup_apply_failed: "保存启动设置失败，请查看客户端日志",
   };
@@ -80,6 +81,43 @@
     setTimeout(() => (t.hidden = true), 4000);
   }
 
+  // 本机界面偏好（店铺栏收起、平台页面缩放）：只存在本机浏览器存储，读写失败就用默认值。
+  function loadPref(key: string): string | null {
+    try {
+      return localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  }
+  function savePref(key: string, value: string) {
+    try {
+      localStorage.setItem(key, value);
+    } catch {
+      /* 偏好只是便利，保存失败不影响使用 */
+    }
+  }
+
+  /** 平台页面可选的缩放比例，须与主进程 PLATFORM_ZOOM_LEVELS 一致（主进程再次校验）。 */
+  const ZOOM_LEVELS = [0.67, 0.75, 0.8, 0.9, 1];
+  /** 自动适配：平台聊天页约按 1400 像素宽排版时右侧面板才能完整显示；区域不够宽就按比例缩小。 */
+  const FIT_WIDTH = 1400;
+  let zoomChoice: "auto" | number = (() => {
+    const v = Number(loadPref("claw.platformZoom"));
+    return ZOOM_LEVELS.includes(v) ? v : "auto";
+  })();
+  let areaWidth = 0;
+  function zoomFor(width: number): number {
+    if (zoomChoice !== "auto") return zoomChoice;
+    const want = width / FIT_WIDTH;
+    return [...ZOOM_LEVELS].reverse().find((z) => z <= want + 0.001) ?? ZOOM_LEVELS[0];
+  }
+  function setZoom(choice: "auto" | number) {
+    zoomChoice = choice;
+    savePref("claw.platformZoom", String(choice));
+    lastPresentation = "";
+    render();
+  }
+
   async function call(channel: string, payload?: unknown): Promise<boolean> {
     const r = await bridge.invoke(channel, payload);
     if (!r.ok) {
@@ -113,6 +151,7 @@
           h(
             "button",
             { class: `shop-item${s.config.shop_id === selected ? " active" : ""}${s.alert ? ` alert ${s.alert.level}` : ""}`, type: "button", onclick: () => select(s.config.shop_id) },
+            h("span", { class: "initial", title: s.config.display_name }, h("span", { class: `dot ${s.alert ? s.alert.level : s.running && v?.backend.state === "ok" && v.platform.logged_in ? "ok" : ""}` }), s.config.display_name.slice(0, 2)),
             h("span", { class: "name" }, s.alert ? h("span", { class: `dot ${s.alert.level}` }) : null, s.config.display_name),
             h("span", { class: "sub", text: `${s.config.adapter === "mock" ? "模拟 · " : ""}${sub}` }),
           ),
@@ -166,32 +205,45 @@
     return h("div", { class: "card" }, h("h3", { text: title }), h("div", { class: "value" }, h("span", { class: `dot ${tone}` }), value), h("div", { class: "detail-text", text: detail }));
   }
 
-  function renderStatus(entry: ShopEntry): HTMLElement {
+  type Tone = "ok" | "warn" | "error" | "";
+  type StatusItem = [title: string, tone: Tone, value: string, detail: string];
+
+  function statusItems(entry: ShopEntry): StatusItem[] {
     const v = entry.view;
     if (!v) {
-      return h(
-        "div",
-        { class: "status-grid" },
-        statusCard("后台连接", "", "未连接", entry.error ?? "点击“连接后台”开始"),
-        statusCard("平台连接", "", entry.platform?.logged_in ? "已登录" : "未登录", entry.platform?.detail ?? (entry.config.adapter === "pdd" ? "可直接打开平台登录窗口" : "需先连接后台")),
-        statusCard("店铺身份", "", "未核验", `期望平台店铺：${entry.config.platform_shop_id}`),
-        statusCard("发送归属", "", "无", "未持有发送归属，不会发送"),
-      );
+      return [
+        ["后台连接", "", "未连接", entry.error ?? "点击“连接后台”开始"],
+        ["平台连接", "", entry.platform?.logged_in ? "已登录" : "未登录", entry.platform?.detail ?? (entry.config.adapter === "pdd" ? "可直接打开平台登录窗口" : "需先连接后台")],
+        ["店铺身份", "", "未核验", `期望平台店铺：${entry.config.platform_shop_id}`],
+        ["发送归属", "", "无", "未持有发送归属，不会发送"],
+      ];
     }
-    const backendTone = v.backend.state === "ok" ? "ok" : v.backend.state === "connecting" ? "warn" : "error";
+    const backendTone: Tone = v.backend.state === "ok" ? "ok" : v.backend.state === "connecting" ? "warn" : "error";
     const backendValue = v.backend.state === "ok" ? "已连接" : v.backend.state === "connecting" ? "连接中" : "不可用";
     const identity = v.platform.identity;
-    const idTone = !identity ? "warn" : v.platform.identity_ok ? "ok" : "error";
+    const idTone: Tone = !identity ? "warn" : v.platform.identity_ok ? "ok" : "error";
     const idValue = !identity ? "未核验" : v.platform.identity_ok ? "已核验" : "与配置不符";
-    const leaseTone = v.lease.state === "held" && v.lease.seconds_left > 0 ? "ok" : v.lease.state === "busy" || v.lease.state === "error" ? "error" : "warn";
+    const leaseTone: Tone = v.lease.state === "held" && v.lease.seconds_left > 0 ? "ok" : v.lease.state === "busy" || v.lease.state === "error" ? "error" : "warn";
     const leaseValue = v.lease.state === "held" ? `已持有（第 ${v.lease.generation} 代）` : v.lease.state === "busy" ? "被其他客户端占用" : v.lease.state === "error" ? "异常" : "未持有";
+    return [
+      ["后台连接", backendTone, backendValue, v.backend.state === "ok" ? `客户端 ${v.backend.client_id} · 协议 1.0` : v.backend.detail],
+      ["平台连接", v.platform.logged_in ? "ok" : "warn", v.platform.logged_in ? "已登录" : "未登录", v.platform.detail],
+      ["店铺身份", idTone, idValue, identity ? `实际：${identity.display_name}（${identity.platform_shop_id}）\n期望：${v.platform.expected}` : `期望平台店铺：${v.platform.expected}`],
+      ["发送归属", leaseTone, leaseValue, v.lease.state === "held" ? `剩余约 ${v.lease.seconds_left} 秒 · 每 15 秒续租` : v.lease.detail],
+    ];
+  }
+
+  function renderStatus(entry: ShopEntry): HTMLElement {
+    return h("div", { class: "status-grid" }, ...statusItems(entry).map(([title, tone, value, detail]) => statusCard(title, tone, value, detail)));
+  }
+
+  /** 平台工作台的紧凑状态：一行小标签，详情在悬停提示里。 */
+  function renderPills(entry: ShopEntry): HTMLElement {
+    const short: Record<string, string> = { 后台连接: "后台", 平台连接: "平台", 店铺身份: "身份", 发送归属: "归属" };
     return h(
       "div",
-      { class: "status-grid" },
-      statusCard("后台连接", backendTone, backendValue, v.backend.state === "ok" ? `客户端 ${v.backend.client_id} · 协议 1.0` : v.backend.detail),
-      statusCard("平台连接", v.platform.logged_in ? "ok" : "warn", v.platform.logged_in ? "已登录" : "未登录", v.platform.detail),
-      statusCard("店铺身份", idTone, idValue, identity ? `实际：${identity.display_name}（${identity.platform_shop_id}）\n期望：${v.platform.expected}` : `期望平台店铺：${v.platform.expected}`),
-      statusCard("发送归属", leaseTone, leaseValue, v.lease.state === "held" ? `剩余约 ${v.lease.seconds_left} 秒 · 每 15 秒续租` : v.lease.detail),
+      { class: "pills" },
+      ...statusItems(entry).map(([title, tone, value, detail]) => h("span", { class: `pill ${tone}`, title: `${title}：${value}\n${detail}` }, h("span", { class: `dot ${tone}` }), `${short[title] ?? title} ${value}`)),
     );
   }
 
@@ -212,19 +264,76 @@
           : null,
       (entry.platform || (entry.running && v?.platform.logged_in)) ? h("button", { class: "btn secondary", type: "button", text: "退出平台登录", onclick: () => call("shop:logout", { shop_id: id }) }) : null,
       h("span", { class: "mode-note", text: "运行模式：" }),
-      h(
-        "div",
-        { class: "segmented" },
-        ...MODES.map(([m, label, tip]) => h("button", { type: "button", class: mode === m ? "active" : "", title: tip, text: label, onclick: () => call("shop:setMode", { shop_id: id, mode: m }) })),
-      ),
+      modeButtons(entry),
       h("span", { class: "mode-note", text: MODES.find((m) => m[0] === mode)?.[2] ?? "" }),
     );
   }
 
-  function renderBanners(entry: ShopEntry): HTMLElement {
-    const box = h("div", {});
+  /** compact：平台工作台只显示需要处理的提醒，常驻说明放到收发记录页。 */
+  function modeButtons(entry: ShopEntry, small = false): HTMLElement {
+    const id = entry.config.shop_id;
+    const mode = entry.view?.mode ?? entry.config.mode;
+    return h(
+      "div",
+      { class: `segmented${small ? " small" : ""}` },
+      ...MODES.map(([m, label, tip]) => h("button", { type: "button", class: mode === m ? "active" : "", title: tip, text: label, onclick: () => call("shop:setMode", { shop_id: id, mode: m }) })),
+    );
+  }
+
+  /** 平台页面缩放：− / + 手动调整，点中间的比例回到“自动适配”。 */
+  function zoomControl(): HTMLElement {
+    const current = zoomFor(areaWidth);
+    const i = ZOOM_LEVELS.indexOf(current);
+    return h(
+      "div",
+      { class: "zoom", title: "平台页面缩放：页面显示不全时缩小。点中间的比例恢复自动适配。" },
+      h("span", { class: "zoom-label", text: "缩放" }),
+      h("button", { class: "btn secondary small", type: "button", text: "−", "aria-label": "缩小平台页面", disabled: i <= 0, onclick: () => setZoom(ZOOM_LEVELS[Math.max(0, i - 1)]) }),
+      h("button", { class: "btn secondary small zoom-value", type: "button", text: `${zoomChoice === "auto" ? "自动 " : ""}${Math.round(current * 100)}%`, onclick: () => setZoom("auto") }),
+      h("button", { class: "btn secondary small", type: "button", text: "+", "aria-label": "放大平台页面", disabled: i >= ZOOM_LEVELS.length - 1, onclick: () => setZoom(ZOOM_LEVELS[Math.min(ZOOM_LEVELS.length - 1, i + 1)]) }),
+    );
+  }
+
+  /** 平台工作台的紧凑操作栏：店名、状态、运行模式、页签、缩放与操作挤在一两行内，把空间留给平台页面。 */
+  function renderPlatformBar(entry: ShopEntry): HTMLElement {
+    const id = entry.config.shop_id;
+    const v = entry.view;
+    // 平台页面是否真的开着：退出登录、页面关闭后适配器仍在，但状态里没有 page。
+    const pageOpen = !!entry.platform?.page;
+    return h(
+      "div",
+      { class: "pbar" },
+      h("div", { class: "pbar-title" }, h("h2", { text: entry.config.display_name }), h("span", { class: "tag real", text: "拼多多" })),
+      renderPills(entry),
+      modeButtons(entry, true),
+      workspaceTabs(entry, true) ?? "",
+      h("span", { class: "spacer" }),
+      zoomControl(),
+      pageOpen
+        ? h("button", {
+            class: "btn secondary small",
+            type: "button",
+            text: "清理弹窗",
+            title: "关闭平台页面上的引导、公告、广告浮层（不会发送消息，涉及协议、处罚的提示留给人工）",
+            onclick: async () => {
+              const r = await bridge.invoke("shop:dismissPopups", { shop_id: id });
+              if (!r.ok) return toast(ERRORS[r.error ?? ""] ?? `操作失败：${r.error}`);
+              const n = (r.data as unknown as { dismissed?: number } | undefined)?.dismissed ?? 0;
+              toast(n ? `已关闭 ${n} 个平台弹窗` : "没有找到可自动关闭的弹窗；剩下的请在页面上手动关闭");
+            },
+          })
+        : h("button", { class: "btn small", type: "button", text: "打开本店工作台 / 登录", onclick: () => call("shop:login", { shop_id: id }) }),
+      entry.running
+        ? h("button", { class: "btn secondary small", type: "button", text: "断开后台", onclick: () => call("shop:disconnect", { shop_id: id }) })
+        : h("button", { class: "btn small", type: "button", text: "连接后台", onclick: () => call("shop:connect", { shop_id: id }) }),
+      pageOpen || (entry.running && v?.platform.logged_in) ? h("button", { class: "btn danger small", type: "button", text: "退出平台登录", onclick: () => call("shop:logout", { shop_id: id }) }) : null,
+    );
+  }
+
+  function renderBanners(entry: ShopEntry, compact = false): HTMLElement {
+    const box = h("div", { class: "banners" });
     if (entry.config.adapter === "mock") box.append(h("div", { class: "banner sim", text: "模拟模式：所有店铺、买家和消息均为虚构数据，“平台确认”来自模拟器，不代表真实平台已发送。" }));
-    else box.append(h("div", { class: "banner warn", text: "本店平台页面与其他店铺的登录状态隔离。观察模式只接收数据；开启自动模式后才会执行后台授权的回复。" }));
+    else if (!compact) box.append(h("div", { class: "banner warn", text: "本店平台页面与其他店铺的登录状态隔离。观察模式只接收数据；开启自动模式后才会执行后台授权的回复。" }));
     if (entry.alert) {
       const id = entry.config.shop_id;
       box.append(
@@ -405,6 +514,8 @@
         if (!saved) return;
       }
       selected = target;
+      // 新加的拼多多店铺直接进入平台工作台。
+      if (!entry) workspaceTab = adapter.value === "pdd" ? "platform" : "records";
       editing = null;
       skeletonFor = null;
       toast("已保存");
@@ -451,8 +562,15 @@
       const area = document.getElementById("platform-area");
       const entry = current();
       const rect = area?.getBoundingClientRect();
-      const payload = entry?.config.adapter === "pdd" && workspaceTab === "platform" && rect && rect.width > 0 && rect.height > 0
-        ? { shop_id: entry.config.shop_id, bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } }
+      const show = entry?.config.adapter === "pdd" && workspaceTab === "platform" && rect && rect.width > 0 && rect.height > 0;
+      if (show && Math.abs(rect.width - areaWidth) >= 1) {
+        const before = zoomFor(areaWidth);
+        areaWidth = rect.width;
+        // 自动适配的比例随区域宽度变化时刷新操作栏上显示的比例。
+        if (zoomFor(areaWidth) !== before) queueMicrotask(render);
+      }
+      const payload = show
+        ? { shop_id: entry.config.shop_id, bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, zoom: zoomFor(rect.width) }
         : { shop_id: null, bounds: null };
       const key = JSON.stringify(payload);
       if (key === lastPresentation) return;
@@ -463,11 +581,12 @@
   window.addEventListener("resize", syncWorkspace);
   new ResizeObserver(syncWorkspace).observe(document.getElementById("detail")!);
 
-  function workspaceTabs(entry: ShopEntry): HTMLElement | null {
+  function workspaceTabs(entry: ShopEntry, inline = false): HTMLElement | null {
     if (entry.config.adapter !== "pdd") return null;
-    return h("div", { class: "toolbar" }, h("div", { class: "segmented" },
+    const tabs = h("div", { class: `segmented tabs${inline ? " small" : ""}` },
       ...([["platform", "平台工作台"], ["records", "收发记录与设置"]] as const).map(([tab, label]) =>
-        h("button", { type: "button", class: workspaceTab === tab ? "active" : "", text: label, onclick: () => { workspaceTab = tab; render(); } }))));
+        h("button", { type: "button", class: workspaceTab === tab ? "active" : "", text: label, onclick: () => { workspaceTab = tab; render(); } })));
+    return inline ? tabs : h("div", { class: "toolbar" }, tabs);
   }
 
   // 动态区域每次刷新；表单与模拟器只在切换店铺时重建，避免打断输入。
@@ -477,6 +596,7 @@
     const entry = current();
     const showPlatform = editing !== "new" && entry?.config.adapter === "pdd" && workspaceTab === "platform";
     detail.classList.toggle("platform-mode", showPlatform);
+    document.body.classList.toggle("platform-active", showPlatform);
     syncWorkspace();
     const key = editing === "new" ? "__new__" : entry ? entry.config.shop_id + (entry.running ? ":run" : ":stop") : "__none__";
     if (key !== skeletonFor) {
@@ -502,13 +622,21 @@
     }
     if (!entry || editing === "new") return;
     const dyn = document.getElementById("dyn");
+    if (showPlatform) {
+      dyn?.replaceChildren(
+        renderPlatformBar(entry),
+        renderBanners(entry, true),
+        h("div", { id: "platform-area", class: "platform-area" }, h("div", { class: "empty", text: "点击“打开本店工作台 / 登录”载入平台页面。切换店铺不会退出其他店铺。" })),
+      );
+      return;
+    }
     dyn?.replaceChildren(
       renderBanners(entry),
       renderStatus(entry),
       renderToolbar(entry),
       workspaceTabs(entry) ?? "",
-      showPlatform ? h("div", { id: "platform-area", class: "platform-area" }, h("div", { class: "empty", text: "点击“打开本店工作台 / 登录”载入平台页面。切换店铺不会退出其他店铺。" })) : renderWorkspace(entry),
-      entry.view && !showPlatform ? h("div", { class: "hint", text: `实例 ${entry.view.instance_id} · 平台会话 ${entry.view.session_id ?? "无"} · 已忽略重复推送 ${entry.view.duplicates} 次` }) : "",
+      renderWorkspace(entry),
+      entry.view ? h("div", { class: "hint", text: `实例 ${entry.view.instance_id} · 平台会话 ${entry.view.session_id ?? "无"} · 已忽略重复推送 ${entry.view.duplicates} 次` }) : "",
     );
   }
 
@@ -518,6 +646,22 @@
     if (!selected && editing !== "new") selected = state.shops[0]?.config.shop_id ?? null;
     render();
   }
+
+  // 店铺栏可收起成窄条（只显示店名前两个字与状态点），把宽度让给平台页面。
+  const layoutEl = document.querySelector(".layout") as HTMLElement;
+  const toggle = document.getElementById("sidebar-toggle") as HTMLButtonElement;
+  function applySidebar(collapsed: boolean) {
+    layoutEl.classList.toggle("collapsed", collapsed);
+    toggle.textContent = collapsed ? "»" : "«";
+    toggle.title = collapsed ? "展开店铺栏" : "收起店铺栏";
+    toggle.setAttribute("aria-label", toggle.title);
+  }
+  applySidebar(loadPref("claw.sidebarCollapsed") === "1");
+  toggle.addEventListener("click", () => {
+    const collapsed = !layoutEl.classList.contains("collapsed");
+    savePref("claw.sidebarCollapsed", collapsed ? "1" : "0");
+    applySidebar(collapsed);
+  });
 
   (document.getElementById("add-shop") as HTMLElement).addEventListener("click", () => {
     editing = "new";
