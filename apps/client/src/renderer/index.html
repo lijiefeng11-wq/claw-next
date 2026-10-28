@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
+    <title>Claw-Next 登录收发客户端</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">Claw-Next <span>登录收发客户端</span></div>
+      <div class="topnote">回复由后台判断；本客户端只负责登录、收集上下文和执行经授权的发送。</div>
+    </header>
+    <div class="layout">
+      <aside class="sidebar">
+        <div class="sidebar-title">店铺</div>
+        <ul id="shop-list" class="shop-list"></ul>
+        <button id="add-shop" class="btn secondary block" type="button">＋ 添加店铺</button>
+        <div id="storage-note" class="hint"></div>
+        <div id="app-settings" class="app-settings"></div>
+      </aside>
+      <main id="detail" class="detail"></main>
+    </div>
+    <div id="toast" class="toast" hidden></div>
+    <script src="app.js"></script>
+  </body>
+</html>

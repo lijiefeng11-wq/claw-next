@@ -1,0 +1,160 @@
+name: Claw-Next checks
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  backend-contract:
+    name: Backend contract (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Compile Python
+        run: python -m compileall -q backend tests
+      - name: Verify protocol and recovery
+        run: python -m unittest discover -s tests -v
+      - name: Check management script
+        run: node --check backend/static/app.js
+  client-contract:
+    name: Client contract (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/client
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Isolate synthetic test data
+        run: python -c "import os,sys,tempfile; from pathlib import Path; Path(os.environ['GITHUB_ENV']).open('a', encoding='utf-8').write('CLAW_NEXT_PYTHON=' + sys.executable + '\nCLAW_NEXT_USER_DATA=' + tempfile.mkdtemp(prefix='claw-next-ci-') + '\n')"
+      - name: Install locked client dependencies
+        run: npm ci
+      - name: Typecheck client
+        run: npm run typecheck
+      - name: Verify client and backend integration
+        run: npm test
+  client-ui-e2e:
+    # 用 Playwright 驱动开发版 Electron 客户端做界面端到端测试（scripts/e2e.mjs）：
+    # 临时虚构后台 + 模拟平台，不连接真实店铺、不使用业务密钥。
+    name: Client UI e2e (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/client
+    # 不设置 ELECTRON_SKIP_BINARY_DOWNLOAD：本作业需要实际下载 Electron。
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Use the CI Python and a dedicated screenshot directory
+        run: python -c "import os,sys; from pathlib import Path; Path(os.environ['GITHUB_ENV']).open('a', encoding='utf-8').write('CLAW_NEXT_PYTHON=' + sys.executable + '\nCLAW_NEXT_E2E_OUT=' + str(Path(os.environ['RUNNER_TEMP']) / 'claw-next-e2e-shots') + '\n')"
+      - name: Install locked client dependencies
+        run: npm ci
+      - name: Install CJK fonts for readable screenshots (Ubuntu only)
+        # Ubuntu runner 默认没有中文字体，截图里的中文会显示成方框；只装字体，不改其他系统设置。
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends fonts-noto-cjk
+          fc-list :lang=zh family | head -n 3
+      - name: Run UI end-to-end test (Linux, virtual display)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run e2e
+      - name: Run UI end-to-end test
+        if: runner.os != 'Linux'
+        run: npm run e2e
+      - name: Upload screenshots
+        # 只上传截图目录；不上传配置、数据库、客户端数据或日志。
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: client-ui-e2e-screenshots-${{ matrix.os }}
+          path: ${{ runner.temp }}/claw-next-e2e-shots
+          if-no-files-found: ignore
+          retention-days: 7
+  client-package-smoke:
+    name: Client package smoke (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            app: out/Claw-Next-Client-darwin-arm64/Claw-Next-Client.app/Contents/MacOS/Claw-Next-Client
+            # 已做本机临时签名、由 ditto 打成 zip（保留符号链接与权限）；直接上传 .app 目录会丢失它们。
+            artifact: apps/client/out/Claw-Next-Client-darwin-arm64.zip
+          - os: windows-latest
+            app: out/Claw-Next-Client-win32-x64/Claw-Next-Client.exe
+            artifact: apps/client/out/Claw-Next-Client-win32-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/client
+    env:
+      # 只跳过 npm 安装 electron 时的下载；打包脚本会自行下载与开发依赖同版本的 Electron。
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Use the CI Python for the synthetic backend
+        run: python -c "import os,sys; from pathlib import Path; Path(os.environ['GITHUB_ENV']).open('a', encoding='utf-8').write('CLAW_NEXT_PYTHON=' + sys.executable + '\n')"
+      - name: Install locked client dependencies
+        run: npm ci
+      - name: Package the standalone app for this system
+        # macOS 上打包会做本机临时签名并校验；--zip 生成可分发的 zip（Windows 上忽略）。
+        run: npm run package -- --zip
+      - name: Smoke-test the packaged app (synthetic backend, mock platform)
+        env:
+          CLAW_NEXT_SMOKE_APP: ${{ matrix.app }}
+        run: node scripts/smoke.mjs
+      - name: Upload the packaged app
+        # 只在冒烟测试通过后上传打包产物（不含配置、口令、登录资料或店铺数据），保留 7 天。
+        uses: actions/upload-artifact@v7
+        with:
+          name: Claw-Next-Client-${{ runner.os }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 7

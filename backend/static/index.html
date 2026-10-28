@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Claw-Next 管理后台</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+
+  <div id="login-view" class="login-view">
+    <section id="login-panel" class="login-card" aria-labelledby="login-title">
+      <div class="login-brand">
+        <span class="brand-mark" aria-hidden="true">CN</span>
+        <div>
+          <p class="login-eyebrow">Claw-Next</p>
+          <h1 id="login-title">管理后台登录</h1>
+        </div>
+      </div>
+      <p class="login-sub">独立演示后台。登录状态仅保存在当前页面内存中，刷新后需要重新登录。</p>
+      <p class="login-hint">初始账号：<strong>admin</strong> / <strong>admin</strong>。首次登录必须先修改密码，才能进入管理后台。</p>
+      <form id="login-form" class="login-form" autocomplete="on" novalidate>
+        <label class="field">
+          <span class="field-label">用户名</span>
+          <input id="username-input" name="username" type="text" value="admin" autocomplete="username"
+                 spellcheck="false" autocapitalize="off" aria-describedby="username-help">
+          <span id="username-help" class="field-help">默认管理员用户名为 admin。</span>
+        </label>
+        <label class="field">
+          <span class="field-label">密码</span>
+          <input id="password-input" name="password" type="password" autocomplete="current-password"
+                 aria-describedby="password-help">
+          <span id="password-help" class="field-help">密码不会保存在浏览器中。</span>
+        </label>
+        <button id="login-btn" class="btn btn-primary btn-block" type="submit">登录</button>
+      </form>
+      <p id="login-notice" class="login-notice" role="status" hidden></p>
+      <p id="login-error" class="error-text" role="alert" hidden></p>
+      <p class="login-foot">协议 v1.0 · 仅与同源后端通信 · 演示环境</p>
+    </section>
+  </div>
+
+  <section id="dashboard" class="app-shell" hidden aria-label="管理面板">
+    <div id="nav-backdrop" class="nav-backdrop" hidden></div>
+    <aside class="sidebar" aria-label="主导航">
+      <div class="sidebar-brand">
+        <span class="brand-mark" aria-hidden="true">CN</span>
+        <div class="sidebar-brand-text">
+          <span class="sidebar-name">Claw-Next</span>
+          <span class="sidebar-sub">管理后台</span>
+        </div>
+      </div>
+
+      <nav class="nav" aria-label="后台页面">
+        <button class="nav-link" type="button" data-route="dashboard" aria-current="page">
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/></svg>
+          <span>工作台</span>
+        </button>
+        <button class="nav-link" type="button" data-route="scripts">
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h16v11H9l-5 4z"/><path d="M8 9.5h8M8 12.5h5"/></svg>
+          <span>话术配置</span>
+        </button>
+        <button class="nav-link" type="button" data-route="records">
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3.5h12v17H6z"/><path d="M9.5 8h5M9.5 11.5h5M9.5 15h3"/></svg>
+          <span>处理记录</span>
+        </button>
+        <button class="nav-link" type="button" data-route="model">
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/><path d="M9.5 3v2.5M14.5 3v2.5M9.5 18.5V21M14.5 18.5V21M3 9.5h2.5M3 14.5h2.5M18.5 9.5H21M18.5 14.5H21"/></svg>
+          <span>模型配置</span>
+        </button>
+        <button class="nav-link" type="button" data-route="system">
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2-1.2L14.2 3h-4.4l-.4 2.5a7 7 0 0 0-2 1.2l-2.3-1-2 3.4 2 1.5a7 7 0 0 0 0 2.4l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 2 1.2l.4 2.5h4.4l.4-2.5a7 7 0 0 0 2-1.2l2.3 1 2-3.4-2-1.5c.1-.4.1-.8.1-1.2z"/></svg>
+          <span>系统设置</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <span class="demo-badge">演示环境</span>
+        <span class="sidebar-foot-note">未接入平台登录与真实发送</span>
+      </div>
+    </aside>
+
+    <div class="app-body">
+      <header class="topbar">
+        <button id="nav-toggle" class="icon-btn" type="button" aria-controls="dashboard" aria-expanded="false" aria-label="打开导航">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5h16M4 12h16M4 17.5h16"/></svg>
+        </button>
+        <div class="topbar-title">
+          <span id="topbar-route">工作台</span>
+        </div>
+        <div class="topbar-actions">
+          <span id="topbar-shop-status" class="status-dot status-unknown" title="店铺连接状态">状态未确认</span>
+          <button id="admin-badge" class="badge badge-muted badge-button" type="button" aria-haspopup="dialog" aria-controls="account-panel" title="修改密码" hidden>管理员已登录</button>
+          <button id="logout-btn" class="btn btn-ghost btn-sm" type="button" hidden>退出登录</button>
+        </div>
+      </header>
+
+      <main id="main" class="main">
+        <div id="global-alert" class="alert" role="alert" hidden></div>
+
+        <section id="page-dashboard" class="page-section" data-page="dashboard" aria-labelledby="dashboard-title">
+          <div class="page-head">
+            <div>
+              <h2 id="dashboard-title" class="page-title">工作台</h2>
+              <p class="page-sub">任务概览、店铺后台连接状态与常用入口。</p>
+            </div>
+            <button id="dashboard-refresh-btn" class="btn btn-sm" type="button">
+              <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4.5V10h-5.5"/></svg>
+              刷新
+            </button>
+          </div>
+          <p id="notice" class="demo-note">演示环境：后台只做规则与模型判断，实际登录与收发由客户端完成，尚未接入真实店铺。</p>
+
+          <section class="card summary-card" aria-labelledby="summary-title">
+            <div class="section-head">
+              <h3 id="summary-title" class="section-title">任务概览</h3>
+              <span id="summary-meta" class="small muted"></span>
+            </div>
+            <div class="summary-grid">
+              <article class="stat-card stat-pending">
+                <span class="stat-label">等待判断</span>
+                <span id="count-pending" class="stat-value">–</span>
+              </article>
+              <article class="stat-card stat-processing">
+                <span class="stat-label">处理中</span>
+                <span id="count-processing" class="stat-value">–</span>
+              </article>
+              <article class="stat-card stat-ready">
+                <span class="stat-label">就绪</span>
+                <span id="count-ready" class="stat-value">–</span>
+              </article>
+              <article class="stat-card stat-sent">
+                <span class="stat-label">已发送</span>
+                <span id="count-sent" class="stat-value">–</span>
+              </article>
+              <article class="stat-card stat-unknown">
+                <span class="stat-label">结果不确定</span>
+                <span id="count-unknown" class="stat-value">–</span>
+              </article>
+            </div>
+          </section>
+
+          <section class="card" aria-labelledby="shops-title">
+            <div class="section-head">
+              <div>
+                <h3 id="shops-title" class="section-title">店铺连接</h3>
+                <p class="section-sub">后台心跳状态每 5 秒刷新，仅代表客户端已连接后台，不代表已登录平台。</p>
+              </div>
+              <div id="shop-connection-summary" class="pill pill-muted">尚未加载店铺</div>
+            </div>
+            <div id="shop-connection-list" class="shop-list">
+              <p class="empty-state small">正在加载店铺状态…</p>
+            </div>
+            <p id="shop-connection-meta" class="small muted" role="status" aria-live="polite">尚未加载店铺。</p>
+          </section>
+
+          <section class="card" aria-labelledby="shortcuts-title">
+            <div class="section-head">
+              <h3 id="shortcuts-title" class="section-title">快捷入口</h3>
+            </div>
+            <div class="shortcut-grid">
+              <button class="shortcut" type="button" data-route="scripts">
+                <svg class="shortcut-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h16v11H9l-5 4z"/><path d="M8 9.5h8M8 12.5h5"/></svg>
+                <span class="shortcut-title">话术配置</span>
+                <span class="shortcut-desc">开关、判断方式、提示词与回复规则</span>
+              </button>
+              <button class="shortcut" type="button" data-route="records">
+                <svg class="shortcut-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3.5h12v17H6z"/><path d="M9.5 8h5M9.5 11.5h5M9.5 15h3"/></svg>
+                <span class="shortcut-title">处理记录</span>
+                <span class="shortcut-desc">查看判断、发送回执与不确定结果</span>
+              </button>
+              <button class="shortcut" type="button" data-route="model">
+                <svg class="shortcut-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/><path d="M9.5 3v2.5M14.5 3v2.5M9.5 18.5V21M14.5 18.5V21M3 9.5h2.5M3 14.5h2.5M18.5 9.5H21M18.5 14.5H21"/></svg>
+                <span class="shortcut-title">模型配置</span>
+                <span class="shortcut-desc">主/备用模型、密钥与连接测试</span>
+              </button>
+              <button class="shortcut" type="button" data-route="system">
+                <svg class="shortcut-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2-1.2L14.2 3h-4.4l-.4 2.5a7 7 0 0 0-2 1.2l-2.3-1-2 3.4 2 1.5a7 7 0 0 0 0 2.4l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 2 1.2l.4 2.5h4.4l.4-2.5a7 7 0 0 0 2-1.2l2.3 1 2-3.4-2-1.5c.1-.4.1-.8.1-1.2z"/></svg>
+                <span class="shortcut-title">系统设置</span>
+                <span class="shortcut-desc">服务状态、协议版本与账号安全</span>
+              </button>
+            </div>
+          </section>
+        </section>
+
+        <section id="page-scripts" class="page-section" data-page="scripts" aria-labelledby="scripts-title" hidden>
+          <div class="page-head">
+            <div>
+              <h2 id="scripts-title" class="page-title">话术配置</h2>
+              <p class="page-sub">按店铺保存判断开关、方式、提示词与自动回复规则。</p>
+            </div>
+            <span id="settings-version" class="pill pill-muted" hidden></span>
+          </div>
+
+          <section id="shop-panel" class="card" aria-labelledby="shop-title">
+            <div class="section-head">
+              <h3 id="shop-title" class="section-title">当前店铺</h3>
+            </div>
+            <div class="shop-toolbar">
+              <label class="field field-inline">
+                <span class="field-label">店铺</span>
+                <select id="shop-select"></select>
+              </label>
+              <div id="shop-meta" class="shop-meta muted small">尚未加载店铺。</div>
+            </div>
+
+            <div id="lease-box" class="lease-box" aria-live="polite">
+              <span class="lease-title">后台连接</span>
+              <span id="lease-status" class="badge badge-muted">状态未知</span>
+              <details id="lease-details" class="lease-details-wrap" hidden>
+                <summary>连接详情</summary>
+                <dl class="lease-details">
+                  <div><dt>客户端实例</dt><dd id="lease-instance">–</dd></div>
+                  <div><dt>会话编号</dt><dd id="lease-session">–</dd></div>
+                  <div><dt>连接代号</dt><dd id="lease-generation">–</dd></div>
+                  <div><dt>有效至</dt><dd id="lease-expires">–</dd></div>
+                </dl>
+              </details>
+            </div>
+
+            <form id="settings-form" class="settings-form" novalidate>
+              <div class="settings-grid">
+                <fieldset class="settings-group">
+                  <legend>启用状态</legend>
+                  <label class="switch-row">
+                    <input id="enabled-input" type="checkbox">
+                    <span class="switch-text">
+                      <span class="switch-title">允许 Claw-Next 自动判断</span>
+                      <span class="field-help">新店铺默认关闭。开启只作用于 Claw-Next，不代表其他自动回复工具已停止。</span>
+                    </span>
+                  </label>
+                  <p id="enabled-note" class="small muted">以服务端返回值为准。</p>
+                </fieldset>
+
+                <fieldset class="settings-group">
+                  <legend>判断方式</legend>
+                  <label class="field">
+                    <span class="field-label">方式</span>
+                    <select id="mode-input">
+                      <option value="rules">按规则自动回复</option>
+                      <option value="model">由后台模型判断</option>
+                      <option value="hybrid">混合：规则优先，模型兜底</option>
+                    </select>
+                  </label>
+                  <p class="field-help">按规则：只做包含匹配，未命中转人工，不调用模型。混合：先匹配规则，未命中时由模型理解意思；语义命中使用规则原文，否则由模型回复。模型方式直接交模型判断。</p>
+                </fieldset>
+              </div>
+
+              <label class="field">
+                <span class="field-label">模型提示词（模型和混合方式使用）</span>
+                <textarea id="prompt-input" rows="4" spellcheck="false" maxlength="8000"></textarea>
+                <span class="field-help">可说明店铺服务范围和回答方式；信息不足时先向买家询问。最多 8000 个字。</span>
+              </label>
+
+              <fieldset class="settings-group rules-group">
+                <legend>自动回复规则</legend>
+                <p class="field-help">关键词从上到下匹配。混合方式还会根据适用问题说明理解意思，命中后使用规则回复原文；实际发送由客户端核验后执行。</p>
+                <div id="rules-list" class="rules-list"></div>
+                <p id="rules-empty" class="empty-hint" hidden>还没有规则。纯规则方式没有规则时转人工；混合方式可交模型判断。</p>
+                <div class="rules-actions">
+                  <button id="add-rule-btn" class="btn btn-sm" type="button">添加规则</button>
+                  <span id="rules-count" class="small muted"></span>
+                </div>
+                <p id="rules-error" class="error-text" role="alert" hidden></p>
+              </fieldset>
+
+              <div id="settings-remote-note" class="alert alert-warn" role="status" hidden></div>
+
+              <div class="form-actions">
+                <button id="save-btn" class="btn btn-primary" type="submit">保存设置</button>
+                <button id="reset-btn" class="btn btn-ghost" type="button">撤销修改</button>
+                <span id="save-status" class="small muted" role="status" aria-live="polite"></span>
+              </div>
+            </form>
+          </section>
+        </section>
+
+        <section id="page-records" class="page-section" data-page="records" aria-labelledby="events-title" hidden>
+          <div class="page-head">
+            <div>
+              <h2 id="events-title" class="page-title">处理记录</h2>
+              <p class="page-sub">当前所选店铺的后台任务事件，发送结果以客户端回执为准。不确定的旧消息不会重发，不影响买家新消息的正常处理。</p>
+            </div>
+          </div>
+
+          <section id="events-panel" class="card" aria-labelledby="events-card-title">
+            <div class="section-head">
+              <h3 id="events-card-title" class="section-title">任务事件</h3>
+              <div class="events-tools">
+                <label class="field field-inline">
+                  <span class="field-label">数量</span>
+                  <select id="limit-select">
+                    <option value="20">20</option>
+                    <option value="50" selected>50</option>
+                    <option value="100">100</option>
+                    <option value="200">200</option>
+                  </select>
+                </label>
+                <button id="refresh-btn" class="btn btn-sm" type="button">刷新</button>
+                <label class="check-inline">
+                  <input id="auto-refresh" type="checkbox">
+                  <span>每 15 秒自动刷新</span>
+                </label>
+              </div>
+            </div>
+            <p id="events-meta" class="small muted" role="status" aria-live="polite">尚未加载事件。</p>
+
+            <div class="table-wrap">
+              <table class="events-table">
+                <caption class="visually-hidden">Claw-Next 任务事件列表，包含判断、回执与不确定状态</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">时间</th>
+                    <th scope="col">店铺 / 会话</th>
+                    <th scope="col">状态</th>
+                    <th scope="col">判断</th>
+                    <th scope="col">发送回执</th>
+                  </tr>
+                </thead>
+                <tbody id="events-body"></tbody>
+              </table>
+            </div>
+            <p id="events-empty" class="empty-state" hidden>当前没有任务事件。前台提交消息后，这里会显示后台判断与回执。</p>
+          </section>
+        </section>
+
+        <section id="page-model" class="page-section" data-page="model" aria-labelledby="model-title" hidden>
+          <div class="page-head">
+            <div>
+              <h2 id="model-title" class="page-title">模型配置</h2>
+              <p class="page-sub">主模型优先调用，失败时自动切换备用一次；两者都失败则转人工。</p>
+            </div>
+            <span id="model-version" class="pill pill-muted" hidden></span>
+          </div>
+
+          <form id="model-form" class="settings-form" novalidate>
+            <div class="model-slot-grid">
+              <section class="card model-card model-slot" aria-labelledby="primary-slot-title">
+                <div class="section-head">
+                  <div>
+                    <h3 id="primary-slot-title" class="section-title">主模型 · 本地</h3>
+                    <p class="section-sub">优先使用。本地服务可填 http://127.0.0.1:端口/v1。</p>
+                  </div>
+                  <span id="primary-key-status" class="badge badge-muted">未加载</span>
+                </div>
+
+                <div class="model-slot-fields">
+                  <label class="field">
+                    <span class="field-label">接口地址</span>
+                    <input id="primary-base-url" type="url" inputmode="url" spellcheck="false" autocomplete="off"
+                           maxlength="2048" placeholder="http://127.0.0.1:1234/v1"
+                           aria-describedby="primary-base-url-help">
+                    <span id="primary-base-url-help" class="field-help">服务端自动追加 /chat/completions。公共地址必须 HTTPS。</span>
+                  </label>
+
+                  <div class="model-slot-row">
+                    <label class="field">
+                      <span class="field-label">模型名称</span>
+                      <input id="primary-model" type="text" spellcheck="false" autocomplete="off" maxlength="128"
+                             placeholder="填写本地服务中的模型名称">
+                    </label>
+                    <label class="field model-timeout-field">
+                      <span class="field-label">超时（秒）</span>
+                      <input id="primary-timeout" type="number" inputmode="numeric" min="1" max="60" step="1" value="20">
+                    </label>
+                  </div>
+
+                  <label class="field">
+                    <span class="field-label">API 密钥（可选）</span>
+                    <input id="primary-key" type="password" autocomplete="new-password" maxlength="4096"
+                           placeholder="留空则保留已保存的密钥">
+                    <span class="field-help">macOS 使用钥匙串，Windows 使用当前用户加密保存，不会回显。其他系统请使用环境变量；换机需重新录入。</span>
+                  </label>
+
+                  <label class="check-inline">
+                    <input id="primary-clear-key" type="checkbox">
+                    <span>清除已保存的密钥</span>
+                  </label>
+
+                  <div class="model-slot-actions">
+                    <button id="primary-test-btn" class="btn btn-sm" type="button" disabled>测试连接</button>
+                    <span id="primary-test-status" class="small muted" role="status" aria-live="polite"></span>
+                  </div>
+                </div>
+              </section>
+
+              <section class="card model-card model-slot" aria-labelledby="backup-slot-title">
+                <div class="section-head">
+                  <div>
+                    <h3 id="backup-slot-title" class="section-title">备用模型 · DeepSeek</h3>
+                    <p class="section-sub">主模型不可用时自动尝试一次。可留空。</p>
+                  </div>
+                  <span id="backup-key-status" class="badge badge-muted">未加载</span>
+                </div>
+
+                <div class="model-slot-fields">
+                  <label class="field">
+                    <span class="field-label">接口地址</span>
+                    <input id="backup-base-url" type="url" inputmode="url" spellcheck="false" autocomplete="off"
+                           maxlength="2048" placeholder="https://api.deepseek.com/v1"
+                           aria-describedby="backup-base-url-help">
+                    <span id="backup-base-url-help" class="field-help">服务端自动追加 /chat/completions。公共地址必须 HTTPS。</span>
+                  </label>
+
+                  <div class="model-slot-row">
+                    <label class="field">
+                      <span class="field-label">模型名称</span>
+                      <input id="backup-model" type="text" spellcheck="false" autocomplete="off" maxlength="128"
+                             placeholder="deepseek-flash">
+                    </label>
+                    <label class="field model-timeout-field">
+                      <span class="field-label">超时（秒）</span>
+                      <input id="backup-timeout" type="number" inputmode="numeric" min="1" max="60" step="1" value="20">
+                    </label>
+                  </div>
+
+                  <label class="field">
+                    <span class="field-label">API 密钥（可选）</span>
+                    <input id="backup-key" type="password" autocomplete="new-password" maxlength="4096"
+                           placeholder="留空则保留已保存的密钥">
+                    <span class="field-help">macOS 使用钥匙串，Windows 使用当前用户加密保存，不会回显。其他系统请使用环境变量；换机需重新录入。</span>
+                  </label>
+
+                  <label class="check-inline">
+                    <input id="backup-clear-key" type="checkbox">
+                    <span>清除已保存的密钥</span>
+                  </label>
+
+                  <div class="model-slot-actions">
+                    <button id="backup-test-btn" class="btn btn-sm" type="button" disabled>测试连接</button>
+                    <span id="backup-test-status" class="small muted" role="status" aria-live="polite"></span>
+                  </div>
+                </div>
+              </section>
+            </div>
+
+            <section class="card model-actions-card" aria-labelledby="model-save-title">
+              <div class="section-head">
+                <div>
+                  <h3 id="model-save-title" class="section-title">保存与验证</h3>
+                  <p class="section-sub">保存只写入配置；请先保存，再点击对应卡片的“测试连接”。</p>
+                </div>
+              </div>
+              <p id="model-note" class="model-note" hidden></p>
+              <p id="model-error" class="error-text" role="alert" hidden></p>
+              <div class="form-actions">
+                <button id="model-save-btn" class="btn btn-primary" type="submit" disabled>保存配置</button>
+                <button id="model-reload-btn" class="btn btn-ghost" type="button">重新加载</button>
+                <span id="model-status" class="small muted" role="status" aria-live="polite"></span>
+              </div>
+            </section>
+          </form>
+        </section>
+
+        <section id="page-system" class="page-section" data-page="system" aria-labelledby="system-title" hidden>
+          <div class="page-head">
+            <div>
+              <h2 id="system-title" class="page-title">系统设置</h2>
+              <p class="page-sub">服务状态、协议版本与管理员账号。</p>
+            </div>
+            <button id="system-refresh-btn" class="btn btn-sm" type="button">
+              <svg class="btn-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4.5V10h-5.5"/></svg>
+              刷新
+            </button>
+          </div>
+
+          <div class="system-grid">
+            <section class="card" aria-labelledby="system-status-title">
+              <div class="section-head">
+                <h3 id="system-status-title" class="section-title">服务状态</h3>
+              </div>
+              <dl class="detail-list">
+                <div><dt>后台连接</dt><dd id="system-connection">未检查</dd></div>
+                <div><dt>协议版本</dt><dd id="system-version">–</dd></div>
+                <div><dt>最近检查</dt><dd id="system-checked">–</dd></div>
+                <div><dt>店铺数据</dt><dd id="system-shop-state">未加载</dd></div>
+              </dl>
+              <p class="field-help">“后台连接”表示当前浏览器能否正常读取后台汇总接口，不是模型或平台的连通性检测。</p>
+            </section>
+
+            <section class="card" aria-labelledby="system-account-title">
+              <div class="section-head">
+                <h3 id="system-account-title" class="section-title">管理员账号</h3>
+              </div>
+              <dl class="detail-list">
+                <div><dt>当前用户</dt><dd id="system-user">–</dd></div>
+                <div><dt>会话有效至</dt><dd id="system-session">–</dd></div>
+                <div><dt>角色</dt><dd id="system-role">管理员</dd></div>
+              </dl>
+              <div class="form-actions">
+                <button id="settings-password-btn" class="btn" type="button">修改密码</button>
+                <button id="settings-logout-btn" class="btn btn-ghost" type="button">退出登录</button>
+              </div>
+            </section>
+          </div>
+
+          <section class="card" aria-labelledby="capability-title">
+            <div class="section-head">
+              <h3 id="capability-title" class="section-title">当前能力</h3>
+            </div>
+            <ul class="capability-list">
+              <li>后台按店铺保存规则、提示词与模型设置，生成回复建议。</li>
+              <li>客户端负责平台登录、收发消息、保存完整上下文与执行发送。</li>
+              <li>发送结果以客户端回执为准，不确定的结果永久保留，不自动重发。</li>
+              <li>当前没有备注、订单或库存写入能力；演示环境未接管真实店铺。</li>
+            </ul>
+          </section>
+
+          <p class="app-footer">Claw-Next 独立演示后台 · 协议 v1.0 · 仅与同源后端通信</p>
+        </section>
+      </main>
+    </div>
+
+
+    <dialog id="verify-panel" class="card verify-panel" aria-labelledby="verify-title" aria-describedby="verify-warning-event">
+      <div class="section-head">
+        <h2 id="verify-title" class="section-title">人工核查发送结果</h2>
+        <button id="verify-close" class="btn btn-ghost btn-sm" type="button" aria-label="关闭核查窗口">关闭</button>
+      </div>
+      <p class="muted small">核对平台聊天记录后，为这一个事件记录人工结论。核查只补充记录，不补发旧消息，不改变原来的不确定状态。</p>
+      <dl class="verify-identity">
+        <div><dt>店铺</dt><dd id="verify-identity-shop">–</dd></div>
+        <div><dt>会话</dt><dd id="verify-identity-conversation">–</dd></div>
+        <div><dt>事件</dt><dd id="verify-identity-event">–</dd></div>
+      </dl>
+      <p id="verify-warning-event" class="alert alert-warn">核查结论只作记录：原发送结果永久保留，<strong>永不重发</strong>。</p>
+      <p class="alert alert-warn">买家发来新消息后仍可正常自动回复，无需等待核查。核查只确认旧消息是否发出。</p>
+      <form id="verify-form" class="verify-form" novalidate>
+        <label class="field">
+          <span class="field-label">核查结论 <span class="required-mark" aria-hidden="true">*</span></span>
+          <select id="verify-outcome" name="outcome" required aria-describedby="verify-outcome-help">
+            <option value="">请选择核查结论…</option>
+            <option value="sent">平台已发出</option>
+            <option value="not_sent">平台未发出</option>
+          </select>
+          <span id="verify-outcome-help" class="field-help">以平台聊天记录为准；无法确认时不要提交。</span>
+        </label>
+        <label class="field">
+          <span class="field-label">核查依据说明（必填） <span class="required-mark" aria-hidden="true">*</span></span>
+          <textarea id="verify-note" name="note" rows="3" required spellcheck="false" aria-describedby="verify-note-help verify-note-count"
+                    placeholder="示例：已在平台聊天记录中查看，未见该条回复"></textarea>
+          <span id="verify-note-help" class="field-help">1-200 字，只写核查依据，不要粘贴买家原文。</span>
+          <span id="verify-note-count" class="small muted" role="status" aria-live="polite">已输入 0 / 200 字（首尾空白不计入）</span>
+        </label>
+        <p id="verify-error" class="error-text" role="alert" hidden></p>
+        <div class="form-actions">
+          <button id="verify-submit" class="btn btn-primary" type="submit">确认记录核查结论</button>
+          <button id="verify-cancel" class="btn btn-ghost" type="button">取消（不提交）</button>
+          <span id="verify-status" class="small muted" role="status" aria-live="polite"></span>
+        </div>
+      </form>
+    </dialog>
+
+  </section>
+
+    <dialog id="account-panel" class="card account-panel" aria-labelledby="account-title">
+      <div class="section-head">
+        <h2 id="account-title" class="section-title">修改密码</h2>
+        <button id="account-close" class="btn btn-ghost btn-sm" type="button" aria-label="关闭修改密码">关闭</button>
+      </div>
+      <p id="account-meta" class="muted small"></p>
+      <p id="first-password-notice" class="login-notice login-notice-warn" role="status" hidden>当前仍在使用初始密码。请先设置新密码，再重新登录；完成前无法查看或修改后台数据。</p>
+      <p class="muted small">修改成功后，服务器会撤销所有管理员会话，需要使用新密码重新登录。当前密码错误时仍保持登录状态。</p>
+      <form id="change-password-form" class="account-form" autocomplete="off" novalidate>
+        <div class="account-grid">
+          <label class="field">
+            <span class="field-label">当前密码</span>
+            <input id="current-password-input" name="current_password" type="password"
+                   autocomplete="current-password" aria-describedby="current-password-help">
+            <span id="current-password-help" class="field-help">用于确认是本人操作。</span>
+          </label>
+          <label class="field">
+            <span class="field-label">新密码</span>
+            <input id="new-password-input" name="new_password" type="password"
+                   autocomplete="new-password" aria-describedby="new-password-help">
+            <span id="new-password-help" class="field-help">8-128 个字符，且不能与当前密码相同。</span>
+          </label>
+          <label class="field">
+            <span class="field-label">确认新密码</span>
+            <input id="confirm-password-input" name="confirm_password" type="password"
+                   autocomplete="new-password" aria-describedby="confirm-password-help">
+            <span id="confirm-password-help" class="field-help">再次输入新密码。</span>
+          </label>
+        </div>
+        <div class="form-actions">
+          <button id="change-password-btn" class="btn btn-primary" type="submit">修改密码</button>
+          <span id="change-password-status" class="small muted" role="status" aria-live="polite"></span>
+        </div>
+        <p id="change-password-error" class="error-text" role="alert" hidden></p>
+      </form>
+    </dialog>
+</body>
+</html>

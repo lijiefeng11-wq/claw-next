@@ -1,0 +1,32 @@
+{
+  "name": "claw-next-client",
+  "productName": "Claw-Next-Client",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Claw-Next 登录收发客户端（前台）",
+  "main": "dist/src/main/main.js",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-static.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test --test-concurrency=1 \"dist/test/*.test.js\"",
+    "start": "npm run build && electron .",
+    "smoke": "npm run build && node scripts/smoke.mjs",
+    "e2e": "npm run build && node scripts/e2e.mjs",
+    "package": "node scripts/package.mjs",
+    "package:mac": "node scripts/package.mjs --platform darwin --arch arm64",
+    "package:mac-intel": "node scripts/package.mjs --platform darwin --arch x64",
+    "package:win": "node scripts/package.mjs --platform win32 --arch x64",
+    "dev": "npm run build && CLAW_NEXT_DEV_BACKEND_CONFIG=../../var/config.json electron ."
+  },
+  "devDependencies": {
+    "@electron/packager": "20.3.0",
+    "@types/node": "22.20.5",
+    "electron": "45.0.0",
+    "playwright-core": "1.64.0",
+    "typescript": "7.0.2"
+  }
+}

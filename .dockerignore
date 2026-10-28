@@ -1,0 +1,13 @@
+.git
+.github
+var
+private
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+**/*.pyc
+.env*
+node_modules
+apps
+tests
