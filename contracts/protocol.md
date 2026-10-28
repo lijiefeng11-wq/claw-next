@@ -237,66 +237,92 @@ status 只能 sent/not_sent/unknown。sent 必须具有平台明确成功回执�
   - 旧客户端 + 新后台：不声明能力，就不带这两个字段，行为不变。
   - 新客户端 + 旧后台：响应里没有该能力，前台不带这两个字段。
 
+### 商品条目的身份（`goods_ref`）
+
+- 每个条目有一个**来源身份**：
+  - 读到平台商品编号时，身份就是这个编号；
+  - 读不到编号时，身份就是完全相同的标题。
+- `goods_ref` 由店铺、对话和来源身份经摘要生成，**在同一对话内不随 `context_revision` 变化**：同一来源身份在任何一次提交里引用都相同。
+- 平台商品编号不上传，也不出现在 `goods_ref` 中。
+- 前台**不把“有编号”和“只有标题”两种身份合并**，即使标题相同、当前集合里恰好只有一个同名编号也不合并。因此：
+  - 两个条目标题相同，可能是同一件商品，也可能不是；
+  - 后台不得据此认定它们是同一件，也不得认定它们不是同一件；
+  - 需要区分时，向买家确认。
+- 同一编号的商品改了标题时，`goods_ref` 不变，`title` 取最近一次读到的标题。
+
 ### `context.goods`
 
 ```json
 "goods":[{"goods_ref":"g-1","title":"示例商品","evidence":[
-  {"source":"order","order_ref":"o-1","sku":"示例规格","quantity":1,"observed_at":1790008000},
+  {"source":"order","order_ref":"o-1","observed_at":1790008000},
   {"source":"goods_card","message_id":"message-007","card_price":"示例价格文字","observed_at":1790000310}]}]
 ```
 
 | 字段 | 必填 | 类型与限制 |
 |---|---|---|
 | `goods` | 否 | 数组，最多 10 项，按各项最新 `evidence.observed_at` 倒序；省略或空数组表示“前台没有读到”，不表示买家没有涉及商品 |
-| `goods_ref` | 是 | 非空字符串，≤64 字符，数组内唯一；前台生成的对话内不透明引用（不是平台商品编号），同一商品在同一对话中保持不变 |
+| `goods_ref` | 是 | 非空字符串，≤64 字符，数组内唯一；生成规则见上文“身份” |
 | `title` | 是 | 非空字符串，≤200 字，不含网址 |
-| `evidence` | 是 | 数组，1–5 项，按 `observed_at` 倒序；每项是一次读到该商品的来源 |
-| `evidence[].source` | 是 | `order`：该买家订单里的商品；`goods_card`：本对话消息中的商品卡片 |
-| `evidence[].observed_at` | 是 | 有限数字（Unix 秒）。`source=order` 时等于对应订单摘要的 `observed_at`（实际从页面读到的时间）；`source=goods_card` 时等于该消息的 `created_at`（卡片展示价对应的时刻） |
-| `evidence[].order_ref` | `source=order` 时必填，其他来源不得出现 | 须等于本上下文 `orders[].order_ref` 之一 |
-| `evidence[].sku` `evidence[].quantity` | 仅 `source=order` 可选 | 订单里买家所选的规格文字（≤200 字）、正整数件数 |
-| `evidence[].message_id` | `source=goods_card` 时必填，其他来源不得出现 | 须等于本上下文 `messages[].id` 之一，且该消息 `kind=card` |
+| `evidence` | 是 | 数组，1–5 项，按 `observed_at` 倒序，同一 `order_ref` 或同一 `message_id` 只出现一次；每项是读到该商品的一处来源 |
+| `evidence[].source` | 是 | `order`：该买家的某笔订单里有这件商品；`goods_card`：本对话某条消息是这件商品的卡片 |
+| `evidence[].observed_at` | 是 | 有限数字（Unix 秒）。`source=order` 时**等于**该订单摘要的 `observed_at`（实际从页面读到的时间）；`source=goods_card` 时**等于**该消息的 `created_at`（卡片展示价对应的时刻） |
+| `evidence[].order_ref` | `source=order` 时必填，其他来源不得出现 | 须等于本上下文 `orders[].order_ref` 之一，且该订单的 `items` 里有引用本条目 `goods_ref` 的明细 |
+| `evidence[].message_id` | `source=goods_card` 时必填，其他来源不得出现 | 须等于本上下文 `messages[].id` 之一；该消息须为 `kind=card`、`card.type=goods`，且 `card.title` 等于本条目的 `title` |
 | `evidence[].card_price` | 仅 `source=goods_card` 可选 | 卡片上显示的价格文字（≤200 字），即**卡片发出时的展示价** |
 
-未列出的字段一律 400。各来源只允许上表列出的字段；字段与来源不匹配（例如 `source=order` 却带 `card_price`）也返回 400。
+- 未列出的字段一律 400。各来源只允许上表列出的字段，字段与来源不匹配（例如 `source=order` 却带 `card_price`）也返回 400。
+- 规格和件数**只放在订单明细 `orders[].items` 里**，不放在 `evidence` 中：同一订单里同一件商品可能有多个规格，`evidence` 只说明“这笔订单里有这件商品”。
 
 ### `orders[].items`
 
-多商品订单在原有订单摘要上增加可选字段 `items`（数组，1–5 项）：
+订单摘要增加可选字段 `items`，数组，1–5 项，是该订单的商品明细：
 
 ```json
-{"order_ref":"o-2","goods_title":"示例商品","items":[{"goods_ref":"g-1","goods_title":"示例商品","sku":"示例规格","quantity":1},{"goods_ref":"g-2","goods_title":"示例商品二","quantity":2}],"observed_at":1790008000}
+{"order_ref":"o-2","goods_title":"示例商品","sku":"示例规格","quantity":1,"items":[
+  {"goods_ref":"g-1","goods_title":"示例商品","sku":"示例规格","quantity":1},
+  {"goods_ref":"g-1","goods_title":"示例商品","sku":"示例规格二","quantity":2},
+  {"goods_title":"示例商品三"}],"observed_at":1790008000}
 ```
 
-- 每项 `goods_ref` 必填，须等于 `context.goods[].goods_ref` 之一。`goods_title` 必填（≤200 字）；`sku`（≤200 字）、`quantity`（正整数）可选。
-- 原有的 `goods_title` `sku` `quantity` 保留，等于 `items` 第一项，旧逻辑不受影响。
-- 超过 5 件商品的订单只带前 5 项；对应商品因 `goods` 的 10 项上限没有进入 `goods` 的项也不带。因此 `items` 不一定是订单的全部商品，后台不得据此声称订单只有这些商品。
+- 按页面订单里的顺序，列出前 5 条明细，**不因 `goods` 的 10 项上限而删减**。
+- 每项字段：
+  - `goods_title`：必填，≤200 字；
+  - `sku`：可选，≤200 字；
+  - `quantity`：可选，正整数；
+  - `goods_ref`：可选。只有这件商品进入了 `context.goods` 时才带，而且必须等于其中某项的 `goods_ref`。同一 `goods_ref` 可以出现在多条明细里，对应不同规格。
+- 原有的 `goods_title` `sku` `quantity` **语义不变**，仍是页面订单的首件商品，与旧客户端一致。它们与 `items` 相互独立：通常等于 `items` 第一项，但后台**不得依赖二者相等**，也不得用其中一个去校验另一个。
+- 超过 5 条明细的订单只带前 5 条，后台不得据此声称订单只有这些商品。
 
 ### 规则
 
-- **价格**：`card_price` 只表示卡片发出时显示的价格；订单 `amount` 是整单实付。两者都**不是当前售价**，也不能互相换算成单价。本草案不提供现价、优惠、完整规格或库存；后台不得把这些字段缺失解释成没有库存、不支持或没有优惠，需要时请买家看商品页或转人工。
+- **价格**：`card_price` 只表示卡片发出时显示的价格；订单 `amount` 是整单实付。两者都**不是当前售价**，也不能互相换算成单价。本草案不提供现价、优惠、完整规格或库存；后台不得把这些信息缺失解释成没有库存、不支持或没有优惠，需要时请买家看商品页或转人工。
 - **归属**：
   - 订单来源按读取订单时请求里的买家归属（同“订单、物流与备注”），卡片来源随所在消息归属；
   - 都与当前选中的对话无关；
   - 无法确认归属的直接丢弃。
-- **同一商品的判断**：前台用平台商品编号在本机合并；读不到编号时按完全相同的标题合并。平台商品编号不上传，不出现在 `goods_ref` 中。
-- **版本**：商品快照变化本身不产生新事件，但会使 `context_revision` 递增。
+- **版本**：商品快照变化本身不产生新事件，但会使 `context_revision` 递增；`goods_ref` 不因此改变（见“身份”）。
 - **数据不是指令**：标题、规格等文字只是数据。
 - **回答规则**：多件商品无法确定买家问的是哪件时先问清；未列出的商品属性不补造。
 - **暂不提供**（字段未确认，前台不实现）：
   - 买家进店来源卡片里的商品信息；
   - 商品推荐列表的价格和分组含义；
-  - 订单内各商品的单价。
+  - 订单内各商品的单价；
+  - 买家发来的商品卡片里的商品编号。
   字段结构确认后再另行补充。
 
 ### 测试要求（实现阶段）
 
 至少覆盖：
-- 能力协商四种组合；未确认能力时带 `goods` 或 `items` 返回 400。
-- 字段校验：必填、类型、上限、重复、未知字段、来源与字段不匹配。
-- 引用一致：`order_ref`、`message_id`、`items[].goods_ref` 都能对上。
-- 跨买家的迟到响应不得进入本对话。
-- 编号合并与标题合并、新鲜度、多商品订单超过 5 件。
+- **能力协商**：四种组合；未确认能力时带 `goods` 或 `items` 返回 400。
+- **字段校验**：必填、类型、上限、重复、未知字段、来源与字段不匹配。
+- **引用一致**：
+  - `order_ref` 能对上，且该订单有对应明细；
+  - `message_id` 是标题相同的商品卡片；
+  - `observed_at` 与引用对象一致；
+  - `items[].goods_ref` 存在于 `goods`。
+- **身份**：同一对话跨多次提交 `goods_ref` 不变，包括后来出现同名的有编号商品时；编号相同、标题改变时引用不变；有编号和只有标题的身份不合并。
+- **订单明细**：同一订单同一商品的多个规格都保留在 `items`；达到 `goods` 10 项上限时，`items` 不被删减、`goods_ref` 省略；超过 5 条明细；原摘要与 `items` 首项不同时不报错。
+- **归属**：跨买家的迟到响应不得进入本对话。
 
 ## unknown 人工核查（1.0 补充）
 
