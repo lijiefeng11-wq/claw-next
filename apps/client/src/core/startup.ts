@@ -196,6 +196,17 @@ export function startupDecision(input: { packaged: boolean; platform: NodeJS.Pla
   return { action: "run", automatic: false };
 }
 
+/**
+ * macOS：系统任务（LaunchAgent）里写的程序路径必须长期有效。
+ * 在“下载”等位置解压后直接打开的应用会被系统放到临时只读位置运行（路径含 /AppTranslocation/），退出或重启后就不存在；
+ * 不在“应用程序”文件夹里的应用也容易被移动或清理。这两种情况都不写、不更新系统任务，并提示用户移到“应用程序”文件夹。
+ * 其他平台不检查。
+ */
+export function stableAppLocation(input: { platform: NodeJS.Platform; execPath: string; inApplications: boolean }): boolean {
+  if (input.platform !== "darwin") return true;
+  return input.inApplications && !input.execPath.includes("/AppTranslocation/");
+}
+
 export function startupSupported(packaged: boolean, platform: NodeJS.Platform): boolean {
   return packaged && (platform === "darwin" || platform === "win32");
 }

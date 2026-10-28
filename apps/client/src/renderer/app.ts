@@ -18,7 +18,7 @@
   };
   type ShopConfig = { shop_id: string; display_name: string; backend_url: string; platform_shop_id: string; adapter: "mock" | "pdd"; mode: string };
   type ShopEntry = { config: ShopConfig; token_set: boolean; running: boolean; error: string | null; platform: { logged_in: boolean; detail: string; page?: { state: string; gave_up: boolean }; nav?: { on_chat: boolean; can_go_back: boolean } } | null; alert: { level: "error" | "warn"; text: string } | null; view: View | null };
-  type Startup = { supported: boolean; platform: string; launch_at_login: boolean; restart_on_crash: boolean; managed: boolean };
+  type Startup = { supported: boolean; platform: string; launch_at_login: boolean; restart_on_crash: boolean; managed: boolean; location_ok?: boolean };
   type AppState = { app: { secure_storage: boolean; startup?: Startup }; shops: ShopEntry[] };
   type Bridge = { invoke(channel: string, payload?: unknown): Promise<{ ok: boolean; data?: AppState; error?: string }>; onState(cb: (s: AppState) => void): () => void };
 
@@ -48,6 +48,7 @@
     not_platform_shop: "只有拼多多店铺有平台工作台",
     startup_unsupported: "开机自启与崩溃重启只在打包后的 Mac / Windows 应用中可用",
     startup_apply_failed: "保存启动设置失败，请查看客户端日志",
+    startup_needs_applications: "请先把客户端拖到“应用程序”文件夹、从那里打开，再设置开机自启和崩溃重启",
   };
 
   const MODES: [string, string, string][] = [
@@ -173,18 +174,22 @@
     const st = state.app.startup;
     if (!st) return box.replaceChildren();
     const save = (patch: Partial<Startup>) => void call("app:setStartup", { launch_at_login: st.launch_at_login, restart_on_crash: st.restart_on_crash, ...patch });
+    // Mac 上不在“应用程序”文件夹里运行时，程序路径写不进系统任务：不能修改，并说明原因。
+    const misplaced = st.supported && st.location_ok === false;
     const option = (label: string, checked: boolean, onchange: (v: boolean) => void) =>
-      h("label", { class: "check" }, h("input", { type: "checkbox", checked, disabled: !st.supported, onchange: (e: Event) => onchange((e.target as HTMLInputElement).checked) }), label);
+      h("label", { class: "check" }, h("input", { type: "checkbox", checked, disabled: !st.supported || misplaced, onchange: (e: Event) => onchange((e.target as HTMLInputElement).checked) }), label);
     const note = !st.supported
       ? "仅打包后的 Mac / Windows 独立应用可用。"
-      : `开机自启：登录${st.platform === "win32" ? " Windows" : "系统"}后自动打开客户端。崩溃后自动重启：异常退出后约 30 秒重新打开；正常退出不会重启；5 分钟内最多自动启动 3 次；只勾这一项不会开机启动。重新打开后恢复上次打开着的店铺，运行模式不变。${st.managed ? "当前由系统托管运行：修改的设置在本次正常退出后、下次打开或下次登录时生效。" : ""}`;
+      : misplaced
+        ? "客户端不在“应用程序”文件夹里运行（例如在“下载”里解压后直接打开），退出或重启后这个位置就失效，暂时不能修改这两项。请退出客户端，在访达里把它拖进“应用程序”文件夹，再从那里打开。"
+        : `开机自启：登录${st.platform === "win32" ? " Windows" : "系统"}后自动打开客户端。崩溃后自动重启：异常退出后约 30 秒重新打开；正常退出不会重启；5 分钟内最多自动启动 3 次；只勾这一项不会开机启动。重新打开后恢复上次打开着的店铺，运行模式不变。${st.managed ? "当前由系统托管运行：修改的设置在本次正常退出后、下次打开或下次登录时生效。" : ""}`;
     const details = h(
       "details",
       { open: settingsOpen ? true : undefined, ontoggle: (e: Event) => (settingsOpen = (e.target as HTMLDetailsElement).open) },
       h("summary", { text: "客户端设置" }),
       option("开机自启", st.launch_at_login, (v) => save({ launch_at_login: v })),
       option("崩溃后自动重启", st.restart_on_crash, (v) => save({ restart_on_crash: v })),
-      h("div", { class: "hint", text: note }),
+      h("div", { class: misplaced ? "hint error-text" : "hint", text: note }),
     );
     box.replaceChildren(details);
   }
