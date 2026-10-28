@@ -3,8 +3,14 @@
 
 import type { OrderSummary, OrderLogistics } from "./protocol.js";
 
-/** 本机订单记录：key 是平台订单号，只在本机用于去重与生成引用。 */
-export type PlatformOrder = { key: string; summary: OrderSummary };
+/**
+ * 本机订单记录：key 是平台订单号，只在本机用于去重与生成引用。
+ * goods：订单内各商品（最多 MAX_ORDER_GOODS 项，平台商品编号只在本机用于合并同一商品），供商品快照（契约 1.2 草案）使用；
+ * 草案生效前不提交。
+ */
+export type PlatformOrder = { key: string; summary: OrderSummary; goods?: OrderGoods[] };
+export type OrderGoods = { goods_id: string | null; title: string; sku?: string; quantity?: number };
+export const MAX_ORDER_GOODS = 5;
 
 export const MAX_ORDERS = 10;
 const MAX_TRACES = 5;
@@ -107,6 +113,7 @@ export function parseOrderList(request: unknown, response: unknown, observedAt: 
     if (!key) continue;
     const goods = Array.isArray(o.orderGoodsList) ? o.orderGoodsList[0] : o.orderGoodsList;
     const qty = goods?.goodsNumber;
+    const items = orderGoods(o.orderGoodsList);
     const t = traces(o.traceInfoList);
     const tracking = clip(o.trackingNumber, 200, false);
     const latest = newest(o.traceInfoList);
@@ -129,9 +136,26 @@ export function parseOrderList(request: unknown, response: unknown, observedAt: 
         logistics,
         observed_at: observedAt,
       }),
+      ...(items.length ? { goods: items } : {}),
     });
   }
   return { buyer, orders };
+}
+
+/** 订单内各商品：标题必须有（不含网址），编号只认纯数字；最多 MAX_ORDER_GOODS 项，保持平台顺序。 */
+function orderGoods(list: unknown): OrderGoods[] {
+  const out: OrderGoods[] = [];
+  for (const g of (Array.isArray(list) ? list : [list]) as Record<string, any>[]) {
+    if (out.length >= MAX_ORDER_GOODS) break;
+    if (!g || typeof g !== "object") continue;
+    const title = clip(g.goodsName, 200);
+    if (!title || /https?:\/\/|www\./i.test(title)) continue;
+    const rawId = g.goodsId;
+    const goods_id = (typeof rawId === "number" && Number.isSafeInteger(rawId) && rawId > 0) || (typeof rawId === "string" && /^[0-9]{1,32}$/.test(rawId)) ? String(rawId) : null;
+    const qty = g.goodsNumber;
+    out.push(compact({ goods_id, title, sku: clip(g.spec, 200), quantity: Number.isInteger(qty) && qty > 0 ? qty : undefined }));
+  }
+  return out;
 }
 
 /** 物流详情（chats/shippingDetail）：按快递单号对应到已读到的订单。 */
