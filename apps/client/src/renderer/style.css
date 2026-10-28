@@ -134,6 +134,7 @@ textarea { resize: vertical; min-height: 54px; }
 .pill .dot { margin-right: 4px; }
 .pbar .spacer { flex: 1; }
 .btn.small { padding: 3px 10px; font-size: 13px; }
+.btn.attention { background: #e8590c; border-color: #e8590c; color: #fff; }
 .segmented.small button { padding: 3px 10px; font-size: 13px; }
 .zoom { display: inline-flex; align-items: center; gap: 2px; }
 .zoom-label { font-size: 12px; color: #616e7c; margin-right: 2px; }

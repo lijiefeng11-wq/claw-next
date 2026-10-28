@@ -327,6 +327,14 @@ class Controller {
         if (blocked) throw new IpcValidationError(blocked);
         return this.state();
       }
+      case "shop:platformNav": {
+        this.require(p.shop_id);
+        const adapter = this.slots.get(p.shop_id)?.adapter;
+        if (!adapter?.navigatePlatform) throw new IpcValidationError("platform_window_closed");
+        const blocked = adapter.navigatePlatform(p.action);
+        if (blocked) throw new IpcValidationError(blocked);
+        return this.state();
+      }
       case "shop:dismissPopups": {
         this.require(p.shop_id);
         const adapter = this.slots.get(p.shop_id)?.adapter;

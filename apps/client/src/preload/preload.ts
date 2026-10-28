@@ -13,6 +13,7 @@
     "shop:logout",
     "shop:reloadPage",
     "shop:dismissPopups",
+    "shop:platformNav",
     "shop:setMode",
     "app:setStartup",
     "conv:takeover",

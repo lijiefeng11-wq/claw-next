@@ -16,6 +16,7 @@ export const IPC_CHANNELS = [
   "shop:logout",
   "shop:reloadPage",
   "shop:dismissPopups",
+  "shop:platformNav",
   "shop:setMode",
   "app:setStartup",
   "conv:takeover",
@@ -37,6 +38,7 @@ export type IpcPayload =
   | { channel: "workspace:present"; shop_id: string | null; bounds: { x: number; y: number; width: number; height: number } | null; zoom?: number }
   | { channel: "shop:save"; shop: ShopInput }
   | { channel: "shop:remove" | "shop:connect" | "shop:disconnect" | "shop:login" | "shop:logout" | "shop:reloadPage" | "shop:dismissPopups"; shop_id: string }
+  | { channel: "shop:platformNav"; shop_id: string; action: "back" | "chat" }
   | { channel: "shop:setToken"; shop_id: string; token: string }
   | { channel: "shop:setMode"; shop_id: string; mode: ShopMode }
   | { channel: "app:setStartup"; launch_at_login: boolean; restart_on_crash: boolean }
@@ -123,6 +125,11 @@ export function validateIpc(channel: unknown, payload: unknown): IpcPayload {
     case "shop:dismissPopups": {
       const v = record(payload, ["shop_id"]);
       return { channel: ch, shop_id: id(v.shop_id, "shop_id") };
+    }
+    case "shop:platformNav": {
+      const v = record(payload, ["shop_id", "action"]);
+      if (v.action !== "back" && v.action !== "chat") fail("invalid_nav_action");
+      return { channel: ch, shop_id: id(v.shop_id, "shop_id"), action: v.action };
     }
     case "shop:setToken": {
       const v = record(payload, ["shop_id", "token"]);
