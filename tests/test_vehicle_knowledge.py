@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -111,12 +112,32 @@ class VehicleKnowledgeTests(unittest.TestCase):
         with self.assertRaises(vk.VehicleKnowledgeError): vk.load_directory(self.root)
 
     def test_limits_empty_and_relative_path(self):
-        for constant, limit in (("MAX_FILES", 0), ("MAX_FILE_BYTES", 10), ("MAX_TOTAL_BYTES", 10), ("MAX_ENTRIES", 0)):
+        for constant, limit in (("MAX_FILES", 0), ("MAX_FILE_BYTES", 10), ("MAX_TOTAL_BYTES", 10), ("MAX_ENTRIES", 0), ("MAX_ALIASES", 0)):
             with patch.object(vk, constant, limit):
                 with self.assertRaises(vk.VehicleKnowledgeError): vk.load_directory(self.root)
         with self.assertRaises(vk.VehicleKnowledgeError): vk.load_directory("relative/path")
         self.file.unlink()
         with self.assertRaises(vk.VehicleKnowledgeError): vk.load_directory(self.root)
+
+    def test_repeated_prefix_is_bounded_and_timeout_discards_partial_matches(self):
+        records = [vk._record(document(str(i), model="a" * 186)) for i in range(5000)]
+        catalog = vk.VehicleCatalog(records)
+        started = time.monotonic()
+        result = catalog.lookup("a" * 8000)
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertIn(result["status"], ("not_found", "unavailable"))
+        self.assertEqual(result["candidates"], [])
+        with patch.object(vk, "MAX_LOOKUP_SECONDS", 0):
+            result = catalog.lookup("a" * 186)
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["candidates"], [])
+        self.assertIsNone(result["total_matches"])
+
+    def test_model_metacharacters_are_literal(self):
+        self.file.write_text(document(model="A.6"), encoding="utf-8")
+        catalog = vk.load_directory(self.root)
+        self.assertEqual(catalog.lookup("A.6能用吗")["status"], "matched")
+        self.assertEqual(catalog.lookup("AB6能用吗")["status"], "not_found")
 
     def test_unknown_family_remains_blank_and_does_not_guess_short_names(self):
         self.file.write_text(document(model="甲", family=""), encoding="utf-8")

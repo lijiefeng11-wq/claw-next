@@ -328,12 +328,6 @@ class Server(ThreadingHTTPServer):
                     return False
                 # next_job invokes this while holding the same lock as its job snapshot.
                 model_config = self.store.model_config(self.config.get("model", {}))
-                catalog = self.vehicle_catalogs.get(job["shop_id"])
-                if catalog is not None:
-                    # Local catalog selection comes from server configuration and
-                    # authenticated shop ownership, never from submitted context.
-                    job["vehicle_knowledge"] = catalog.lookup(
-                        job["payload"]["context"]["messages"][-1]["content"])
                 return True
 
             job = self.store.next_job(accept=available, after_shop=last_shop)
@@ -360,7 +354,15 @@ class Server(ThreadingHTTPServer):
         with diagnostics.scope(self.diagnostics, event_ref=diagnostics.reference(job["shop_id"], job["event_id"])):
             diagnostics.emit("decision_started")
             try:
-                if job.get("deadline_monotonic") is not None:
+                catalog = self.vehicle_catalogs.get(job["shop_id"])
+                if catalog is not None:
+                    # Run in this shop's worker, outside the global store lock and
+                    # scheduler. Only authenticated shop ownership selects a catalog.
+                    job["vehicle_knowledge"] = catalog.lookup(
+                        job["payload"]["context"]["messages"][-1]["content"])
+                if job.get("vehicle_knowledge", {}).get("status") == "unavailable":
+                    result = decision("handoff", "vehicle_knowledge_unavailable")
+                elif job.get("deadline_monotonic") is not None:
                     result = modelworker.bounded_decide(
                         job, model_config, lambda: self.store.job_is_active(job), self.stop)
                 else:

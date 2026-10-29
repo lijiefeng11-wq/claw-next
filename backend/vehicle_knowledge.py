@@ -4,12 +4,15 @@ import os
 from pathlib import Path
 import re
 import stat
+import time
 import unicodedata
 
 MAX_FILES = 5000
 MAX_FILE_BYTES = 65536
 MAX_TOTAL_BYTES = 16 * 1024 * 1024
 MAX_ENTRIES = 20000
+MAX_ALIASES = 20000
+MAX_LOOKUP_SECONDS = 0.1
 COLUMNS = ("版型", "车系", "车型", "尺码", "前挡铁圈尺寸", "前窗铁圈尺寸", "中窗铁圈尺寸",
            "侧三铁圈尺寸", "尾挡铁圈尺寸", "前挡风 上长", "前挡风 下长", "前挡风 高度", "不透光专用")
 START, END = "<!-- WPS_SYNC_START -->", "<!-- WPS_SYNC_END -->"
@@ -55,7 +58,7 @@ def _record(text):
 
 def _normalize(text):
     # Spaces separate an ASCII model from its brand/year. Deleting them turns
-    # "Brand A6 2022" into one identifier and defeats _contains' boundaries.
+    # "Brand A6 2022" into one identifier and defeats the matcher's boundaries.
     return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", text).casefold()).strip()
 
 
@@ -79,32 +82,37 @@ def _aliases(record):
     return tuple(sorted(result))
 
 
-def _contains(text, name):
-    start = text.find(name)
-    while start >= 0:
-        end = start + len(name)
-        # Only identifier boundaries are constrained: Chinese question words
-        # can directly surround a model name, but A6 must not match A60/A6L.
-        left = start == 0 or not (name[0].isascii() and name[0].isalnum()
-                                  and text[start - 1].isascii() and text[start - 1].isalnum())
-        right = end == len(text) or not (text[end].isascii() and text[end].isalnum())
-        if left and right:
-            return True
-        start = text.find(name, start + 1)
-    return False
+def _matcher(name):
+    # Fixed escaped literals with ASCII boundaries; never a source-supplied regex.
+    # Reject an invalid start before scanning a long repeated prefix.
+    left = r"(?<![a-z0-9])" if name[0].isascii() and name[0].isalnum() else ""
+    return re.compile(left + re.escape(name) + r"(?![a-z0-9])")
 
 
 class VehicleCatalog:
     def __init__(self, records):
-        self._records = tuple((record, _aliases(record)) for record in records)
+        self._records = tuple(records)
         self.record_count = len(self._records)
+        aliases = {}
+        for index, record in enumerate(self._records):
+            for name in _aliases(record):
+                aliases.setdefault(name, set()).add(index)
+                _require(len(aliases) <= MAX_ALIASES, "too_many_vehicle_aliases")
+        self._matchers = tuple((_matcher(name), indexes) for name, indexes in aliases.items())
 
     def lookup(self, text):
         query = _normalize(text) if isinstance(text, str) and len(text) <= 8000 else ""
         # A longer name must not hide another car mentioned in the same question.
         # Keep all exact alias matches; overlaps remain candidates to clarify.
-        matches = [record for record, aliases in self._records
-                   if any(_contains(query, alias) for alias in aliases)] if query else []
+        deadline, matched = time.monotonic() + MAX_LOOKUP_SECONDS, set()
+        for pattern, indexes in self._matchers if query else ():
+            if pattern.search(query):
+                matched.update(indexes)
+            if time.monotonic() >= deadline:
+                # Never return a partial catalog scan as a unique fitment candidate.
+                return {"status": "unavailable", "reason": "lookup_budget_exceeded", "candidates": [],
+                        "total_matches": None, "truncated": True}
+        matches = [self._records[index] for index in sorted(matched)]
         return {"status": "not_found" if not matches else "matched" if len(matches) == 1 else "ambiguous",
                 "candidates": copy.deepcopy(matches[:5]), "total_matches": len(matches), "truncated": len(matches) > 5}
 

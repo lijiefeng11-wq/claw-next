@@ -3,6 +3,7 @@ import copy
 import json
 from pathlib import Path
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -101,5 +102,56 @@ class GoodsVehicleIntegrationTests(unittest.TestCase):
                         rows = server.store.db.execute("SELECT payload FROM events").fetchall()
                     self.assertNotIn("PRIVATE_FIXTURE_SIZE", str(rows))
                     self.assertNotIn(str(vault), json.dumps(calls))
+                    with patch.object(server.vehicle_catalogs["a"], "lookup", return_value={"status": "unavailable"}):
+                        enqueue("a", 2)
+                    self.assertEqual(len(calls), 2)  # No model call with incomplete lookup results.
+                    with server.store.lock:
+                        result = json.loads(server.store.db.execute("SELECT decision FROM events WHERE event_id='a2'").fetchone()[0])
+                    self.assertEqual((result["action"], result["reason"]), ("handoff", "vehicle_knowledge_unavailable"))
                 finally:
                     server.server_close()
+
+    def test_slow_catalog_does_not_block_other_shop_heartbeat_or_scheduler(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); vault = root / "catalog"; vault.mkdir()
+            (vault / "a.md").write_text(document(), encoding="utf-8")
+            config = {"shops": [{"shop_id": k, "name": "虚构店"} for k in ("a", "b")], "clients": [],
+                      "model": {"primary": SLOT}, "vehicle_knowledge": {"a": str(vault)}}
+            entered, release, heartbeat_done, other_model = (threading.Event() for _ in range(4))
+            def slow_lookup(_):
+                entered.set()
+                if not release.wait(5): raise TimeoutError("fictional lookup not released")
+                return {"status": "not_found", "candidates": []}
+            def post(_, body):
+                if json.loads(body["messages"][1]["content"])["messages"][-1]["id"] == "b":
+                    other_model.set()
+                return completion()
+            with patch("backend.engine._post", side_effect=post):
+                server = create_server(config, root / "data", port=0)
+                try:
+                    for shop in ("a", "b"):
+                        server.store.update_settings(shop, {"enabled": True, "mode": "model", "rules": [], "system_prompt": "虚构测试"})
+                    def enqueue(shop):
+                        identity = {"shop_id": shop, "client_id": "client-" + shop}
+                        lease = server.store.heartbeat(identity, {"instance_id": "i", "session_id": "s"})
+                        now = time.time()
+                        server.store.enqueue(identity, {"event_id": shop, "message_id": shop, "conversation_id": shop,
+                            "context_revision": 1, "received_at": now,
+                            **{k: lease[k] for k in ("instance_id", "session_id", "generation")},
+                            "context": {"history_complete": True, "messages": [
+                                {"id": shop, "role": "buyer", "kind": "text", "content": "示例车A", "created_at": now}]}})
+                        server.wake.set()
+                    with patch.object(server.vehicle_catalogs["a"], "lookup", side_effect=slow_lookup):
+                        enqueue("a")
+                        self.assertTrue(entered.wait(2))
+                        def other_shop():
+                            enqueue("b")
+                            heartbeat_done.set()
+                        worker = threading.Thread(target=other_shop, daemon=True); worker.start()
+                        try:
+                            self.assertTrue(heartbeat_done.wait(1), "Other shop heartbeat blocked by catalog lookup")
+                            self.assertTrue(other_model.wait(1), "Scheduler blocked by another shop's lookup")
+                        finally:
+                            release.set(); worker.join(2)
+                finally:
+                    release.set(); server.server_close()
