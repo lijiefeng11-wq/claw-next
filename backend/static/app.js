@@ -54,6 +54,7 @@
     shopStatus: "unknown",
     shopError: "",
     shopUpdatedAt: null,
+    promptDraft: { seq: 0, busy: false, shopId: null },
     verify: {
       open: false,
       busy: false,
@@ -92,6 +93,7 @@
     "shop-select", "shop-meta", "settings-version", "lease-status", "lease-details",
     "lease-instance", "lease-session", "lease-generation", "lease-expires",
     "settings-form", "enabled-input", "enabled-note", "mode-input", "prompt-input",
+    "prompt-brief", "generate-prompt", "prompt-draft-status", "prompt-draft", "apply-prompt-draft",
     "rules-list", "rules-empty", "rules-count", "add-rule-btn", "rules-error",
     "settings-remote-note", "save-btn", "reset-btn", "save-status",
     "limit-select", "refresh-btn", "auto-refresh", "events-meta", "events-body", "events-empty",
@@ -720,6 +722,13 @@
     });
     containsLabel.appendChild(containsTitle);
     containsLabel.appendChild(containsInput);
+    function help(label, text) {
+      const note = document.createElement("span");
+      note.className = "field-help";
+      setText(note, text);
+      label.appendChild(note);
+    }
+    help(containsLabel, "必填。买家文字里包含这个词就按本条处理；例如“材质”。每条只填一个词，按列表顺序取第一条命中。不是只要意思相近就命中。");
     const matchingFields = document.createElement("div");
     matchingFields.appendChild(containsLabel);
     const descriptionLabel = document.createElement("label");
@@ -741,6 +750,7 @@
     });
     descriptionLabel.appendChild(descriptionTitle);
     descriptionLabel.appendChild(descriptionInput);
+    help(descriptionLabel, "选填，最多 500 字。告诉混合方式的模型什么问题适用；例如“询问产品材质”。留空仍可按匹配词命中。纯模型方式不使用这些固定规则。");
     matchingFields.appendChild(descriptionLabel);
     row.appendChild(matchingFields);
 
@@ -767,6 +777,7 @@
     sendSelect.disabled = state.formDisabled;
     sendLabel.appendChild(sendTitle);
     sendLabel.appendChild(sendSelect);
+    help(sendLabel, "选择回复文字，或发送本店已有的说明书、商品卡片、视频。这里只规定回复内容；实际发送还需要前台已获授权，保存本项不会开启自动回复。");
     replyGroup.appendChild(sendLabel);
 
     const matchLabel = document.createElement("label");
@@ -784,6 +795,7 @@
     matchInput.setAttribute("aria-label", "第 " + (index + 1) + " 条规则的候选名称关键词");
     matchLabel.appendChild(matchTitle);
     matchLabel.appendChild(matchInput);
+    help(matchLabel, "选填，最多 50 字。用于筛选前台提供的候选名称，例如“安装”。留空表示按类型选；只有唯一候选才能发送。不要填网址或本机文件路径。");
     replyGroup.appendChild(matchLabel);
 
     const sendHint = document.createElement("div");
@@ -811,6 +823,7 @@
     });
     replyLabel.appendChild(replyTitle);
     replyLabel.appendChild(replyInput);
+    help(replyLabel, "文字回复时必填，最多 2000 字；选商品卡等方式时可留空。示例写法：“请告知具体款式，我先核对材质。”请填写店铺已确认的事实，模型选中这条规则后也会使用原文。");
     replyGroup.appendChild(replyLabel);
     row.appendChild(replyGroup);
 
@@ -990,6 +1003,97 @@
 
   /* ---------- 设置表单 ---------- */
 
+  function syncPromptDraft() {
+    const busy = state.promptDraft.busy;
+    el["prompt-brief"].disabled = state.formDisabled || busy;
+    el["prompt-draft"].disabled = state.formDisabled || busy;
+    el["generate-prompt"].disabled = state.formDisabled || busy;
+    el["apply-prompt-draft"].disabled = state.formDisabled || busy ||
+      state.promptDraft.shopId !== state.selectedShopId || !el["prompt-draft"].value.trim();
+    setText(el["generate-prompt"], busy ? "正在生成草稿…" : "一键生成提示词草稿");
+  }
+
+  function clearPromptDraft() {
+    state.promptDraft.seq += 1;
+    state.promptDraft.busy = false;
+    state.promptDraft.shopId = null;
+    el["prompt-brief"].value = "";
+    el["prompt-draft"].value = "";
+    setText(el["prompt-draft-status"], "");
+    syncPromptDraft();
+  }
+
+  async function generatePromptDraft() {
+    if (state.formDisabled || state.promptDraft.busy || !state.selectedShopId) return;
+    const brief = el["prompt-brief"].value.trim();
+    if (!brief || brief.length > 4000) {
+      setText(el["prompt-draft-status"], "请用 1–4000 字说明已确认的规则；不清楚的可以写“待确认”。");
+      el["prompt-brief"].focus();
+      return;
+    }
+    if (state.model.dirty) {
+      setText(el["prompt-draft-status"], "模型配置有未保存的修改，请先到“模型配置”核对并保存或重新加载。");
+      return;
+    }
+    const epoch = state.epoch, token = state.token, shop = state.selectedShopId;
+    const seq = ++state.promptDraft.seq;
+    const current = function () {
+      return state.epoch === epoch && state.token === token && state.selectedShopId === shop && state.promptDraft.seq === seq;
+    };
+    state.promptDraft.busy = true;
+    syncPromptDraft();
+    setText(el["prompt-draft-status"], "正在读取已保存的主模型配置…");
+    try {
+      const config = await request("/api/v1/admin/model", { token: token });
+      if (!current()) return;
+      if (!validModelConfig(config)) throw new ApiError(0, "bad_response");
+      if (!config.primary.base_url || !config.primary.model) {
+        setText(el["prompt-draft-status"], "请先在“模型配置”保存主模型的接口地址和名称。");
+        return;
+      }
+      setText(el["prompt-draft-status"], "正在使用主模型 " + config.primary.model + " 生成；不会保存设置或开启回复。");
+      const data = await request("/api/v1/admin/prompt-draft", {
+        method: "POST", token: token, body: { shop_id: shop, brief: brief, version: config.version }
+      });
+      if (!current()) return;
+      if (!data || data.shop_id !== shop || data.version !== config.version ||
+          typeof data.draft !== "string" || !data.draft.trim() || data.draft.length > LIMITS.prompt) {
+        throw new ApiError(0, "bad_response");
+      }
+      // Provider text is untrusted plain text, never HTML or an automatic settings update.
+      el["prompt-draft"].value = data.draft;
+      state.promptDraft.shopId = shop;
+      setText(el["prompt-draft-status"], "草稿已生成，尚未生效。请核对材质、安装、退换等事实，编辑后再填入提示词并保存设置。");
+    } catch (err) {
+      if (!current()) return;
+      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+        handleError(err, "生成草稿失败", epoch, token);
+      } else {
+        const message = err.code === "model_config_changed" ? "模型配置已改变，请重新生成。" :
+          err.code === "prompt_draft_busy" ? "已有草稿正在生成，请稍后再试。" :
+          "生成失败或结果不完整，请检查主模型连接后重试。现有提示词未改变，也没有切换到备用模型。";
+        setText(el["prompt-draft-status"], message);
+      }
+    } finally {
+      if (current()) {
+        state.promptDraft.busy = false;
+        syncPromptDraft();
+      }
+    }
+  }
+
+  function applyPromptDraft() {
+    if (state.formDisabled || state.promptDraft.busy || state.promptDraft.shopId !== state.selectedShopId) return;
+    const draft = el["prompt-draft"].value.trim();
+    if (!draft || draft.length > LIMITS.prompt) {
+      setText(el["prompt-draft-status"], "草稿需为 1–8000 字，请修改后再填入。");
+      return;
+    }
+    el["prompt-input"].value = draft;
+    onFormEdit();
+    setText(el["prompt-draft-status"], "已填入提示词，尚未保存。请核对后点击“保存设置”；纯规则方式不使用模型提示词。");
+  }
+
   function onFormEdit() {
     state.formDirty = true;
     setText(el["save-status"], "有未保存的修改。");
@@ -1007,6 +1111,10 @@
     setText(el["enabled-note"], s.enabled === true ? "服务器当前为开启。" : "服务器当前为关闭。");
     el["mode-input"].value = ["model", "hybrid"].includes(s.mode) ? s.mode : "rules";
     el["prompt-input"].value = typeof s.system_prompt === "string" ? s.system_prompt : "";
+    if (state.promptDraft.shopId === state.selectedShopId &&
+        el["prompt-draft"].value.trim() && el["prompt-draft"].value.trim() === el["prompt-input"].value) {
+      setText(el["prompt-draft-status"], "草稿内容已保存到当前店铺。只有模型或混合方式会使用；启用状态仍以服务器返回值为准。");
+    }
     loadRules(Array.isArray(s.rules) ? s.rules : []);
     hideRulesError();
     showRemoteNote("");
@@ -1042,6 +1150,7 @@
   }
 
   function clearSettingsForm() {
+    clearPromptDraft();
     state.loadedSettings = null;
     state.remoteSettings = null;
     state.formVersion = null;
@@ -1060,6 +1169,7 @@
 
   function setFormDisabled(disabled) {
     state.formDisabled = disabled;
+    syncPromptDraft();
     ["enabled-input", "mode-input", "prompt-input", "save-btn", "reset-btn"].forEach(function (id) {
       byId(id).disabled = disabled;
     });
@@ -1605,6 +1715,7 @@
       state.selectedShopId = state.shops[0].shop_id;
     }
     if (state.selectedShopId !== previousShopId || opts.resetForm === true) {
+      clearPromptDraft();
       state.formDirty = false;
     }
     syncShopSelect();
@@ -2996,6 +3107,7 @@
       return;
     }
     state.selectedShopId = value;
+    clearPromptDraft();
     state.loadedSettings = null;
     state.remoteSettings = null;
     state.formVersion = null;
@@ -3162,6 +3274,9 @@
     el["shop-select"].addEventListener("change", onShopChange);
     el["settings-form"].addEventListener("submit", saveSettings);
     el["reset-btn"].addEventListener("click", resetSettings);
+    el["generate-prompt"].addEventListener("click", generatePromptDraft);
+    el["apply-prompt-draft"].addEventListener("click", applyPromptDraft);
+    el["prompt-draft"].addEventListener("input", syncPromptDraft);
     el["add-rule-btn"].addEventListener("click", addRule);
     el["refresh-btn"].addEventListener("click", function () {
       showAlert("");
