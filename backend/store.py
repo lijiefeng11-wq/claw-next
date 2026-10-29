@@ -8,7 +8,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import deadlines, diagnostics, modelconfig, modelsecrets, senditems
+from . import deadlines, diagnostics, goods_snapshot, modelconfig, modelsecrets, senditems
 from .content import validate_content
 from .orders import validate_orders
 from .lock import DataLock
@@ -57,6 +57,8 @@ def validate_event(p):
     require(msgs[-1]["id"] == p["message_id"] and msgs[-1]["role"] == "buyer", "latest_message_mismatch")
     validate_content(msgs, require)
     validate_orders(ctx, require)
+    goods_snapshot.validate_goods(ctx, require)
+    goods_snapshot.validate_references(ctx, require)
     senditems.validate_options(ctx, require)
 
 
@@ -332,7 +334,7 @@ class Store:
             resumed = owner and old["session_id"] == p["session_id"] and bool(old.get("restart_pending"))
             gen = old["generation"] if same or resumed else (old["generation"] + 1 if old else 1)
             lease = {"shop_id": identity["shop_id"], "client_id": identity["client_id"], "instance_id": p["instance_id"], "session_id": p["session_id"], "generation": gen, "expires_at": now + 60}
-            lease["capabilities"] = [cap for cap in (senditems.CAPABILITY, deadlines.CAPABILITY) if cap in caps]
+            lease["capabilities"] = [cap for cap in (senditems.CAPABILITY, deadlines.CAPABILITY, goods_snapshot.CAPABILITY) if cap in caps]
             self.db.execute("INSERT OR REPLACE INTO leases VALUES (?,?)", (identity["shop_id"], json.dumps(lease)))
             self._resolve_recovery(identity["shop_id"], lease, now)
             return lease
@@ -485,12 +487,16 @@ class Store:
         validate_event(p)
         digest = hashlib.sha256(json.dumps(p, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
         with self.lock, self.db:
+            # The same payload returns the stored event before any lease or
+            # capability check, so an older client keeps its original idempotence.
             row = self.db.execute("SELECT * FROM events WHERE shop_id=? AND event_id=?", (identity["shop_id"], p["event_id"])).fetchone()
             if row:
                 require(row["client_id"] == identity["client_id"] and row["digest"] == digest, "event_conflict", 409)
                 self._expire_deadline(row)
                 return self._view(self._row(identity, p["event_id"]))
             lease = self._check_lease(identity, p)
+            if "goods" in p["context"] or any("items" in order for order in p["context"].get("orders", [])):
+                require(goods_snapshot.CAPABILITY in lease.get("capabilities", []), "capability_not_confirmed")
             if has_budget:
                 require(deadlines.CAPABILITY in lease.get("capabilities", []), "capability_not_confirmed")
             if "send_options" in p["context"]:

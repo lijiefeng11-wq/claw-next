@@ -8,7 +8,7 @@ MAX_NOTE = 500
 
 ORDER_KEYS = frozenset({"order_ref", "observed_at", "status", "goods_title", "sku", "amount",
                         "after_sale", "note", "quantity", "order_time", "shipping_time",
-                        "receive_time", "logistics"})
+                        "receive_time", "logistics", "items"})
 LOGISTICS_KEYS = frozenset({"company", "tracking_number", "state", "traces", "observed_at"})
 ORDER_TEXT_KEYS = ("status", "goods_title", "sku", "amount", "after_sale")
 OPTIONAL_TIMES = ("order_time", "shipping_time", "receive_time")
@@ -40,6 +40,9 @@ def validate_order(order, require):
         require(name not in order or order[name] is None or unix_seconds(order[name]), "invalid_order_" + name)
     if "logistics" in order:
         validate_logistics(order["logistics"], require)
+    # Goods-snapshot detail lines are independent of the summary fields above.
+    from . import goods_snapshot
+    goods_snapshot.validate_items(order, require)
 
 
 def validate_logistics(logistics, require):
