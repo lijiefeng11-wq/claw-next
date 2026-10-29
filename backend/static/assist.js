@@ -200,7 +200,7 @@ window.setupAdminAssist = function (options) {
       if (data.shop_id !== c.shop || data.shop_version !== c.version || data.version !== config.version || !Array.isArray(data.candidates) || data.candidates.length > 30) throw new Error("invalid_response");
       draft = {context: c, snapshot, modelVersion: config.version, items: []};
       data.candidates.forEach((candidate, index) => { draft.items.push(renderCandidate(candidate, index)); });
-      say("rule-draft-status", data.candidates.length ? "已生成 " + data.candidates.length + " 条草稿，默认跳过。请选择要新增或替换的条目。" + (data.warnings || []).join(" ") : "本次样本中没有找到至少两个独立来源的重复问题，没有添加规则。");
+      say("rule-draft-status", (data.candidates.length ? "已生成 " + data.candidates.length + " 条草稿，默认跳过。请选择要新增或替换的条目。" : "本次没有可用的规则草稿，没有添加规则。") + (data.warnings || []).join(" "));
     } catch (err) {
       if (current(c)) { clearCandidates(); error(err, "rule-draft-status", c); }
     }

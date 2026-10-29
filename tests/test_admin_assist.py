@@ -119,7 +119,7 @@ class AdminAssistTests(unittest.TestCase):
             self.assertNotIn("PRIVATE", json.dumps(value))
         self.assertEqual(self.backup.count(), 0)
 
-    def test_rule_rejection_logs_only_reason_and_keeps_api_error_generic(self):
+    def test_invalid_rule_candidate_is_filtered_without_echoing_private_output(self):
         self.save_providers()
         before = copy.deepcopy(self.server.store.shops())
         pairs = [{"id": "p" + str(i), "conversation": "c" + str(i),
@@ -131,8 +131,9 @@ class AdminAssistTests(unittest.TestCase):
         payload = {k: v for k, v in self.payload().items() if k not in ("current_prompt", "supplement")}
         with patch("backend.diagnostics.emit") as emit:
             status, value = self.call("rule-draft", {**payload, "pairs": pairs, "existing_rules": []})
-        self.assertEqual(status, 502, value)
-        self.assertEqual(value["error"]["code"], "assist_unavailable")
+        self.assertEqual(status, 200, value)
+        self.assertEqual(value["candidates"], [])
+        self.assertTrue(any("剔除 1 条" in note for note in value["warnings"]))
         emit.assert_any_call("admin_assist_output_rejected", operation="rule_draft", reason="conflict_unknown")
         self.assertNotIn(private, str(emit.call_args_list) + json.dumps(value))
         self.assertEqual(self.server.store.shops(), before)
