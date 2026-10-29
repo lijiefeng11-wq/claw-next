@@ -53,6 +53,21 @@ class AdminAssistTests(unittest.TestCase):
         self.assertEqual(self.server.store.events(), [])
         self.assertEqual(self.backup.count(), 0)
 
+    def test_unchanged_merge_warns_without_persisting_or_fallback(self):
+        self.save_providers()
+        before = copy.deepcopy(self.server.store.shops())
+        payload = self.payload()
+        answer = {"draft": payload["current_prompt"], "changes": ["已加入简短回复要求"], "conflicts": ["冲突要求待确认"]}
+        self.primary.queue(completion(json.dumps(answer, ensure_ascii=False)))
+        status, value = self.call(payload=payload)
+        self.assertEqual(status, 200, value)
+        self.assertEqual(value["draft"], answer["draft"])
+        self.assertEqual(value["changes"], [promptmerge.NO_CHANGE])
+        self.assertEqual(value["conflicts"], answer["conflicts"])
+        self.assertEqual(self.server.store.shops(), before)
+        self.assertEqual(self.server.store.events(), [])
+        self.assertEqual(self.backup.count(), 0)
+
     def test_import_never_calls_model_and_removes_contact_metadata(self):
         before = copy.deepcopy(self.server.store.shops())
         text = json.dumps([{"buyer_id": "private-buyer-name", "messages": [
@@ -104,6 +119,26 @@ class AdminAssistTests(unittest.TestCase):
             self.assertNotIn("PRIVATE", json.dumps(value))
         self.assertEqual(self.backup.count(), 0)
 
+    def test_rule_rejection_logs_only_reason_and_keeps_api_error_generic(self):
+        self.save_providers()
+        before = copy.deepcopy(self.server.store.shops())
+        pairs = [{"id": "p" + str(i), "conversation": "c" + str(i),
+                  "question": "怎么清洁？", "answer": "使用软布。"} for i in (1, 2)]
+        private = "PRIVATE-RESPONSE-SENTINEL"
+        answer = {"candidates": [{"contains": "清洁", "description": "清洁方法", "reply": "使用软布。",
+                  "evidence_ids": ["p1", "p2"], "conflicts": [private], "warnings": []}], "warnings": []}
+        self.primary.queue(completion(json.dumps(answer)))
+        payload = {k: v for k, v in self.payload().items() if k not in ("current_prompt", "supplement")}
+        with patch("backend.diagnostics.emit") as emit:
+            status, value = self.call("rule-draft", {**payload, "pairs": pairs, "existing_rules": []})
+        self.assertEqual(status, 502, value)
+        self.assertEqual(value["error"]["code"], "assist_unavailable")
+        emit.assert_any_call("admin_assist_output_rejected", operation="rule_draft", reason="conflict_unknown")
+        self.assertNotIn(private, str(emit.call_args_list) + json.dumps(value))
+        self.assertEqual(self.server.store.shops(), before)
+        self.assertEqual(self.server.store.events(), [])
+        self.assertEqual(self.backup.count(), 0)
+
     def start_slow_merge(self):
         self.save_providers()
         self.primary.queue({**completion(json.dumps({"draft": "synthetic", "changes": [], "conflicts": []})), "delay": .8})
@@ -142,6 +177,26 @@ class AdminAssistTests(unittest.TestCase):
 
 
 class PromptMergeOutputTests(unittest.TestCase):
+    def test_unchanged_draft_never_claims_additions_and_preserves_conflicts(self):
+        config = {"primary": {"base_url": "http://127.0.0.1:9/v1", "model": "synthetic"}}
+        current = "未确认车型和年份先询问，不承诺适配。"
+        for draft, changes in ((current, ["已加入两句话以内"]), ("  " + current + "\n", [])):
+            answer = {"draft": draft, "changes": changes, "conflicts": ["直接保证适配与原要求冲突"]}
+            wire = {"choices": [{"message": {"content": json.dumps(answer)}}]}
+            with patch.object(promptmerge, "_post", return_value=wire) as post:
+                result = promptmerge.generate(current, "控制在两句话，车型未知也保证适配。", config)
+            self.assertEqual(result["draft"], draft)
+            self.assertEqual(result["changes"], [promptmerge.NO_CHANGE])
+            self.assertEqual(result["conflicts"], answer["conflicts"])
+            post.assert_called_once()
+
+    def test_changed_draft_keeps_the_actual_change_summary(self):
+        config = {"primary": {"base_url": "http://127.0.0.1:9/v1", "model": "synthetic"}}
+        answer = {"draft": "未知材质转人工。回答尽量简短。", "changes": ["加入简短回复要求"], "conflicts": []}
+        wire = {"choices": [{"message": {"content": json.dumps(answer)}}]}
+        with patch.object(promptmerge, "_post", return_value=wire):
+            self.assertEqual(promptmerge.generate("未知材质转人工。", "简短回答", config), answer)
+
     def test_schema_and_truncation_fail_closed(self):
         config = {"primary": {"base_url": "http://127.0.0.1:9/v1", "model": "synthetic"}}
         valid = {"draft": "保留原规则", "changes": ["简短"], "conflicts": []}

@@ -157,5 +157,58 @@ class RuleDraftTests(unittest.TestCase):
                     rules.generate(self.pairs, [], self.config)
 
 
+class RuleDraftDiagnosticTests(unittest.TestCase):
+    setUp = RuleDraftTests.setUp
+    wire = RuleDraftTests.wire
+
+    def test_validation_reasons_are_fixed_metadata_and_strictly_rejected(self):
+        private = "PRIVATE-MODEL-TEXT-9f3a7c"
+        self.pairs.append({"id": "p4", "conversation": "c4", "question": "怎么清洁？", "answer": "使用软布。"})
+        first = {**self.candidate, "evidence_ids": ["p1", "p2"]}
+        def output(candidates, warnings=None):
+            return json.dumps({"candidates": candidates, "warnings": [] if warnings is None else warnings})
+        cases = [
+            (private, "output_schema"),
+            (json.dumps({"candidates": [], "warnings": [], "extra": private}), "output_schema"),
+            (output([{**first, "extra": private}]), "candidate_fields"),
+            (output([{**first, "reply": private + "x" * 2001}]), "candidate_fields"),
+            (output([{**first, "evidence_ids": [private, "p2"]}]), "evidence_invalid"),
+            (output([{**first, "evidence_ids": [[private], "p2"]}]), "evidence_invalid"),
+            (output([{**first, "evidence_ids": ["p1", "p1"]}]), "evidence_duplicate"),
+            (output([first, {**first, "contains": "维护"}]), "evidence_reused"),
+            (output([first, {**first, "evidence_ids": ["p3", "p4"]}]), "keyword_duplicate"),
+            (output([{**first, "conflicts": [private]}]), "conflict_unknown"),
+            (output([{**first, "warnings": private}]), "notes_malformed"),
+            (output([], warnings=[private + "x" * 500]), "notes_malformed"),
+            (output([first] * 31), "output_schema"),
+            (True, "output_schema"),
+        ]
+        for content, reason in cases:
+            with self.subTest(reason=reason):
+                wire = {"choices": [{"message": {"content": content}}]}
+                with patch.object(rules, "_post", return_value=wire) as post, patch.object(rules.diagnostics, "emit") as emit:
+                    with self.assertRaises(ProviderFailure) as raised:
+                        rules.generate(self.pairs, self.existing, self.config)
+                self.assertEqual(raised.exception.code, "invalid_output")
+                post.assert_called_once()
+                emit.assert_called_once_with("admin_assist_output_rejected", operation="rule_draft", reason=reason)
+                self.assertNotIn(private, str(emit.call_args) + str(raised.exception))
+
+    def test_unknown_diagnostic_reason_cannot_echo_content(self):
+        with patch.object(rules.diagnostics, "emit") as emit:
+            with self.assertRaises(ProviderFailure):
+                rules._reject("PRIVATE-MODEL-TEXT-9f3a7c")
+        emit.assert_called_once_with("admin_assist_output_rejected", operation="rule_draft", reason="output_schema")
+
+    def test_valid_and_singleton_results_do_not_emit_rejection(self):
+        singleton = {**self.candidate, "contains": "单次维护", "evidence_ids": ["p1"]}
+        wire = {"choices": [{"message": {"content": json.dumps({"candidates": [singleton, self.candidate], "warnings": []})}}]}
+        with patch.object(rules, "_post", return_value=wire), patch.object(rules.diagnostics, "emit") as emit:
+            result = rules.generate(self.pairs, self.existing, self.config)
+        self.assertEqual(len(result["candidates"]), 1)
+        self.assertEqual(result["candidates"][0]["count"], 3)
+        emit.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
