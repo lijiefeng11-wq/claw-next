@@ -4,7 +4,7 @@
  * 界面端到端测试（scripts/e2e.mjs）会自动运行。输出一行 JSON，全部通过时退出码 0。
  *
  * 覆盖：会话列表内的收藏/标星图标能记录（标签只取操作类 title），选会话、点昵称不记录，昵称作 title 的头像不带出昵称；
- * 工具栏“转移会话”及其弹窗标题能记录，弹窗里的客服名不记录；含数字的动态类名、消息区与输入框内的点击不记录；
+ * 工具栏“转移会话”及其弹窗标题能记录，弹窗里的客服名不记录；不由已知词组成的类名（含数字或全字母标识）、消息区与输入框内的点击不记录；
  * 按钮地图包含会话列表图标且不含昵称。
  */
 const { app, BrowserWindow } = require("electron");
@@ -22,7 +22,7 @@ const NICK3 = "转转好物";
 const AGENT = "虚构客服乙";
 const HTML = `<!doctype html><meta charset="utf-8"><body style="font:14px sans-serif">
   <ul class="chat-list">
-    <li class="chat-item active"><div class="chat-item-box u-7731942" data-random="9001-x">
+    <li class="chat-item active fictionalBuyerAlice"><div class="chat-item-box u-7731942 alicebuyer" data-random="9001-x">
       <span class="nickname" title="${NICK}">${NICK}</span>
       <img class="avatar" title="${NICK}" style="width:20px;height:20px">
       <img class="avatar2" title="${NICK2}" style="width:20px;height:20px">
@@ -67,7 +67,7 @@ app.whenReady().then(async () => {
     const listLabels = clicks.filter((c) => c.area === "chat_list").map((c) => c.label ?? "-").sort();
     check("会话列表：选会话、点昵称不记录；头像只记图标、不取昵称 title（含“星”“转”的昵称也不取）", JSON.stringify(listLabels) === JSON.stringify(["-", "-", "-", "收藏", "标星"].sort()), clicks);
     check("消息区、输入框内的点击不记录", clicks.length <= 6 && !clicks.some((c) => /msg-list|textarea/.test(c.chain)), clicks);
-    check("记录与按钮地图不含昵称、客服名、动态编号", ![NICK, NICK2, NICK3, AGENT].some((s) => all.includes(s)) && !/7731942|9001|c3f9a2/.test(all), all.slice(0, 400));
+    check("记录与按钮地图不含昵称、客服名、动态编号", ![NICK, NICK2, NICK3, AGENT].some((s) => all.includes(s)) && !/7731942|9001|c3f9a2|fictionalBuyerAlice|alicebuyer/i.test(all), all.slice(0, 400));
     check("按钮地图包含会话列表图标", map.some((m) => m.area === "chat_list" && m.label === "标星") && map.some((m) => m.area === "chat_list" && m.label === "收藏"), map);
     win.destroy();
   } catch (err) {

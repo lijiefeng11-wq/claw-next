@@ -44,11 +44,39 @@ function probePath(raw: unknown): string | null {
 /** 会话操作（转移、收藏、标星等）候选接口：仅诊断模式记录字段结构，不参与任何收发处理。 */
 const ACTION_HINT = /transfer|assign|move|star|mark|collect|favou?r|follow|tag|label/i;
 
-/** 路径里像编号的段（含 5 位以上数字，或 16 位以上且含数字）替换为 :id，避免诊断记录带出会话/账号标识。 */
+/**
+ * 诊断记录可保留的词（接口路径段、界面类名按 -、_、.、驼峰拆分后逐词比对）。不在表中的段/类名一律匿名，
+ * 不按“是否含数字”判断：全字母的买家/账号标识同样不得写入诊断文件。
+ */
+const PROBE_WORDS = new Set(
+  (
+    "api new common query get set list info detail update add remove delete del save batch check status config setting settings " +
+    "user users userinfo mall shop custom service chat chats conv conversation session message messages msg send sync file files " +
+    "library image video goods instruct order orders logistic logistics express track trace waybill shipping delivery " +
+    "transfer assign move star mark collect collection favor favorite favourite follow tag tags label labels remark note top pin " +
+    "read unread block group agent agents staff online offline janus plateau latitude tornado earth merchant index html js json " +
+    "login auth token report log stat stats data page home search recommend card coupon refund after sale sales aftersale record " +
+    "history count notice notify push ws websocket heartbeat ping by to from of and or with for all cancel " +
+    "el ant dialog modal popover drawer title header footer body content wrapper wrap container panel right left side bar item items " +
+    "box active selected select current cur on off disabled hover icon btn button tool tools toolbar menu tab tabs reply input " +
+    "textarea editor avatar nickname name op ops operate operation action actions more close confirm ok primary default small mini " +
+    "large text link inner outer main view tip tips tooltip badge dot second first last mask overlay popup layer scroll row col cell " +
+    "table form radio checkbox switch option options dropdown trigger arrow up down img pic red yellow green blue gray grey orange " +
+    "purple color camera is has"
+  ).split(" "),
+);
+const PROBE_WORDS_JSON = JSON.stringify([...PROBE_WORDS]);
+
+function knownToken(token: string): boolean {
+  const parts = token.split(/[-_.]+|(?<=[a-z])(?=[A-Z])/).filter(Boolean);
+  return parts.length > 0 && parts.every((p) => PROBE_WORDS.has(p.toLowerCase()) || /^v\d{1,2}$/.test(p));
+}
+
+/** 路径段只保留由已知词组成的部分，其余（编号、全字母标识、编码段）替换为 :id。 */
 export function maskPath(pathname: string): string {
   return pathname
     .split("/")
-    .map((s) => (/\d{5,}/.test(s) || (s.length >= 16 && /\d/.test(s)) ? ":id" : s))
+    .map((s) => (s === "" || knownToken(s) ? s : ":id"))
     .join("/");
 }
 
@@ -150,7 +178,7 @@ const DOM_PROBE = `(() => {
  * 界面操作记录（隔离环境，页面脚本不可见）：人工每点一次可点击元素，记下它的界面标签（title/aria-label/
  * 不超过 8 字的文字）、图标类名与结构链，以及点击后新出现的弹窗标题。消息区、输入框内的点击不记录；
  * 会话列表内只记录不含文字的图标控件（标签只取 title/aria-label 中完整的操作词），选会话、点昵称不记录。
- * 类名只保留不含数字的前 4 个，避免带出动态标识。不点击任何东西。另在开启时列出当前页面所有可点击控件，作为“按钮地图”。
+ * 类名只保留由已知词（PROBE_WORDS）组成的前 4 个，避免带出动态标识。不点击任何东西。另在开启时列出当前页面所有可点击控件，作为“按钮地图”。
  */
 export const UI_RECORDER = `(() => {
   if (window.__clawUi) return true;
@@ -160,7 +188,9 @@ export const UI_RECORDER = `(() => {
   const short = (s) => { const t = (s || "").replace(/\\s+/g, " ").trim(); return t && t.length <= 8 && !/[0-9０-９¥￥@]/.test(t) ? t : null; };
   const actionWord = (s) => { const t = short(s); return t && /^(取消|已|标为|设为)?(收藏|标星|星标|标记|转移|转移会话|转接|置顶|关注|已读|未读|删除|移除|屏蔽)$/.test(t) ? t : null; };
   const btnish = (el) => el.matches("button, [role=button], [class*=btn], [class*=tab], [class*=menu]");
-  const cls = (el) => (typeof el.className === "string" ? el.className : el.getAttribute("class") || "").trim().split(/\\s+/).filter((c) => c && c.length <= 32 && !/[0-9]/.test(c)).slice(0, 4);
+  const WORDS = new Set(${PROBE_WORDS_JSON});
+  const known = (c) => { const parts = c.split(/[-_.]+|(?<=[a-z])(?=[A-Z])/).filter(Boolean); return parts.length > 0 && parts.every((p) => WORDS.has(p.toLowerCase())); };
+  const cls = (el) => (typeof el.className === "string" ? el.className : el.getAttribute("class") || "").trim().split(/\\s+/).filter((c) => c && c.length <= 32 && known(c)).slice(0, 4);
   const sig = (el) => [el.tagName.toLowerCase(), ...cls(el)].join(".");
   const chain = (el) => { const out = []; for (let e = el, i = 0; e && e !== document.body && i < 5; e = e.parentElement, i++) out.unshift(sig(e)); return out.join(" > "); };
   const clickable = (el) => el.closest("button, a, [role=button], [title], [class*=btn], [class*=icon], [class*=tool], [class*=menu], [class*=tab], [class*=item]");
@@ -205,7 +235,9 @@ export const UI_MAP = `(() => {
   const short = (s) => { const t = (s || "").replace(/\\s+/g, " ").trim(); return t && t.length <= 8 && !/[0-9０-９¥￥@]/.test(t) ? t : null; };
   const actionWord = (s) => { const t = short(s); return t && /^(取消|已|标为|设为)?(收藏|标星|星标|标记|转移|转移会话|转接|置顶|关注|已读|未读|删除|移除|屏蔽)$/.test(t) ? t : null; };
   const btnish = (el) => el.matches("button, [role=button], [class*=btn], [class*=tab], [class*=menu]");
-  const cls = (el) => (typeof el.className === "string" ? el.className : el.getAttribute("class") || "").trim().split(/\\s+/).filter((c) => c && c.length <= 32 && !/[0-9]/.test(c)).slice(0, 4);
+  const WORDS = new Set(${PROBE_WORDS_JSON});
+  const known = (c) => { const parts = c.split(/[-_.]+|(?<=[a-z])(?=[A-Z])/).filter(Boolean); return parts.length > 0 && parts.every((p) => WORDS.has(p.toLowerCase())); };
+  const cls = (el) => (typeof el.className === "string" ? el.className : el.getAttribute("class") || "").trim().split(/\\s+/).filter((c) => c && c.length <= 32 && known(c)).slice(0, 4);
   const sig = (el) => [el.tagName.toLowerCase(), ...cls(el)].join(".");
   const chain = (el) => { const out = []; for (let e = el, i = 0; e && e !== document.body && i < 5; e = e.parentElement, i++) out.unshift(sig(e)); return out.join(" > "); };
   const seen = new Set();
