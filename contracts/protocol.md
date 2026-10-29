@@ -2,7 +2,7 @@
 
 此文件是前后台共同基线。时间为 UTC Unix 秒，ID 为匹配 `[A-Za-z0-9_.:-]{1,128}` 的字符串；HTTP JSON UTF-8。后台启动时配置店铺和客户端身份；**请求内的店铺名不授予权限**。前台 token 固定绑定一个 `client_id` 和一个 `shop_id`。所有受保护 API 使用 `Authorization: Bearer <token>`，禁止放 URL。管理员使用账号密码换取短期会话，管理员会话和客户端 token 不能互相替代。示例全部是虚构数据。
 
-开发地址默认 `http://127.0.0.1:18880`；云端使用 HTTPS 反向代理。v1 不依赖其他系统的任何端口/配置。客户端从后台响应确认 `protocol_version=1.0`，不支持的主版本停用发送。JSON 错误统一 `{"error":{"code":"...","message":"..."}}`；400=格式错误，401=未认证，403=角色错误，404=不存在，409=状态冲突，413=过大。未知接口不执行任何业务。请求体上限 256 KiB；提交事件接口因可携带图片，上限 8 MiB。
+开发地址默认 `http://127.0.0.1:18880`；云端使用 HTTPS 反向代理。v1 不依赖其他系统的任何端口/配置。客户端从后台响应确认 `protocol_version=1.0`，不支持的主版本停用发送。JSON 错误统一 `{"error":{"code":"...","message":"..."}}`；400=格式错误，401=未认证，403=角色错误，404=不存在，409=状态冲突，413=过大。未知接口不执行任何业务。请求体按完整 JSON 编码后的 UTF-8 字节数计量，默认上限 256 KiB（262144 字节）。POST 特例：`/api/v1/events` 和 `/api/v1/admin/chat-import` 为 8 MiB（8388608 字节），`/api/v1/admin/rule-draft` 为 4 MiB（4194304 字节）；其他接口不放宽。超过对应请求体上限返回 413 `body_too_large`，字段自身的限制另行校验。
 
 ## 健康与身份
 
@@ -563,11 +563,11 @@ settings 返回上述字段加 version。mode=rules/model/hybrid。规则可带�
 
 以下接口仅供已完成首次改密的管理员使用，不扩展客户端协议或发送权限。每次操作都显式发起，失败不自动重试；导入和生成均不写入店铺设置、聊天数据库、事件或发送队列。仅调用已保存的主模型，无备用回退，单次网络等待上限 60 秒；不改变已保存的回复超时。与原提示词草稿接口共用一个并发名额。
 
-**导入预览**：`POST /api/v1/admin/chat-import`，参数严格为 `{shop_id, filename, text}`。文件内容为 UTF-8 JSON/JSONL、CSV 问答列或明确“买家/客服”角色的 TXT，解码文本最多 2 MiB。仅处理文本问答，不读取文件路径、链接、附件、图片或其他系统数据。姓名/用户标识等元数据不进入模型，常见联系方式做自动过滤；自动过滤不能保证去除所有个人信息，必须由管理员先核对预览和店铺。上传到后台不等于已经发给模型。
+**导入预览**：`POST /api/v1/admin/chat-import`，参数严格为 `{shop_id, filename, text}`。文件内容为 UTF-8 JSON/JSONL、CSV 问答列或明确“买家/客服”角色的 TXT。解码后 `text` 的 UTF-8 字节数必须为 1–2097152（2 MiB），超限返回 400 `invalid_chat_import`；这是导入文本限制，不是 HTTP 请求体限制。完整请求经过 JSON 转义、包含字段名和其他参数后另受 8 MiB 请求体上限约束，两项须同时满足。仅处理文本问答，不读取文件路径、链接、附件、图片或其他系统数据。姓名/用户标识等元数据不进入模型，常见联系方式做自动过滤；自动过滤不能保证去除所有个人信息，必须由管理员先核对预览和店铺。上传到后台不等于已经发给模型。
 
 返回 `{shop_id, shop_version, pairs, stats, warnings}`；每个 pair 为 `{id, question, answer, conversation}`，其中 id/conversation 是匿名本次导入编号。抽样/长度等限制须显示给用户：最多选取 200 个问答用于分析，总问答文本不超过 24000 字，不得把样本频次声称为全文件统计。刷新、退出、换店或重新导入后丢弃页面中的导入资料。
 
-**规则草稿**：`POST /api/v1/admin/rule-draft`，参数严格为 `{shop_id, version, shop_version, pairs, existing_rules}`。`version` 是模型配置版本，`shop_version` 是已加载的店铺设置版本；existing_rules 是页面当前待编辑规则，按设置接口约束验证。生成前后均核对会话、店铺版本、模型版本。未确认预览或无有效导入时，页面禁用“一键生成规则”。
+**规则草稿**：`POST /api/v1/admin/rule-draft`，参数严格为 `{shop_id, version, shop_version, pairs, existing_rules}`，完整 JSON 请求体上限为 4 MiB；问答、现有规则的数量与文本长度限制仍须分别满足。`version` 是模型配置版本，`shop_version` 是已加载的店铺设置版本；existing_rules 是页面当前待编辑规则，按设置接口约束验证。生成前后均核对会话、店铺版本、模型版本。未确认预览或无有效导入时，页面禁用“一键生成规则”。
 
 返回 `{shop_id, version, shop_version, candidates, warnings}`。candidate 包含 `contains, description, reply, evidence_ids, count, conflicts, warnings`。最多 30 个语义归类后的高频问题，至少来自两个独立来源会话；count 由合法 evidence_ids 对应的匿名会话数计算，不采信模型伪造次数。输出来源必须存在，引用重复/非法来源不得作为合格证据；历史答案是拟定话术的来源，不是现行政策或客观事实的证明。
 
