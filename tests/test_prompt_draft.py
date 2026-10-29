@@ -1,4 +1,5 @@
 """Draft generation uses synthetic providers and temporary data only."""
+import copy
 import json
 import pathlib
 import sys
@@ -35,12 +36,14 @@ class PromptDraftTests(unittest.TestCase):
     def test_generate_is_unapplied_and_uses_only_brief_and_primary(self):
         self.assertEqual(self.save_providers()[0], 200)
         before = self.server.store.shops()
+        model_before = self.get_config()
         self.primary.queue(completion("材质待确认，先询问款式或转人工。"))
         status, value = self.draft()
         self.assertEqual(status, 200, value)
         self.assertEqual(value["shop_id"], "demo")
         self.assertIn("待确认", value["draft"])
         self.assertEqual(self.server.store.shops(), before)
+        self.assertEqual(self.get_config(), model_before)
         self.assertEqual(self.server.store.events(), [])
         self.assertEqual(self.backup.count(), 0)
         body = self.primary.body()
@@ -111,6 +114,44 @@ class PromptDraftTests(unittest.TestCase):
 
 
 class DraftOutputTests(unittest.TestCase):
+    def test_thinking_opt_out_is_limited_to_local_qwen_drafts(self):
+        cases = [
+            ("http://127.0.0.1:8000/v1", "Qwen3.6-35B-A3B-4bit", True),
+            ("http://localhost:8000/v1", "mlx-community/Qwen3.6-35B-A3B-4bit", True),
+            ("http://[::1]:8000/v1", "qwen3.6-35b-a3b", True),
+            ("https://models.example/v1", "Qwen3.6-35B-A3B-4bit", False),
+            ("https://127.0.0.1.example/v1", "Qwen3.6-35B-A3B-4bit", False),
+            ("http://127.0.0.1:8000/v1", "Qwen3.6-27B", False),
+            ("http://127.0.0.1:8000/v1", "deepseek-flash", False),
+        ]
+        for base_url, model, disable_thinking in cases:
+            with self.subTest(base_url=base_url, model=model):
+                config = {"primary": {"base_url": base_url, "model": model, "timeout_seconds": 10}}
+                before = copy.deepcopy(config)
+                value = {"choices": [{"finish_reason": "stop", "message": {"content": "synthetic draft"}}]}
+                with patch.object(promptdraft, "_post", return_value=value) as post:
+                    self.assertEqual(promptdraft.generate("synthetic brief", config), "synthetic draft")
+                spec, body = post.call_args.args
+                post.assert_called_once()
+                self.assertEqual(spec["timeout_seconds"], 45)
+                self.assertEqual(body["max_tokens"], 2048)
+                if disable_thinking:
+                    self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False})
+                else:
+                    self.assertNotIn("chat_template_kwargs", body)
+                self.assertEqual(config, before)
+
+    def test_length_finish_is_incomplete_even_without_final_content(self):
+        config = {"primary": {"base_url": "http://127.0.0.1:9/v1", "model": "synthetic"}}
+        for message in [{"reasoning_content": "synthetic thinking"},
+                        {"content": None}, {"content": ""}, {"content": "partial draft"}]:
+            with self.subTest(message=message):
+                value = {"choices": [{"finish_reason": "length", "message": message}]}
+                with patch.object(promptdraft, "_post", return_value=value):
+                    with self.assertRaises(ProviderFailure) as raised:
+                        promptdraft.generate("synthetic brief", config)
+                self.assertEqual(raised.exception.code, "incomplete_draft")
+
     def test_malformed_truncated_or_overlong_output_is_rejected(self):
         config = {"primary": {"base_url": "http://127.0.0.1:9/v1", "model": "synthetic", "timeout_seconds": 60}}
         for value in [None, {"choices": []}, {"choices": [None]}, {"choices": ["invalid"]},
