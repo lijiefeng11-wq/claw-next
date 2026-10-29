@@ -30,6 +30,35 @@ test("会话操作接口结构：未知键匿名、保留已知字段名，输�
   assert.equal(actionSchemaOf(null), "non_text");
 });
 
+test("会话操作接口结构：由常用词拼成的标识键同样匿名（实体字典、静态与实体键混合、嵌套字典）", () => {
+  const ENTITY = ["redGreen", "onlineStaff", "userData", "chatList", "statusInfo"];
+  const body = {
+    participants: { redGreen: { status: "offline" }, onlineStaff: { status: "online" }, userData: { status: "busy" } },
+    result: { status: "ok", total: 2, chatList: { statusInfo: { online: true } } },
+  };
+  const out = JSON.stringify(actionSchemaOf(JSON.stringify(body)));
+  for (const id of ENTITY) assert.ok(!out.includes(id), "结构输出含有词表词拼成的虚构标识");
+  const schema = actionSchemaOf(JSON.stringify(body)) as Record<string, any>;
+  assert.deepEqual(schema["<key>"], { "<key>": { status: "str" }, "<keys>": 3 });
+  assert.equal(schema.result.status, "str");
+  assert.equal(schema.result.total, "num");
+  assert.deepEqual(schema.result["<key>"], { "<key>": { online: "bool" }, "<keys>": 1 });
+});
+
+test("会话操作接口结构：深层嵌套数组/对象有界返回，不抛异常", () => {
+  const arrays = "[".repeat(20000) + "]".repeat(20000);
+  const mixed = '{"data":['.repeat(5000) + "1" + "]}".repeat(5000);
+  for (const text of [arrays, mixed]) {
+    let out: unknown;
+    assert.doesNotThrow(() => (out = actionSchemaOf(text)));
+    const s = JSON.stringify(out);
+    assert.ok(s.length < 2000, "深层嵌套输出未截断");
+    assert.ok(s.includes("deep") || s === '"error"' || s === '"non_json"', "深层嵌套未按上限结束");
+  }
+  const wide = JSON.stringify({ list: Array.from({ length: 50 }, () => Object.fromEntries(Array.from({ length: 80 }, (_, i) => ["k" + i, { a: [[[1]]] }]))) });
+  assert.doesNotThrow(() => actionSchemaOf(wide));
+});
+
 test("诊断路径：已知词组成的段保留，其余段替换为 :id", () => {
   assert.equal(maskPath("/plateau/chat/send_message"), "/plateau/chat/send_message");
   assert.equal(maskPath("/janus/api/customService/queryCustomServiceInfo"), "/janus/api/customService/queryCustomServiceInfo");

@@ -149,34 +149,54 @@ export function schemaOf(text: string | null): unknown {
 }
 
 /**
- * 会话操作候选接口的字段结构：只保留由已知词组成的字段名；其余键（可能是买家/客服标识）合并为一个 "<key>" 样例，
- * 另记匿名键个数 "<keys>"。不保留任何值。
+ * 会话操作接口可原样输出的完整字段名（逐字比对，不按分词组合判断：由常用词拼成的串也可能是账号标识）。
+ */
+const ACTION_FIELDS = new Set(
+  (
+    "success result data code msg message error error_code error_msg errorCode errorMsg list total status type target " +
+    "target_id targetId target_uid targetUid uid cs_uid csUid mall_id mallId id ids online busy available reason " +
+    "star star_type starType is_star isStar color mark mark_type markType is_mark isMark collect is_collect isCollect " +
+    "collected favorite is_favorite isFavorite transfer transfer_type transferType server_time serverTime ts timestamp"
+  ).split(" "),
+);
+const ACTION_SCHEMA_DEPTH = 8;
+const ACTION_SCHEMA_NODES = 2000;
+
+/**
+ * 会话操作候选接口的字段结构：只保留 ACTION_FIELDS 中的完整字段名；其余键（可能是买家/客服标识）合并为一个 "<key>" 样例，
+ * 另记匿名键个数 "<keys>"。不保留任何值。层数与节点数有上限，超出时以 "deep"/"truncated" 结束；任何异常返回 "error"。
  */
 export function actionSchemaOf(text: string | null): unknown {
   if (text === null) return "non_text";
-  let value: unknown;
   try {
-    value = JSON.parse(text);
-  } catch {
-    return "non_json";
-  }
-  const walk = (v: unknown, depth: number): unknown => {
-    if (v === null) return "null";
-    if (Array.isArray(v)) return v.length ? [walk(v[0], depth + 1)] : [];
-    if (typeof v === "object") {
-      if (depth > 7) return "obj";
-      const out: Record<string, unknown> = {};
-      let unknown = 0;
-      for (const [k, x] of Object.entries(v as Record<string, unknown>).slice(0, 80)) {
-        if (knownToken(k)) out[k] = walk(x, depth + 1);
-        else if (unknown++ === 0) out["<key>"] = walk(x, depth + 1);
-      }
-      if (unknown) out["<keys>"] = unknown;
-      return out;
+    let value: unknown;
+    try {
+      value = JSON.parse(text);
+    } catch {
+      return "non_json";
     }
-    return typeof v === "string" ? "str" : typeof v === "number" ? "num" : typeof v === "boolean" ? "bool" : typeof v;
-  };
-  return walk(value, 0);
+    let nodes = 0;
+    const walk = (v: unknown, depth: number): unknown => {
+      if (depth > ACTION_SCHEMA_DEPTH) return "deep";
+      if (++nodes > ACTION_SCHEMA_NODES) return "truncated";
+      if (v === null) return "null";
+      if (Array.isArray(v)) return v.length ? [walk(v[0], depth + 1)] : [];
+      if (typeof v === "object") {
+        const out: Record<string, unknown> = {};
+        let unknown = 0;
+        for (const [k, x] of Object.entries(v as Record<string, unknown>).slice(0, 80)) {
+          if (ACTION_FIELDS.has(k)) out[k] = walk(x, depth + 1);
+          else if (unknown++ === 0) out["<key>"] = walk(x, depth + 1);
+        }
+        if (unknown) out["<keys>"] = unknown;
+        return out;
+      }
+      return typeof v === "string" ? "str" : typeof v === "number" ? "num" : typeof v === "boolean" ? "bool" : typeof v;
+    };
+    return walk(value, 0);
+  } catch {
+    return "error";
+  }
 }
 
 /**
@@ -652,7 +672,11 @@ export class PddPageAdapter implements PlatformAdapter {
         const action = !p && schemaFile ? actionProbePath(params.request?.url) : null;
         if (action) {
           discovered.set(params.requestId, action);
-          if (typeof params.request.postData === "string") writeOnce("action_request", action, actionSchemaOf(params.request.postData));
+          try {
+            if (typeof params.request.postData === "string") writeOnce("action_request", action, actionSchemaOf(params.request.postData));
+          } catch {
+            // 诊断记录失败不得影响消息回调。
+          }
           return;
         }
         if (!p) return;
