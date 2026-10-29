@@ -59,11 +59,19 @@ test("会话操作接口结构：深层嵌套数组/对象有界返回，不抛�
   assert.doesNotThrow(() => actionSchemaOf(wide));
 });
 
-test("诊断路径：已知词组成的段保留，其余段替换为 :id", () => {
-  assert.equal(maskPath("/plateau/chat/send_message"), "/plateau/chat/send_message");
-  assert.equal(maskPath("/janus/api/customService/queryCustomServiceInfo"), "/janus/api/customService/queryCustomServiceInfo");
+test("诊断路径：已确认静态接口与单个已知词保留，其余段替换为 :id", () => {
+  for (const p of ["/plateau/chat/send_message", "/janus/api/customService/queryCustomServiceInfo", "/earth/api/mallInfo/commonMallInfo", "/latitude/goodsInstruct/sendToUser", "/plateau/message/send/mallGoodsCard", "/chats/shippingDetail"]) {
+    assert.equal(maskPath(p), p);
+  }
   assert.equal(maskPath("/chats/9001234/messages"), "/chats/:id/messages");
   assert.equal(maskPath("/v2/api/list"), "/v2/api/list");
+});
+
+test("诊断路径隐私反例：常用词拼成的段（驼峰、下划线、连字符）一律匿名", () => {
+  for (const id of ["redGreen", "onlineStaff", "userData", "online_staff", "red-green", "chatList", "starMark"]) {
+    assert.equal(maskPath(`/conv/transfer/${id}`), "/conv/transfer/:id");
+    assert.equal(actionProbePath(`https://mms.pinduoduo.com/conv/transfer/${id}`), "/conv/transfer/:id");
+  }
 });
 
 test("诊断路径隐私反例：全字母、短标识、编码段、混合编号都不原样保留", () => {

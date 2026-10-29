@@ -45,8 +45,8 @@ function probePath(raw: unknown): string | null {
 const ACTION_HINT = /transfer|assign|move|star|mark|collect|favou?r|follow|tag|label/i;
 
 /**
- * 诊断记录可保留的词（接口路径段、界面类名按 -、_、.、驼峰拆分后逐词比对）。不在表中的段/类名一律匿名，
- * 不按“是否含数字”判断：全字母的买家/账号标识同样不得写入诊断文件。
+ * 诊断记录可保留的单个词（路径段、界面类名须整段等于其中一个词，或符合下方固定组合规则）。其余一律匿名，
+ * 不按“是否含数字”或“能否拆成已知词”判断：全字母或常用词拼成的买家/账号标识同样不得写入诊断文件。
  */
 const PROBE_WORDS = new Set(
   (
@@ -69,17 +69,45 @@ const PROBE_WORDS = new Set(
   ).split(" "),
 );
 const PROBE_WORDS_JSON = JSON.stringify([...PROBE_WORDS]);
+/** 代码中已使用的平台固定类名（组合形式），诊断时可原样保留。 */
+const SAFE_CLASSES_JSON = JSON.stringify([
+  "chat-list", "chat-item", "chat-item-box", "msg-list", "reply-box", "reply-input", "reply-header", "right-panel", "bar-box",
+  "bar-item", "bar-select", "order-panel-header", "order-panel-header-second", "order-panel-second-bar", "video-list-box",
+  "send-video-btn", "chat-icon-camera",
+]);
 
-function knownToken(token: string): boolean {
-  const parts = token.split(/[-_.]+|(?<=[a-z])(?=[A-Z])/).filter(Boolean);
-  return parts.length > 0 && parts.every((p) => PROBE_WORDS.has(p.toLowerCase()) || /^v\d{1,2}$/.test(p));
+let staticSegments: Set<string> | null = null;
+
+/** 已确认的静态接口路径中出现的段（含驼峰/下划线组合段），只认这些完整段。 */
+function knownSegments(): Set<string> {
+  staticSegments ??= new Set(
+    [
+      "/janus/api/new/userinfo",
+      "/earth/api/mallInfo/commonMallInfo",
+      "/janus/api/customService/queryCustomServiceInfo",
+      "/chat-merchant/index.html",
+      "/chats/shippingDetail",
+      SEND_PATH,
+      SYNC_PATH,
+      LIBRARY_SEND_PATH,
+      GOODS_CARD_SEND_PATH,
+      INSTRUCT_PATH,
+      INSTRUCT_SEND_PATH,
+      RECOMMEND_GOODS_PATH,
+      VIDEO_LIST_PATH,
+    ].flatMap((p) => p.split("/").filter(Boolean)),
+  );
+  return staticSegments;
 }
 
-/** 路径段只保留由已知词组成的部分，其余（编号、全字母标识、编码段）替换为 :id。 */
+/**
+ * 路径段只保留两类：已确认静态接口中的完整段，或单个小写已知词（如 transfer、star）。
+ * 由已知词拼接的段（如 redGreen、online_staff）可能是买家/客服标识，与编号、编码段一样替换为 :id。
+ */
 export function maskPath(pathname: string): string {
   return pathname
     .split("/")
-    .map((s) => (s === "" || knownToken(s) ? s : ":id"))
+    .map((s) => (s === "" || knownSegments().has(s) || PROBE_WORDS.has(s) || /^v\d{1,2}$/.test(s) ? s : ":id"))
     .join("/");
 }
 
@@ -243,7 +271,12 @@ export const UI_RECORDER = `(() => {
   const actionWord = (s) => { const t = short(s); return t && /^(取消|已|标为|设为)?(收藏|标星|星标|标记|转移|转移会话|转接|置顶|关注|已读|未读|删除|移除|屏蔽)$/.test(t) ? t : null; };
   const btnish = (el) => el.matches("button, [role=button], [class*=btn], [class*=tab], [class*=menu]");
   const WORDS = new Set(${PROBE_WORDS_JSON});
-  const known = (c) => { const parts = c.split(/[-_.]+|(?<=[a-z])(?=[A-Z])/).filter(Boolean); return parts.length > 0 && parts.every((p) => WORDS.has(p.toLowerCase())); };
+  const SAFE = new Set(${SAFE_CLASSES_JSON});
+  const known = (c) => {
+    if (WORDS.has(c) || SAFE.has(c)) return true;
+    const m = /^(el|ant|icon|btn|chat-icon)-([a-z]+)(?:__([a-z]+))?$/.exec(c);
+    return !!m && WORDS.has(m[2]) && (!m[3] || WORDS.has(m[3]));
+  };
   const cls = (el) => (typeof el.className === "string" ? el.className : el.getAttribute("class") || "").trim().split(/\\s+/).filter((c) => c && c.length <= 32 && known(c)).slice(0, 4);
   const sig = (el) => [el.tagName.toLowerCase(), ...cls(el)].join(".");
   const chain = (el) => { const out = []; for (let e = el, i = 0; e && e !== document.body && i < 5; e = e.parentElement, i++) out.unshift(sig(e)); return out.join(" > "); };
@@ -290,7 +323,12 @@ export const UI_MAP = `(() => {
   const actionWord = (s) => { const t = short(s); return t && /^(取消|已|标为|设为)?(收藏|标星|星标|标记|转移|转移会话|转接|置顶|关注|已读|未读|删除|移除|屏蔽)$/.test(t) ? t : null; };
   const btnish = (el) => el.matches("button, [role=button], [class*=btn], [class*=tab], [class*=menu]");
   const WORDS = new Set(${PROBE_WORDS_JSON});
-  const known = (c) => { const parts = c.split(/[-_.]+|(?<=[a-z])(?=[A-Z])/).filter(Boolean); return parts.length > 0 && parts.every((p) => WORDS.has(p.toLowerCase())); };
+  const SAFE = new Set(${SAFE_CLASSES_JSON});
+  const known = (c) => {
+    if (WORDS.has(c) || SAFE.has(c)) return true;
+    const m = /^(el|ant|icon|btn|chat-icon)-([a-z]+)(?:__([a-z]+))?$/.exec(c);
+    return !!m && WORDS.has(m[2]) && (!m[3] || WORDS.has(m[3]));
+  };
   const cls = (el) => (typeof el.className === "string" ? el.className : el.getAttribute("class") || "").trim().split(/\\s+/).filter((c) => c && c.length <= 32 && known(c)).slice(0, 4);
   const sig = (el) => [el.tagName.toLowerCase(), ...cls(el)].join(".");
   const chain = (el) => { const out = []; for (let e = el, i = 0; e && e !== document.body && i < 5; e = e.parentElement, i++) out.unshift(sig(e)); return out.join(" > "); };
