@@ -198,7 +198,9 @@ window.setupAdminAssist = function (options) {
       draft = {context: c, snapshot, modelVersion: config.version, items: []};
       data.candidates.forEach((candidate, index) => { draft.items.push(renderCandidate(candidate, index)); });
       say("rule-draft-status", data.candidates.length ? "已生成 " + data.candidates.length + " 条草稿，默认跳过。请选择要新增或替换的条目。" + (data.warnings || []).join(" ") : "本次样本中没有找到至少两个独立来源的重复问题，没有添加规则。");
-    } catch (err) { clearCandidates(); error(err, "rule-draft-status", c); }
+    } catch (err) {
+      if (current(c)) { clearCandidates(); error(err, "rule-draft-status", c); }
+    }
     finally { if (c.seq === seq) {
       generating = false;
       if (!current(c)) say("rule-draft-status", "店铺设置已改变，旧草稿已丢弃，请重新生成。");
@@ -257,7 +259,9 @@ window.setupAdminAssist = function (options) {
       el["merge-confirm-label"].hidden = !data.conflicts.length;
       el["merge-preview"].hidden = false;
       say("merge-status", "合并稿已生成，尚未填入或保存。请对照原文核对遗漏和冲突。");
-    } catch (err) { clearMerge(); error(err, "merge-status", c); }
+    } catch (err) {
+      if (current(c)) { clearMerge(); error(err, "merge-status", c); }
+    }
     finally { if (c.seq === seq) {
       merging = false;
       if (!current(c)) say("merge-status", "店铺设置已改变，旧合并稿已丢弃，请重新生成。");
