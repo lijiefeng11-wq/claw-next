@@ -1783,3 +1783,17 @@ button:disabled {
     transition: none !important;
   }
 }
+.help-box, .prompt-draft-panel {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid #d9e1ed;
+  border-radius: 8px;
+}
+.help-box summary, .prompt-draft-details summary { cursor: pointer; font-weight: 600; }
+.help-list { font-size: .875rem; line-height: 1.6; }
+.help-list div { margin-top: 8px; }
+.help-list dt { font-weight: 600; }
+.help-list dd { margin-left: 0; overflow-wrap: anywhere; }
+.prompt-draft-summary-note { display: block; font-size: .875rem; font-weight: 400; margin-top: 4px; }
+.prompt-draft-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 10px 0; }
+.prompt-draft-caveats { font-size: .875rem; line-height: 1.6; padding-left: 20px; }

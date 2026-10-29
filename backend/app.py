@@ -12,10 +12,10 @@ from pathlib import Path
 from socketserver import TCPServer
 from urllib.parse import parse_qs, urlsplit
 
-from . import diagnostics, modelconfig, modelworker, vehicle_knowledge
+from . import diagnostics, modelconfig, modelworker, promptdraft, vehicle_knowledge
 from .auth import AdminAuth
 from .content import MAX_EVENT_BYTES
-from .engine import decide, decision, immediate_decision, test_slot
+from .engine import ProviderFailure, decide, decision, immediate_decision, test_slot
 from .store import ApiError, Store, identifier, require
 
 PROTOCOL_VERSION = "1.0"
@@ -144,7 +144,43 @@ class Handler(BaseHTTPRequestHandler):
             result = {**result, "ok": False, "reason": "stale_test_result", "version": snapshot["version"]}
         return self._send(200, result)
 
+    def _prompt_draft(self, store):
+        with self.server.auth.lock:
+            identity = self._identity()
+            require(identity["role"] == "admin", "admin_required", 403)
+            require(not identity["must_change_password"], "admin_password_change_required", 403)
+            payload = self._json()
+            require(set(payload) == {"shop_id", "brief", "version"}, "invalid_prompt_draft")
+            require(identifier(payload["shop_id"]), "invalid_shop_id")
+            require(any(s["shop_id"] == payload["shop_id"] for s in store.shops()), "shop_not_found", 404)
+            brief = payload["brief"]
+            require(isinstance(brief, str) and 1 <= len(brief.strip()) <= promptdraft.MAX_BRIEF,
+                    "invalid_prompt_brief")
+            config = copy.deepcopy(store.model_config(self.server.config.get("model", {})))
+            require(type(payload["version"]) is int and payload["version"] >= 0, "invalid_prompt_draft")
+            require(payload["version"] == config["version"], "model_config_changed", 409)
+        # A slow provider must not block logout, password changes or shop settings.
+        require(self.server.prompt_draft_slot.acquire(blocking=False), "prompt_draft_busy", 429)
+        try:
+            try:
+                draft = promptdraft.generate(brief.strip(), config)
+            except ProviderFailure as exc:
+                # Never return provider bodies, credentials or the brief in errors.
+                diagnostics.emit("prompt_draft_failed", code=exc.code)
+                raise ApiError(502, "prompt_draft_unavailable") from None
+            with self.server.auth.lock:
+                identity = self._identity()
+                require(identity["role"] == "admin" and not identity["must_change_password"], "admin_required", 403)
+                require(store.model_config(self.server.config.get("model", {}))["version"] == config["version"],
+                        "model_config_changed", 409)
+                return self._send(200, {"draft": draft, "shop_id": payload["shop_id"],
+                                        "version": config["version"]})
+        finally:
+            self.server.prompt_draft_slot.release()
+
     def _admin_route(self, path, method, parts, store):
+        if path == "/api/v1/admin/prompt-draft" and method == "POST":
+            return self._prompt_draft(store)
         if path == "/api/v1/admin/model/test" and method == "POST":
             return self._model_test(store)
         # Serialize authorization and administrative mutations with password
@@ -291,6 +327,7 @@ class Server(ThreadingHTTPServer):
             super().server_close()
             raise
         self.stop, self.wake = threading.Event(), threading.Event()
+        self.prompt_draft_slot = threading.BoundedSemaphore(1)
         self.model_workers = {}
         self.worker = threading.Thread(target=self._work, name="claw-next-decisions", daemon=True)
         self.worker.start()

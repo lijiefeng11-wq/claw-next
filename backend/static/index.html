@@ -27,13 +27,13 @@
           <span class="field-label">用户名</span>
           <input id="username-input" name="username" type="text" value="admin" autocomplete="username"
                  spellcheck="false" autocapitalize="off" aria-describedby="username-help">
-          <span id="username-help" class="field-help">默认管理员用户名为 admin。</span>
+          <span id="username-help" class="field-help">必填。后台管理员用户名默认为 admin；这不是平台店铺账号。</span>
         </label>
         <label class="field">
           <span class="field-label">密码</span>
           <input id="password-input" name="password" type="password" autocomplete="current-password"
                  aria-describedby="password-help">
-          <span id="password-help" class="field-help">密码不会保存在浏览器中。</span>
+          <span id="password-help" class="field-help">密码不会保存在浏览器中。首次登录先用初始密码，登录后由你自己设置新密码；请勿在业务说明或提示词里填写登录密码。</span>
         </label>
         <button id="login-btn" class="btn btn-primary btn-block" type="submit">登录</button>
       </form>
@@ -202,7 +202,8 @@
             <div class="shop-toolbar">
               <label class="field field-inline">
                 <span class="field-label">店铺</span>
-                <select id="shop-select"></select>
+                <select id="shop-select" aria-describedby="shop-select-help"></select>
+                <span id="shop-select-help" class="field-help">先选要配置的店铺；下面的规则和提示词只保存到这家店，模型配置则由后台各店共用。</span>
               </label>
               <div id="shop-meta" class="shop-meta muted small">尚未加载店铺。</div>
             </div>
@@ -226,38 +227,125 @@
                 <fieldset class="settings-group">
                   <legend>启用状态</legend>
                   <label class="switch-row">
-                    <input id="enabled-input" type="checkbox">
+                    <input id="enabled-input" type="checkbox" aria-describedby="enabled-help enabled-note">
                     <span class="switch-text">
                       <span class="switch-title">允许 Claw-Next 自动判断</span>
-                      <span class="field-help">新店铺默认关闭。开启只作用于 Claw-Next，不代表其他自动回复工具已停止。</span>
+                      <span id="enabled-help" class="field-help">新店铺默认关闭。开启只作用于 Claw-Next，不代表其他自动回复工具已停止。</span>
                     </span>
                   </label>
                   <p id="enabled-note" class="small muted">以服务端返回值为准。</p>
+                  <details class="help-box">
+                    <summary>这个开关怎么用</summary>
+                    <dl class="help-list">
+                      <div><dt>用途</dt><dd>决定这个店铺是否让后台参与判断。关闭时后台不生成回复，也不调用模型。</dd></div>
+                      <div><dt>怎么填</dt><dd>勾选表示允许自动判断；取消勾选表示暂停。暂停不会删除已填的提示词和规则。</dd></div>
+                      <div><dt>示例</dt><dd>例如：还在核对规则时保持关闭。要自动回复，还须另行确认前台授权及店铺接管条件。</dd></div>
+                      <div><dt>必填</dt><dd>必填，只能是勾选或不勾选。新店铺默认不勾选。</dd></div>
+                      <div><dt>留空/关闭</dt><dd>保存关闭后停止新回复判断。已进入发送流程的消息仍须查看前台回执，关闭开关不等于撤回消息。</dd></div>
+                    </dl>
+                  </details>
                 </fieldset>
 
                 <fieldset class="settings-group">
                   <legend>判断方式</legend>
                   <label class="field">
                     <span class="field-label">方式</span>
-                    <select id="mode-input">
+                    <select id="mode-input" aria-describedby="mode-help">
                       <option value="rules">按规则自动回复</option>
                       <option value="model">由后台模型判断</option>
                       <option value="hybrid">混合：规则优先，模型兜底</option>
                     </select>
                   </label>
-                  <p class="field-help">按规则：只做包含匹配，未命中转人工，不调用模型。混合：先匹配规则，未命中时由模型理解意思；语义命中使用规则原文，否则由模型回复。模型方式直接交模型判断。</p>
+                  <p id="mode-help" class="field-help">按规则：只做包含匹配，未命中转人工，不调用模型。混合：先匹配规则，未命中时由模型理解意思；语义命中使用规则原文，否则由模型回复。模型方式直接交模型判断。</p>
+                  <details class="help-box">
+                    <summary>三种方式分别影响哪些字段</summary>
+                    <dl class="help-list">
+                      <div><dt>按规则</dt><dd>只用下面的“自动回复规则”，关键词匹配不到就转人工。此时“模型提示词”填了也不生效，因为完全不调用模型。</dd></div>
+                      <div><dt>按模型</dt><dd>把“模型提示词”和买家消息交给模型；“自动回复规则”不参与判断，保留着也不会命中。</dd></div>
+                      <div><dt>混合</dt><dd>先用关键词匹配规则；没匹配到时，把每条规则的“适用问题说明”交给模型挑；挑中了发规则原文，没挑中才由模型自己组织回复。</dd></div>
+                      <div><dt>示例写法</dt><dd>样式、材质、安装、退换以已确认内容为准；未确认先询问或转人工。</dd></div>
+                      <div><dt>必填</dt><dd>必填，只能在这三项里选一个。</dd></div>
+                      <div><dt>留空</dt><dd>不允许。没有选就保存会被拒绝。</dd></div>
+                    </dl>
+                  </details>
                 </fieldset>
               </div>
 
               <label class="field">
                 <span class="field-label">模型提示词（模型和混合方式使用）</span>
-                <textarea id="prompt-input" rows="4" spellcheck="false" maxlength="8000"></textarea>
-                <span class="field-help">可说明店铺服务范围和回答方式；信息不足时先向买家询问。最多 8000 个字。</span>
+                <textarea id="prompt-input" rows="4" spellcheck="false" maxlength="8000"
+                          aria-describedby="prompt-input-help"></textarea>
+                <span id="prompt-input-help" class="field-help">可说明店铺服务范围和回答方式；信息不足时先向买家询问。最多 8000 个字。</span>
               </label>
+
+              <details class="help-box">
+                <summary>提示词怎么写、什么时候生效</summary>
+                <dl class="help-list">
+                  <div><dt>用途</dt><dd>用自然语言告诉模型“怎么回答”和“答不了怎么办”。模型会照着这段话组织文字，但不会帮你核对真假。</dd></div>
+                  <div><dt>怎么填</dt><dd>先写已确认的事实原文，再写边界：信息不足先询问，涉及未确认的材质、安装、退换先询问或转人工。一句一个意思，写得越具体越不容易跑偏。</dd></div>
+                  <div><dt>示例写法</dt><dd>材质以已确认规格为准，未确认先询问或转人工；安装时间以已确认的安装说明为准；退换问题以已确认的售后规则为准，未确认转人工。</dd></div>
+                  <div><dt>必填</dt><dd>可以不填。新店铺默认带一句：仅根据已知店铺规则回答；无法确认则转人工。</dd></div>
+                  <div><dt>留空</dt><dd>允许。留空等于没有店铺补充说明，模型只按系统固定要求回答。</dd></div>
+                  <div><dt>生效条件</dt><dd>只有“按模型”或“混合”方式且真的调用模型时才生效；店铺开关关闭时不会调用。</dd></div>
+                  <div><dt>改不了的事</dt><dd>提示词不能改变模型的输出格式、回复长度上限，也不能凭空增加可发送的商品卡或视频；发送条目必须来自前台已提供的候选并通过核验。</dd></div>
+                </dl>
+              </details>
+
+              <section id="prompt-draft-panel" class="prompt-draft-panel" aria-labelledby="prompt-draft-title">
+                <details class="prompt-draft-details">
+                  <summary>
+                    <span id="prompt-draft-title" class="prompt-draft-title">用大白话生成提示词草稿</span>
+                    <span class="prompt-draft-summary-note">选填 · 生成后不会自动保存，也不会自动开启</span>
+                  </summary>
+                  <p id="prompt-draft-disclosure" class="field-help">
+                    说明：点“生成草稿”后，只会把你在下方输入框里写的文字发送给已保存的“主模型”。
+                    不会改用备用模型，不会读取已有提示词、商品资料或聊天记录作为生成内容，不会自动保存，也不会自动打开店铺开关。
+                  </p>
+                  <label class="field">
+                    <span class="field-label">用大白话写下你要模型遵守的内容</span>
+                    <textarea id="prompt-brief" rows="4" maxlength="4000" spellcheck="false"
+                              aria-describedby="prompt-brief-help"
+                              placeholder="示例写法：材质以已确认规格为准，未确认先询问或转人工"></textarea>
+                    <span id="prompt-brief-help" class="field-help">最多 4000 个字。只写你已确认的内容，不要粘贴买家原文或私人信息。</span>
+                  </label>
+                  <div class="prompt-draft-actions">
+                    <button id="generate-prompt" class="btn btn-sm" type="button">生成草稿</button>
+                    <span class="small muted">生成草稿的单次网络等待上限为 45 秒，不改变回复超时设置。重新生成会替换草稿区，请先保留需要的文字。</span>
+                  </div>
+                  <p id="prompt-draft-status" class="small muted" role="status" aria-live="polite">草稿区初始为空。写下要点后点“生成草稿”。</p>
+                  <label class="field">
+                    <span class="field-label">生成的草稿（可手动修改，未应用前不生效）</span>
+                    <textarea id="prompt-draft" rows="10" maxlength="8000" spellcheck="false"
+                              aria-describedby="prompt-draft-help"></textarea>
+                    <span id="prompt-draft-help" class="field-help">这里是“可编辑、未应用”的草稿。只有点“确认用草稿替换提示词”，再点下方“保存设置”，它才会成为这个店铺的提示词。</span>
+                  </label>
+                  <div class="prompt-draft-actions">
+                    <button id="apply-prompt-draft" class="btn btn-sm" type="button" disabled>确认用草稿替换提示词</button>
+                    <span class="small muted">填入只是替换提示词框里的文字，仍需点“保存设置”。</span>
+                  </div>
+                  <ul class="prompt-draft-caveats">
+                    <li>生成内容可能不准确或不完整，请逐条对照你的真实业务核对后再用。</li>
+                    <li>不要把模型补写的材质、安装、退换等内容直接当成事实；请逐条核对，缺少的信息标为“待确认，先询问/转人工”。</li>
+                    <li>草稿只是文字，不会新增关键词规则，也不会改变判断方式、店铺开关或任何模型设置。</li>
+                  </ul>
+                </details>
+              </section>
 
               <fieldset class="settings-group rules-group">
                 <legend>自动回复规则</legend>
                 <p class="field-help">关键词从上到下匹配。混合方式还会根据适用问题说明理解意思，命中后使用规则回复原文；实际发送由客户端核验后执行。</p>
+                <details class="help-box">
+                  <summary>规则和提示词有什么区别，每条规则怎么填</summary>
+                  <dl class="help-list">
+                    <div><dt>和提示词的区别</dt><dd>规则 = 关键词 + 你写好的固定话术，模型不能改写里面的字；提示词 = 给模型的说明，文字由模型组织。要一字不差的答复（材质、安装、退换）用规则；要理解着答的用提示词。</dd></div>
+                    <div><dt>怎么填</dt><dd>关键词写买家原话里最可能出现的词，越具体越好；回复写可以直接发出去的话。排在上面的规则先匹配。</dd></div>
+                    <div><dt>示例写法</dt><dd>关键词“材质”，回复“请问您咨询哪一款？我先帮您核对材质。”这是写法示例，请按实际业务修改。</dd></div>
+                    <div><dt>必填</dt><dd>规则整体可以不填（0 条）。每条规则的关键词必填，回复文字或发送条目至少填一个。</dd></div>
+                    <div><dt>留空</dt><dd>按规则方式下没有规则时全部转人工；按模型方式下规则不参与；混合方式下规则没命中才交模型。</dd></div>
+                    <div><dt>注意</dt><dd>关键词是“包含”匹配，不懂同义词；只匹配最新一条买家文字消息，图片等非文字消息匹配不到。</dd></div>
+                    <div><dt>序号与顺序</dt><dd>规则编号由页面自动生成；新增规则排在最后。发送条目来自当前会话候选，名称筛选应使用前台已有的名称。</dd></div>
+                  </dl>
+                </details>
                 <div id="rules-list" class="rules-list"></div>
                 <p id="rules-empty" class="empty-hint" hidden>还没有规则。纯规则方式没有规则时转人工；混合方式可交模型判断。</p>
                 <div class="rules-actions">
@@ -336,13 +424,18 @@
             <span id="model-version" class="pill pill-muted" hidden></span>
           </div>
 
+          <p class="field-help">
+            这里是全局配置，对所有店铺生效。填写的接口地址会把提示词和买家消息发到对应的模型服务；
+            用本地服务则不出本机。密钥只保存不回显，本页面不显示任何真实密钥示例。
+          </p>
+
           <form id="model-form" class="settings-form" novalidate>
             <div class="model-slot-grid">
               <section class="card model-card model-slot" aria-labelledby="primary-slot-title">
                 <div class="section-head">
                   <div>
                     <h3 id="primary-slot-title" class="section-title">主模型 · 本地</h3>
-                    <p class="section-sub">优先使用。本地服务可填 http://127.0.0.1:端口/v1。</p>
+                    <p class="section-sub">优先使用。本地服务可填 http://127.0.0.1:端口/v1。必须填写，留空则无法用模型判断。</p>
                   </div>
                   <span id="primary-key-status" class="badge badge-muted">未加载</span>
                 </div>
@@ -360,13 +453,18 @@
                     <label class="field">
                       <span class="field-label">模型名称</span>
                       <input id="primary-model" type="text" spellcheck="false" autocomplete="off" maxlength="128"
-                             placeholder="填写本地服务中的模型名称">
+                             placeholder="填写本地服务中的模型名称"
+                             aria-describedby="primary-slot-notes">
                     </label>
                     <label class="field model-timeout-field">
                       <span class="field-label">超时（秒）</span>
-                      <input id="primary-timeout" type="number" inputmode="numeric" min="1" max="60" step="1" value="20">
+                      <input id="primary-timeout" type="number" inputmode="numeric" min="1" max="60" step="1" value="20"
+                             aria-describedby="primary-slot-notes">
                     </label>
                   </div>
+                  <p id="primary-slot-notes" class="field-help">
+                    模型名称和接口地址必须同时填写或同时留空，只填一个会被拒绝保存。超时填 1 到 60 的整数，默认 20 秒。
+                  </p>
 
                   <label class="field">
                     <span class="field-label">API 密钥（可选）</span>
@@ -385,6 +483,22 @@
                     <span id="primary-test-status" class="small muted" role="status" aria-live="polite"></span>
                   </div>
                 </div>
+
+                <details class="help-box">
+                  <summary>主模型各项怎么填</summary>
+                  <dl class="help-list">
+                    <div><dt>接口地址 · 用途</dt><dd>模型服务的入口地址，后台会在后面自动加 /chat/completions。留空就调不动模型。</dd></div>
+                    <div><dt>接口地址 · 怎么填</dt><dd>本地服务写 http://127.0.0.1:端口/v1；公网服务必须 https://。不要带用户名、密码、问号参数或 # 片段。</dd></div>
+                    <div><dt>接口地址 · 示例</dt><dd>本地：http://127.0.0.1:1234/v1</dd></div>
+                    <div><dt>接口地址 · 留空</dt><dd>主模型地址和名称都留空时，回复判断会尝试已配置的备用模型；两者都没配则转人工。草稿生成只使用主模型，因此主模型留空不能生成。</dd></div>
+                    <div><dt>模型名称 · 用途</dt><dd>告诉服务端用哪个模型，具体可用的名称由你的模型服务决定。</dd></div>
+                    <div><dt>模型名称 · 怎么填</dt><dd>照抄本地服务里显示的模型名称，去掉首尾空格，不超过 128 个字符。</dd></div>
+                    <div><dt>模型名称 · 留空</dt><dd>与接口地址一起留空表示不启用主模型；只填一个会被拒绝保存。</dd></div>
+                    <div><dt>超时 · 留空</dt><dd>必须填整数，默认 20 秒，范围 1 到 60 秒。超时按失败处理，再试备用模型或转人工。</dd></div>
+                    <div><dt>密钥 · 怎么填</dt><dd>粘贴服务提供方给你的密钥，由你自己保管。留空表示保留已保存的密钥；勾选“清除”则删掉已保存的密钥，两者不能同时用。</dd></div>
+                    <div><dt>密钥 · 留空</dt><dd>手动输入过密钥、改过接口地址或勾选过清除后，就不再使用环境变量里的密钥，需要重新录入。</dd></div>
+                  </dl>
+                </details>
               </section>
 
               <section class="card model-card model-slot" aria-labelledby="backup-slot-title">
@@ -409,13 +523,17 @@
                     <label class="field">
                       <span class="field-label">模型名称</span>
                       <input id="backup-model" type="text" spellcheck="false" autocomplete="off" maxlength="128"
-                             placeholder="deepseek-flash">
+                             placeholder="deepseek-flash" aria-describedby="backup-slot-notes">
                     </label>
                     <label class="field model-timeout-field">
                       <span class="field-label">超时（秒）</span>
-                      <input id="backup-timeout" type="number" inputmode="numeric" min="1" max="60" step="1" value="20">
+                      <input id="backup-timeout" type="number" inputmode="numeric" min="1" max="60" step="1" value="20"
+                             aria-describedby="backup-slot-notes">
                     </label>
                   </div>
+                  <p id="backup-slot-notes" class="field-help">
+                    模型名称和接口地址必须同时填写或同时留空，只填一个会被拒绝保存。超时填 1 到 60 的整数，默认 20 秒。
+                  </p>
 
                   <label class="field">
                     <span class="field-label">API 密钥（可选）</span>
@@ -434,6 +552,19 @@
                     <span id="backup-test-status" class="small muted" role="status" aria-live="polite"></span>
                   </div>
                 </div>
+
+                <details class="help-box">
+                  <summary>备用模型各项怎么填</summary>
+                  <dl class="help-list">
+                    <div><dt>用途</dt><dd>主模型出错、超时或没返回可用结果时，后台自动再试备用模型一次。</dd></div>
+                    <div><dt>怎么填</dt><dd>接口地址、模型名称、超时的填法和主模型一样；公网地址必须是 https://。</dd></div>
+                    <div><dt>示例</dt><dd>接口地址 https://api.deepseek.com/v1，模型名称 deepseek-flash，超时 20。</dd></div>
+                    <div><dt>必填</dt><dd>选填。备用模型也失败时转人工，不会无限重试。</dd></div>
+                    <div><dt>留空</dt><dd>允许：接口地址和模型名称都留空就不启用备用模型。只填其中一个会被拒绝保存。</dd></div>
+                    <div><dt>密钥</dt><dd>由你自己在服务提供方处申请并填写。留空保留已保存的密钥，本页面不回显。</dd></div>
+                    <div><dt>外发提醒</dt><dd>启用后，主模型失败时店铺提示词和买家消息会发到这个地址，请确认是可信的服务。</dd></div>
+                  </dl>
+                </details>
               </section>
             </div>
 
@@ -451,6 +582,11 @@
                 <button id="model-reload-btn" class="btn btn-ghost" type="button">重新加载</button>
                 <span id="model-status" class="small muted" role="status" aria-live="polite"></span>
               </div>
+              <p class="field-help">
+                版本号用于防止两个页面同时保存时互相覆盖：如果别处先保存过，这里会提示配置已变化，请重新加载再改。
+                保存模型配置会更新各店铺的设置版本；在途判断会重新核验有效性。已进入发送流程的消息仍以客户端回执为准，不确定的旧结果不会重发。
+                “测试连接”只检查能不能连通，不代表提示词或规则写得对。
+              </p>
             </section>
           </form>
         </section>
@@ -570,19 +706,19 @@
             <span class="field-label">当前密码</span>
             <input id="current-password-input" name="current_password" type="password"
                    autocomplete="current-password" aria-describedby="current-password-help">
-            <span id="current-password-help" class="field-help">用于确认是本人操作。</span>
+            <span id="current-password-help" class="field-help">必填。输入你当前正在使用的后台登录密码，用来确认是本人操作；留空无法修改。</span>
           </label>
           <label class="field">
             <span class="field-label">新密码</span>
             <input id="new-password-input" name="new_password" type="password"
                    autocomplete="new-password" aria-describedby="new-password-help">
-            <span id="new-password-help" class="field-help">8-128 个字符，且不能与当前密码相同。</span>
+            <span id="new-password-help" class="field-help">必填。设置你自己保管的新登录密码，8-128 个字符，不能与当前密码相同；修改后所有后台登录会话都需重新登录。</span>
           </label>
           <label class="field">
             <span class="field-label">确认新密码</span>
             <input id="confirm-password-input" name="confirm_password" type="password"
                    autocomplete="new-password" aria-describedby="confirm-password-help">
-            <span id="confirm-password-help" class="field-help">再次输入新密码。</span>
+            <span id="confirm-password-help" class="field-help">必填。把上面的新密码再输入一次，两次必须一致，避免输错后无法登录。</span>
           </label>
         </div>
         <div class="form-actions">
