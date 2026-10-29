@@ -71,7 +71,10 @@ window.setupAdminAssist = function (options) {
     clearCandidates(); clearMerge(); say("chat-status", "尚未导入聊天记录。"); sync();
   }
   function sync() {
-    const modelChanged = item => state.model.dirty || (state.model.loaded && state.model.config && state.model.config.version !== item.modelVersion);
+    // Model versions increase on save. The model page may still cache an older
+    // version than the fresh config fetched for this draft; only a newer one
+    // invalidates it. Do not overwrite the separate model settings form.
+    const modelChanged = item => state.model.dirty || (state.model.loaded && state.model.config && state.model.config.version > item.modelVersion);
     if (draft && (!current(draft.context) || draft.snapshot !== ruleSnapshot() || modelChanged(draft))) {
       clearCandidates("规则或店铺设置已改变，请重新生成，避免覆盖刚才的修改。");
     }
