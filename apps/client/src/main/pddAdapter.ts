@@ -41,6 +41,87 @@ function probePath(raw: unknown): string | null {
   }
 }
 
+/** 会话操作（转移、收藏、标星等）候选接口：仅诊断模式记录字段结构，不参与任何收发处理。 */
+const ACTION_HINT = /transfer|assign|move|star|mark|collect|favou?r|follow|tag|label/i;
+
+/**
+ * 诊断记录可保留的单个词（路径段、界面类名须整段等于其中一个词，或符合下方固定组合规则）。其余一律匿名，
+ * 不按“是否含数字”或“能否拆成已知词”判断：全字母或常用词拼成的买家/账号标识同样不得写入诊断文件。
+ */
+const PROBE_WORDS = new Set(
+  (
+    "api new common query get set list info detail update add remove delete del save batch check status config setting settings " +
+    "user users userinfo mall shop custom service chat chats conv conversation session message messages msg send sync file files " +
+    "library image video goods instruct order orders logistic logistics express track trace waybill shipping delivery " +
+    "transfer assign move star mark collect collection favor favorite favourite follow tag tags label labels remark note top pin " +
+    "read unread block group agent agents staff online offline janus plateau latitude tornado earth merchant index html js json " +
+    "login auth token report log stat stats data page home search recommend card coupon refund after sale sales aftersale record " +
+    "history count notice notify push ws websocket heartbeat ping by to from of and or with for all cancel " +
+    "el ant dialog modal popover drawer title header footer body content wrapper wrap container panel right left side bar item items " +
+    "box active selected select current cur on off disabled hover icon btn button tool tools toolbar menu tab tabs reply input " +
+    "textarea editor avatar nickname name op ops operate operation action actions more close confirm ok primary default small mini " +
+    "large text link inner outer main view tip tips tooltip badge dot second first last mask overlay popup layer scroll row col cell " +
+    "table form radio checkbox switch option options dropdown trigger arrow up down img pic red yellow green blue gray grey orange " +
+    "purple color camera is has " +
+    "id ids uid uids ts time timestamp code success result error errors err total size type value values key keys extra ext " +
+    "req resp request response target source busy available max min limit num number nick avatar mobile phone desc reason " +
+    "start end begin expire expired create created modify modified enable enabled flag level priority sort seq version"
+  ).split(" "),
+);
+const PROBE_WORDS_JSON = JSON.stringify([...PROBE_WORDS]);
+/** 代码中已使用的平台固定类名（组合形式），诊断时可原样保留。 */
+const SAFE_CLASSES_JSON = JSON.stringify([
+  "chat-list", "chat-item", "chat-item-box", "msg-list", "reply-box", "reply-input", "reply-header", "right-panel", "bar-box",
+  "bar-item", "bar-select", "order-panel-header", "order-panel-header-second", "order-panel-second-bar", "video-list-box",
+  "send-video-btn", "chat-icon-camera",
+]);
+
+let staticSegments: Set<string> | null = null;
+
+/** 已确认的静态接口路径中出现的段（含驼峰/下划线组合段），只认这些完整段。 */
+function knownSegments(): Set<string> {
+  staticSegments ??= new Set(
+    [
+      "/janus/api/new/userinfo",
+      "/earth/api/mallInfo/commonMallInfo",
+      "/janus/api/customService/queryCustomServiceInfo",
+      "/chat-merchant/index.html",
+      "/chats/shippingDetail",
+      SEND_PATH,
+      SYNC_PATH,
+      LIBRARY_SEND_PATH,
+      GOODS_CARD_SEND_PATH,
+      INSTRUCT_PATH,
+      INSTRUCT_SEND_PATH,
+      RECOMMEND_GOODS_PATH,
+      VIDEO_LIST_PATH,
+    ].flatMap((p) => p.split("/").filter(Boolean)),
+  );
+  return staticSegments;
+}
+
+/**
+ * 路径段只保留两类：已确认静态接口中的完整段，或单个小写已知词（如 transfer、star）。
+ * 由已知词拼接的段（如 redGreen、online_staff）可能是买家/客服标识，与编号、编码段一样替换为 :id。
+ */
+export function maskPath(pathname: string): string {
+  return pathname
+    .split("/")
+    .map((s) => (s === "" || knownSegments().has(s) || PROBE_WORDS.has(s) || /^v\d{1,2}$/.test(s) ? s : ":id"))
+    .join("/");
+}
+
+export function actionProbePath(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  try {
+    const url = new URL(raw);
+    if (url.hostname !== "mms.pinduoduo.com" || !ACTION_HINT.test(url.pathname)) return null;
+    return maskPath(url.pathname);
+  } catch {
+    return null;
+  }
+}
+
 const ENUM_KEYS = new Set(["role", "type", "status", "cmd", "is_aut", "manual_reply", "source_id", "template_name"]);
 const SHAPE_KEYS = new Set(["ts", "msg_id", "uid", "mall_id", "pre_msg_id"]);
 
@@ -96,6 +177,57 @@ export function schemaOf(text: string | null): unknown {
 }
 
 /**
+ * 会话操作接口可原样输出的完整字段名（逐字比对，不按分词组合判断：由常用词拼成的串也可能是账号标识）。
+ */
+const ACTION_FIELDS = new Set(
+  (
+    "success result data code msg message error error_code error_msg errorCode errorMsg list total status type target " +
+    "target_id targetId target_uid targetUid uid cs_uid csUid mall_id mallId id ids online busy available reason " +
+    "star star_type starType is_star isStar color mark mark_type markType is_mark isMark collect is_collect isCollect " +
+    "collected favorite is_favorite isFavorite transfer transfer_type transferType server_time serverTime ts timestamp"
+  ).split(" "),
+);
+const ACTION_SCHEMA_DEPTH = 8;
+const ACTION_SCHEMA_NODES = 2000;
+
+/**
+ * 会话操作候选接口的字段结构：只保留 ACTION_FIELDS 中的完整字段名；其余键（可能是买家/客服标识）合并为一个 "<key>" 样例，
+ * 另记匿名键个数 "<keys>"。不保留任何值。层数与节点数有上限，超出时以 "deep"/"truncated" 结束；任何异常返回 "error"。
+ */
+export function actionSchemaOf(text: string | null): unknown {
+  if (text === null) return "non_text";
+  try {
+    let value: unknown;
+    try {
+      value = JSON.parse(text);
+    } catch {
+      return "non_json";
+    }
+    let nodes = 0;
+    const walk = (v: unknown, depth: number): unknown => {
+      if (depth > ACTION_SCHEMA_DEPTH) return "deep";
+      if (++nodes > ACTION_SCHEMA_NODES) return "truncated";
+      if (v === null) return "null";
+      if (Array.isArray(v)) return v.length ? [walk(v[0], depth + 1)] : [];
+      if (typeof v === "object") {
+        const out: Record<string, unknown> = {};
+        let unknown = 0;
+        for (const [k, x] of Object.entries(v as Record<string, unknown>).slice(0, 80)) {
+          if (ACTION_FIELDS.has(k)) out[k] = walk(x, depth + 1);
+          else if (unknown++ === 0) out["<key>"] = walk(x, depth + 1);
+        }
+        if (unknown) out["<keys>"] = unknown;
+        return out;
+      }
+      return typeof v === "string" ? "str" : typeof v === "number" ? "num" : typeof v === "boolean" ? "bool" : typeof v;
+    };
+    return walk(value, 0);
+  } catch {
+    return "error";
+  }
+}
+
+/**
  * 页面结构诊断（在隔离环境执行，页面脚本不可见）：只收集元素标签、类名、data-* 属性名、
  * 可编辑区域，以及不超过 6 个字的按钮文字（界面标签，如“发送”）。不收集昵称、消息正文等内容。
  */
@@ -126,15 +258,27 @@ const DOM_PROBE = `(() => {
 
 /**
  * 界面操作记录（隔离环境，页面脚本不可见）：人工每点一次可点击元素，记下它的界面标签（title/aria-label/
- * 不超过 8 字的文字）、图标类名与结构链，以及点击后新出现的弹窗标题。买家列表、消息区、输入框内的点击不记录，
- * 不点击任何东西。另在开启时列出当前页面所有可点击控件，作为“按钮地图”。
+ * 不超过 8 字的文字）、图标类名与结构链，以及点击后新出现的弹窗标题。消息区、输入框内的点击不记录；
+ * 会话列表内只记录不含文字的图标控件（标签只取 title/aria-label 中完整的操作词），选会话、点昵称不记录。
+ * 类名只保留由已知词（PROBE_WORDS）组成的前 4 个，避免带出动态标识。不点击任何东西。另在开启时列出当前页面所有可点击控件，作为“按钮地图”。
  */
-const UI_RECORDER = `(() => {
+export const UI_RECORDER = `(() => {
   if (window.__clawUi) return true;
-  const SKIP = "ul.msg-list, li.chat-item, .chat-list, textarea, [contenteditable=true]";
+  const SKIP = "ul.msg-list, textarea, [contenteditable=true]";
+  const LIST = "li.chat-item, .chat-list";
+  const ICONISH = "i, svg, img, button, [role=button], [title], [aria-label], [class*=icon], [class*=star], [class*=collect], [class*=fav], [class*=mark], [class*=tag]";
   const short = (s) => { const t = (s || "").replace(/\\s+/g, " ").trim(); return t && t.length <= 8 && !/[0-9０-９¥￥@]/.test(t) ? t : null; };
+  const actionWord = (s) => { const t = short(s); return t && /^(取消|已|标为|设为)?(收藏|标星|星标|标记|转移|转移会话|转接|置顶|关注|已读|未读|删除|移除|屏蔽)$/.test(t) ? t : null; };
   const btnish = (el) => el.matches("button, [role=button], [class*=btn], [class*=tab], [class*=menu]");
-  const sig = (el) => el.tagName.toLowerCase() + (typeof el.className === "string" && el.className.trim() ? "." + el.className.trim().split(/\\s+/).slice(0, 4).join(".") : "");
+  const WORDS = new Set(${PROBE_WORDS_JSON});
+  const SAFE = new Set(${SAFE_CLASSES_JSON});
+  const known = (c) => {
+    if (WORDS.has(c) || SAFE.has(c)) return true;
+    const m = /^(el|ant|icon|btn|chat-icon)-([a-z]+)(?:__([a-z]+))?$/.exec(c);
+    return !!m && WORDS.has(m[2]) && (!m[3] || WORDS.has(m[3]));
+  };
+  const cls = (el) => (typeof el.className === "string" ? el.className : el.getAttribute("class") || "").trim().split(/\\s+/).filter((c) => c && c.length <= 32 && known(c)).slice(0, 4);
+  const sig = (el) => [el.tagName.toLowerCase(), ...cls(el)].join(".");
   const chain = (el) => { const out = []; for (let e = el, i = 0; e && e !== document.body && i < 5; e = e.parentElement, i++) out.unshift(sig(e)); return out.join(" > "); };
   const clickable = (el) => el.closest("button, a, [role=button], [title], [class*=btn], [class*=icon], [class*=tool], [class*=menu], [class*=tab], [class*=item]");
   const describe = (el) => {
@@ -145,36 +289,60 @@ const UI_RECORDER = `(() => {
       chain: chain(el),
     };
   };
-  const dialogs = () => [...document.querySelectorAll("[class*=dialog], [class*=modal], [class*=popover], [class*=drawer], [role=dialog]")]
+  const listIcon = (t) => {
+    const el = t.closest(ICONISH);
+    if (!el || !el.closest(LIST) || (el.textContent || "").trim()) return null;
+    let label = null;
+    for (let e = el, i = 0; !label && e && i < 3 && e.closest(LIST) && !(e.textContent || "").trim(); e = e.parentElement, i++) label = actionWord(e.getAttribute("title")) ?? actionWord(e.getAttribute("aria-label"));
+    const icon = el.matches("i, svg, img") ? el : el.querySelector("i, svg, img");
+    return { label, icon: icon ? sig(icon) : null, chain: chain(el), area: "chat_list" };
+  };
+  // 会话列表里点出的浮层可能以买家昵称为标题：此时标题只保留操作类词语。
+  const dialogs = (fromList) => [...document.querySelectorAll("[class*=dialog], [class*=modal], [class*=popover], [class*=drawer], [role=dialog]")]
     .filter((d) => d.getBoundingClientRect().width > 0)
-    .map((d) => short(d.querySelector("[class*=title], [class*=header], h1, h2, h3")?.textContent) ?? sig(d));
+    .map((d) => (fromList ? actionWord : short)(d.querySelector("[class*=title], [class*=header], h1, h2, h3")?.textContent) ?? sig(d));
   const ui = (window.__clawUi = { queue: [] });
   document.addEventListener("click", (ev) => {
     const t = ev.target instanceof Element ? ev.target : null;
     if (!t || t.closest(SKIP)) return;
-    const el = clickable(t) ?? t;
-    const before = new Set(dialogs());
-    const rec = { at: Date.now(), ...describe(el), trusted: ev.isTrusted, opened: [] };
+    const info = t.closest(LIST) ? listIcon(t) : describe(clickable(t) ?? t);
+    if (!info) return;
+    const fromList = info.area === "chat_list";
+    const before = new Set(dialogs(fromList));
+    const rec = { at: Date.now(), ...info, trusted: ev.isTrusted, opened: [] };
     ui.queue.push(rec);
-    setTimeout(() => { rec.opened = dialogs().filter((d) => !before.has(d)).slice(0, 5); }, 800);
+    setTimeout(() => { rec.opened = dialogs(fromList).filter((d) => !before.has(d)).slice(0, 5); }, 800);
   }, true);
   return true;
 })()`;
 
-const UI_MAP = `(() => {
-  const SKIP = "ul.msg-list, li.chat-item, .chat-list";
+export const UI_MAP = `(() => {
+  const SKIP = "ul.msg-list";
+  const LIST = "li.chat-item, .chat-list";
   const short = (s) => { const t = (s || "").replace(/\\s+/g, " ").trim(); return t && t.length <= 8 && !/[0-9０-９¥￥@]/.test(t) ? t : null; };
+  const actionWord = (s) => { const t = short(s); return t && /^(取消|已|标为|设为)?(收藏|标星|星标|标记|转移|转移会话|转接|置顶|关注|已读|未读|删除|移除|屏蔽)$/.test(t) ? t : null; };
   const btnish = (el) => el.matches("button, [role=button], [class*=btn], [class*=tab], [class*=menu]");
-  const sig = (el) => el.tagName.toLowerCase() + (typeof el.className === "string" && el.className.trim() ? "." + el.className.trim().split(/\\s+/).slice(0, 4).join(".") : "");
+  const WORDS = new Set(${PROBE_WORDS_JSON});
+  const SAFE = new Set(${SAFE_CLASSES_JSON});
+  const known = (c) => {
+    if (WORDS.has(c) || SAFE.has(c)) return true;
+    const m = /^(el|ant|icon|btn|chat-icon)-([a-z]+)(?:__([a-z]+))?$/.exec(c);
+    return !!m && WORDS.has(m[2]) && (!m[3] || WORDS.has(m[3]));
+  };
+  const cls = (el) => (typeof el.className === "string" ? el.className : el.getAttribute("class") || "").trim().split(/\\s+/).filter((c) => c && c.length <= 32 && known(c)).slice(0, 4);
+  const sig = (el) => [el.tagName.toLowerCase(), ...cls(el)].join(".");
   const chain = (el) => { const out = []; for (let e = el, i = 0; e && e !== document.body && i < 5; e = e.parentElement, i++) out.unshift(sig(e)); return out.join(" > "); };
   const seen = new Set();
   const out = [];
   for (const el of document.querySelectorAll("button, a, [role=button], [title], [class*=btn], [class*=icon], [class*=tool]")) {
     if (el.closest(SKIP)) continue;
+    const inList = !!el.closest(LIST);
+    if (inList && (el.textContent || "").trim()) continue;
     const r = el.getBoundingClientRect();
     if (r.width < 4 || r.height < 4) continue;
     const icon = el.querySelector("i[class], svg[class], img[class]");
-    const rec = { label: short(el.getAttribute("title")) ?? short(el.getAttribute("aria-label")) ?? (btnish(el) ? short(el.textContent) : null), icon: icon ? sig(icon) : null, chain: chain(el), area: el.closest(".reply-box") ? "reply_box" : el.closest("[class*=side], [class*=right]") ? "side" : "other" };
+    const label = inList ? (actionWord(el.getAttribute("title")) ?? actionWord(el.getAttribute("aria-label"))) : (short(el.getAttribute("title")) ?? short(el.getAttribute("aria-label")) ?? (btnish(el) ? short(el.textContent) : null));
+    const rec = { label, icon: icon ? sig(icon) : null, chain: chain(el), area: inList ? "chat_list" : el.closest(".reply-box") ? "reply_box" : el.closest("[class*=side], [class*=right]") ? "side" : "other" };
     const key = rec.chain + "|" + rec.label;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -189,7 +357,7 @@ const UI_MAP = `(() => {
 
 const UI_DRAIN = `(() => { const ui = window.__clawUi; if (!ui) return null; const done = ui.queue.filter((r) => Date.now() - r.at > 3000); ui.queue = ui.queue.filter((r) => Date.now() - r.at <= 3000); return done; })()`;
 
-type UiClick = { at: number; label: string | null; icon: string | null; chain: string; trusted: boolean; opened: string[] };
+type UiClick = { at: number; label: string | null; icon: string | null; chain: string; area?: string; trusted: boolean; opened: string[] };
 
 const SEND_PATH = "/plateau/chat/send_message";
 const WORLD = 1001;
@@ -528,15 +696,41 @@ export class PddPageAdapter implements PlatformAdapter {
     const dbg = win.webContents.debugger;
     // 监听只装一次；渲染进程崩溃会使调试通道断开，恢复时由 enableNetwork 重新附加并开启拦截。
     const pending = new Map<string, { path: string; postData: string | null; buyer: string | null; epoch: number; optionsEpoch: number }>();
+    const discovered = new Map<string, string>();
     const seen = new Set<string>();
+    const writeOnce = (kind: string, p: string, schema: unknown) => {
+      const key = kind + p + JSON.stringify(schema);
+      if (seen.has(key)) return;
+      seen.add(key);
+      write({ kind, path: p, schema });
+    };
     dbg.on("message", (_e, method, params: any) => {
       if (method === "Network.requestWillBeSent") {
         const p = probePath(params.request?.url);
+        const action = !p && schemaFile ? actionProbePath(params.request?.url) : null;
+        if (action) {
+          discovered.set(params.requestId, action);
+          try {
+            if (typeof params.request.postData === "string") writeOnce("action_request", action, actionSchemaOf(params.request.postData));
+          } catch {
+            // 诊断记录失败不得影响消息回调。
+          }
+          return;
+        }
         if (!p) return;
         const postData = typeof params.request.postData === "string" ? params.request.postData : null;
         pending.set(params.requestId, { path: p, postData, buyer: this.orders.started(p, jsonOrNull(postData)), epoch: this.orders.epoch, optionsEpoch: this.sendOptions.epoch });
         if (postData && schemaFile) write({ kind: "request", path: p, schema: schemaOf(postData) });
       } else if (method === "Network.loadingFinished") {
+        const action = discovered.get(params.requestId);
+        if (action) {
+          discovered.delete(params.requestId);
+          dbg
+            .sendCommand("Network.getResponseBody", { requestId: params.requestId })
+            .then((r: any) => writeOnce("action_response", action, actionSchemaOf(r.base64Encoded ? null : (r.body as string))))
+            .catch(() => undefined);
+          return;
+        }
         const req = pending.get(params.requestId);
         if (!req) return;
         pending.delete(params.requestId);
@@ -566,6 +760,7 @@ export class PddPageAdapter implements PlatformAdapter {
           })
           .catch(() => undefined);
       } else if (method === "Network.loadingFailed") {
+        discovered.delete(params.requestId);
         const failed = pending.get(params.requestId);
         this.orders.finished(failed?.buyer ?? null);
         pending.delete(params.requestId);
@@ -893,9 +1088,10 @@ export class PddPageAdapter implements PlatformAdapter {
       } catch {
         return;
       }
-      const line = { at: new Date().toISOString(), type: d.resourceType, method: d.method, host: url.hostname, path: url.pathname, status: d.statusCode };
+      const masked = maskPath(url.pathname);
+      const line = { at: new Date().toISOString(), type: d.resourceType, method: d.method, host: url.hostname, path: masked, status: d.statusCode };
       if (d.resourceType === "xhr" || d.resourceType === "other") {
-        this.recentRequests.push({ at: Date.now(), req: `${d.method} ${url.hostname}${url.pathname}` });
+        this.recentRequests.push({ at: Date.now(), req: `${d.method} ${url.hostname}${masked}` });
         if (this.recentRequests.length > 200) this.recentRequests.splice(0, this.recentRequests.length - 200);
       }
       fs.appendFile(file, JSON.stringify(line) + "\n", { mode: 0o600 }, () => undefined);
@@ -915,7 +1111,7 @@ export class PddPageAdapter implements PlatformAdapter {
         .then((done) => {
           for (const c of done ?? []) {
             const requests = [...new Set(this.recentRequests.filter((r) => r.at >= c.at - 200 && r.at <= c.at + 3000).map((r) => r.req))].slice(0, 20);
-            const line = { at: new Date(c.at).toISOString(), label: c.label, icon: c.icon, chain: c.chain, trusted: c.trusted, opened: c.opened, requests };
+            const line = { at: new Date(c.at).toISOString(), label: c.label, icon: c.icon, chain: c.chain, area: c.area ?? null, trusted: c.trusted, opened: c.opened, requests };
             console.log(`[${this.shopId}] ui-click label=${c.label ?? "-"} opened=${c.opened.join("|") || "-"} requests=${requests.length}`);
             fs.appendFile(actionsFile, JSON.stringify(line) + "\n", { mode: 0o600 }, () => undefined);
           }
