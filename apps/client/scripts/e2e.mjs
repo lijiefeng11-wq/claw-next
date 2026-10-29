@@ -397,6 +397,12 @@ try {
     const out = line ? JSON.parse(line) : null;
     if (r.status !== 0 || !out?.ok) throw new Error(`互斥回归失败：${line ?? r.stderr?.slice(-300) ?? r.status}`);
   });
+  await step("诊断点击记录：会话列表图标可记录，不带出昵称、客服名与动态编号", async () => {
+    const r = spawnSync(require("electron"), [...(process.platform === "linux" ? ["--no-sandbox"] : []), path.join(clientRoot, "scripts", "test-ui-recorder.cjs")], { encoding: "utf8", timeout: 90_000 });
+    const line = (r.stdout || "").split("\n").reverse().find((l) => l.startsWith("{"));
+    const out = line ? JSON.parse(line) : null;
+    if (r.status !== 0 || !out?.ok) throw new Error(`点击记录回归失败：${line ?? r.stderr?.slice(-300) ?? r.status}`);
+  });
   await step("界面 HTML 中不含客户端口令", async () => {
     if ((await page.content()).includes(token)) throw new Error("口令出现在页面中");
   });

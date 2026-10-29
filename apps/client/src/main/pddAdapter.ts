@@ -41,6 +41,28 @@ function probePath(raw: unknown): string | null {
   }
 }
 
+/** 会话操作（转移、收藏、标星等）候选接口：仅诊断模式记录字段结构，不参与任何收发处理。 */
+const ACTION_HINT = /transfer|assign|move|star|mark|collect|favou?r|follow|tag|label/i;
+
+/** 路径里像编号的段（含 5 位以上数字，或 16 位以上且含数字）替换为 :id，避免诊断记录带出会话/账号标识。 */
+export function maskPath(pathname: string): string {
+  return pathname
+    .split("/")
+    .map((s) => (/\d{5,}/.test(s) || (s.length >= 16 && /\d/.test(s)) ? ":id" : s))
+    .join("/");
+}
+
+export function actionProbePath(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  try {
+    const url = new URL(raw);
+    if (url.hostname !== "mms.pinduoduo.com" || !ACTION_HINT.test(url.pathname)) return null;
+    return maskPath(url.pathname);
+  } catch {
+    return null;
+  }
+}
+
 const ENUM_KEYS = new Set(["role", "type", "status", "cmd", "is_aut", "manual_reply", "source_id", "template_name"]);
 const SHAPE_KEYS = new Set(["ts", "msg_id", "uid", "mall_id", "pre_msg_id"]);
 
@@ -126,15 +148,20 @@ const DOM_PROBE = `(() => {
 
 /**
  * 界面操作记录（隔离环境，页面脚本不可见）：人工每点一次可点击元素，记下它的界面标签（title/aria-label/
- * 不超过 8 字的文字）、图标类名与结构链，以及点击后新出现的弹窗标题。买家列表、消息区、输入框内的点击不记录，
- * 不点击任何东西。另在开启时列出当前页面所有可点击控件，作为“按钮地图”。
+ * 不超过 8 字的文字）、图标类名与结构链，以及点击后新出现的弹窗标题。消息区、输入框内的点击不记录；
+ * 会话列表内只记录不含文字的图标控件（标签只取 title/aria-label），选会话、点昵称不记录。
+ * 类名只保留不含数字的前 4 个，避免带出动态标识。不点击任何东西。另在开启时列出当前页面所有可点击控件，作为“按钮地图”。
  */
-const UI_RECORDER = `(() => {
+export const UI_RECORDER = `(() => {
   if (window.__clawUi) return true;
-  const SKIP = "ul.msg-list, li.chat-item, .chat-list, textarea, [contenteditable=true]";
+  const SKIP = "ul.msg-list, textarea, [contenteditable=true]";
+  const LIST = "li.chat-item, .chat-list";
+  const ICONISH = "i, svg, img, button, [role=button], [title], [aria-label], [class*=icon], [class*=star], [class*=collect], [class*=fav], [class*=mark], [class*=tag]";
   const short = (s) => { const t = (s || "").replace(/\\s+/g, " ").trim(); return t && t.length <= 8 && !/[0-9０-９¥￥@]/.test(t) ? t : null; };
+  const actionWord = (s) => { const t = short(s); return t && /星|收藏|转|标记|置顶|关注|已读|未读|删除|移除|屏蔽/.test(t) ? t : null; };
   const btnish = (el) => el.matches("button, [role=button], [class*=btn], [class*=tab], [class*=menu]");
-  const sig = (el) => el.tagName.toLowerCase() + (typeof el.className === "string" && el.className.trim() ? "." + el.className.trim().split(/\\s+/).slice(0, 4).join(".") : "");
+  const cls = (el) => (typeof el.className === "string" ? el.className : el.getAttribute("class") || "").trim().split(/\\s+/).filter((c) => c && c.length <= 32 && !/[0-9]/.test(c)).slice(0, 4);
+  const sig = (el) => [el.tagName.toLowerCase(), ...cls(el)].join(".");
   const chain = (el) => { const out = []; for (let e = el, i = 0; e && e !== document.body && i < 5; e = e.parentElement, i++) out.unshift(sig(e)); return out.join(" > "); };
   const clickable = (el) => el.closest("button, a, [role=button], [title], [class*=btn], [class*=icon], [class*=tool], [class*=menu], [class*=tab], [class*=item]");
   const describe = (el) => {
@@ -145,36 +172,53 @@ const UI_RECORDER = `(() => {
       chain: chain(el),
     };
   };
-  const dialogs = () => [...document.querySelectorAll("[class*=dialog], [class*=modal], [class*=popover], [class*=drawer], [role=dialog]")]
+  const listIcon = (t) => {
+    const el = t.closest(ICONISH);
+    if (!el || !el.closest(LIST) || (el.textContent || "").trim()) return null;
+    let label = null;
+    for (let e = el, i = 0; !label && e && i < 3 && e.closest(LIST) && !(e.textContent || "").trim(); e = e.parentElement, i++) label = actionWord(e.getAttribute("title")) ?? actionWord(e.getAttribute("aria-label"));
+    const icon = el.matches("i, svg, img") ? el : el.querySelector("i, svg, img");
+    return { label, icon: icon ? sig(icon) : null, chain: chain(el), area: "chat_list" };
+  };
+  // 会话列表里点出的浮层可能以买家昵称为标题：此时标题只保留操作类词语。
+  const dialogs = (fromList) => [...document.querySelectorAll("[class*=dialog], [class*=modal], [class*=popover], [class*=drawer], [role=dialog]")]
     .filter((d) => d.getBoundingClientRect().width > 0)
-    .map((d) => short(d.querySelector("[class*=title], [class*=header], h1, h2, h3")?.textContent) ?? sig(d));
+    .map((d) => (fromList ? actionWord : short)(d.querySelector("[class*=title], [class*=header], h1, h2, h3")?.textContent) ?? sig(d));
   const ui = (window.__clawUi = { queue: [] });
   document.addEventListener("click", (ev) => {
     const t = ev.target instanceof Element ? ev.target : null;
     if (!t || t.closest(SKIP)) return;
-    const el = clickable(t) ?? t;
-    const before = new Set(dialogs());
-    const rec = { at: Date.now(), ...describe(el), trusted: ev.isTrusted, opened: [] };
+    const info = t.closest(LIST) ? listIcon(t) : describe(clickable(t) ?? t);
+    if (!info) return;
+    const fromList = info.area === "chat_list";
+    const before = new Set(dialogs(fromList));
+    const rec = { at: Date.now(), ...info, trusted: ev.isTrusted, opened: [] };
     ui.queue.push(rec);
-    setTimeout(() => { rec.opened = dialogs().filter((d) => !before.has(d)).slice(0, 5); }, 800);
+    setTimeout(() => { rec.opened = dialogs(fromList).filter((d) => !before.has(d)).slice(0, 5); }, 800);
   }, true);
   return true;
 })()`;
 
-const UI_MAP = `(() => {
-  const SKIP = "ul.msg-list, li.chat-item, .chat-list";
+export const UI_MAP = `(() => {
+  const SKIP = "ul.msg-list";
+  const LIST = "li.chat-item, .chat-list";
   const short = (s) => { const t = (s || "").replace(/\\s+/g, " ").trim(); return t && t.length <= 8 && !/[0-9０-９¥￥@]/.test(t) ? t : null; };
+  const actionWord = (s) => { const t = short(s); return t && /星|收藏|转|标记|置顶|关注|已读|未读|删除|移除|屏蔽/.test(t) ? t : null; };
   const btnish = (el) => el.matches("button, [role=button], [class*=btn], [class*=tab], [class*=menu]");
-  const sig = (el) => el.tagName.toLowerCase() + (typeof el.className === "string" && el.className.trim() ? "." + el.className.trim().split(/\\s+/).slice(0, 4).join(".") : "");
+  const cls = (el) => (typeof el.className === "string" ? el.className : el.getAttribute("class") || "").trim().split(/\\s+/).filter((c) => c && c.length <= 32 && !/[0-9]/.test(c)).slice(0, 4);
+  const sig = (el) => [el.tagName.toLowerCase(), ...cls(el)].join(".");
   const chain = (el) => { const out = []; for (let e = el, i = 0; e && e !== document.body && i < 5; e = e.parentElement, i++) out.unshift(sig(e)); return out.join(" > "); };
   const seen = new Set();
   const out = [];
   for (const el of document.querySelectorAll("button, a, [role=button], [title], [class*=btn], [class*=icon], [class*=tool]")) {
     if (el.closest(SKIP)) continue;
+    const inList = !!el.closest(LIST);
+    if (inList && (el.textContent || "").trim()) continue;
     const r = el.getBoundingClientRect();
     if (r.width < 4 || r.height < 4) continue;
     const icon = el.querySelector("i[class], svg[class], img[class]");
-    const rec = { label: short(el.getAttribute("title")) ?? short(el.getAttribute("aria-label")) ?? (btnish(el) ? short(el.textContent) : null), icon: icon ? sig(icon) : null, chain: chain(el), area: el.closest(".reply-box") ? "reply_box" : el.closest("[class*=side], [class*=right]") ? "side" : "other" };
+    const label = inList ? (actionWord(el.getAttribute("title")) ?? actionWord(el.getAttribute("aria-label"))) : (short(el.getAttribute("title")) ?? short(el.getAttribute("aria-label")) ?? (btnish(el) ? short(el.textContent) : null));
+    const rec = { label, icon: icon ? sig(icon) : null, chain: chain(el), area: inList ? "chat_list" : el.closest(".reply-box") ? "reply_box" : el.closest("[class*=side], [class*=right]") ? "side" : "other" };
     const key = rec.chain + "|" + rec.label;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -189,7 +233,7 @@ const UI_MAP = `(() => {
 
 const UI_DRAIN = `(() => { const ui = window.__clawUi; if (!ui) return null; const done = ui.queue.filter((r) => Date.now() - r.at > 3000); ui.queue = ui.queue.filter((r) => Date.now() - r.at <= 3000); return done; })()`;
 
-type UiClick = { at: number; label: string | null; icon: string | null; chain: string; trusted: boolean; opened: string[] };
+type UiClick = { at: number; label: string | null; icon: string | null; chain: string; area?: string; trusted: boolean; opened: string[] };
 
 const SEND_PATH = "/plateau/chat/send_message";
 const WORLD = 1001;
@@ -528,15 +572,37 @@ export class PddPageAdapter implements PlatformAdapter {
     const dbg = win.webContents.debugger;
     // 监听只装一次；渲染进程崩溃会使调试通道断开，恢复时由 enableNetwork 重新附加并开启拦截。
     const pending = new Map<string, { path: string; postData: string | null; buyer: string | null; epoch: number; optionsEpoch: number }>();
+    const discovered = new Map<string, string>();
     const seen = new Set<string>();
+    const writeOnce = (kind: string, p: string, schema: unknown) => {
+      const key = kind + p + JSON.stringify(schema);
+      if (seen.has(key)) return;
+      seen.add(key);
+      write({ kind, path: p, schema });
+    };
     dbg.on("message", (_e, method, params: any) => {
       if (method === "Network.requestWillBeSent") {
         const p = probePath(params.request?.url);
+        const action = !p && schemaFile ? actionProbePath(params.request?.url) : null;
+        if (action) {
+          discovered.set(params.requestId, action);
+          if (typeof params.request.postData === "string") writeOnce("action_request", action, schemaOf(params.request.postData));
+          return;
+        }
         if (!p) return;
         const postData = typeof params.request.postData === "string" ? params.request.postData : null;
         pending.set(params.requestId, { path: p, postData, buyer: this.orders.started(p, jsonOrNull(postData)), epoch: this.orders.epoch, optionsEpoch: this.sendOptions.epoch });
         if (postData && schemaFile) write({ kind: "request", path: p, schema: schemaOf(postData) });
       } else if (method === "Network.loadingFinished") {
+        const action = discovered.get(params.requestId);
+        if (action) {
+          discovered.delete(params.requestId);
+          dbg
+            .sendCommand("Network.getResponseBody", { requestId: params.requestId })
+            .then((r: any) => writeOnce("action_response", action, schemaOf(r.base64Encoded ? null : (r.body as string))))
+            .catch(() => undefined);
+          return;
+        }
         const req = pending.get(params.requestId);
         if (!req) return;
         pending.delete(params.requestId);
@@ -566,6 +632,7 @@ export class PddPageAdapter implements PlatformAdapter {
           })
           .catch(() => undefined);
       } else if (method === "Network.loadingFailed") {
+        discovered.delete(params.requestId);
         const failed = pending.get(params.requestId);
         this.orders.finished(failed?.buyer ?? null);
         pending.delete(params.requestId);
@@ -893,9 +960,10 @@ export class PddPageAdapter implements PlatformAdapter {
       } catch {
         return;
       }
-      const line = { at: new Date().toISOString(), type: d.resourceType, method: d.method, host: url.hostname, path: url.pathname, status: d.statusCode };
+      const masked = maskPath(url.pathname);
+      const line = { at: new Date().toISOString(), type: d.resourceType, method: d.method, host: url.hostname, path: masked, status: d.statusCode };
       if (d.resourceType === "xhr" || d.resourceType === "other") {
-        this.recentRequests.push({ at: Date.now(), req: `${d.method} ${url.hostname}${url.pathname}` });
+        this.recentRequests.push({ at: Date.now(), req: `${d.method} ${url.hostname}${masked}` });
         if (this.recentRequests.length > 200) this.recentRequests.splice(0, this.recentRequests.length - 200);
       }
       fs.appendFile(file, JSON.stringify(line) + "\n", { mode: 0o600 }, () => undefined);
@@ -915,7 +983,7 @@ export class PddPageAdapter implements PlatformAdapter {
         .then((done) => {
           for (const c of done ?? []) {
             const requests = [...new Set(this.recentRequests.filter((r) => r.at >= c.at - 200 && r.at <= c.at + 3000).map((r) => r.req))].slice(0, 20);
-            const line = { at: new Date(c.at).toISOString(), label: c.label, icon: c.icon, chain: c.chain, trusted: c.trusted, opened: c.opened, requests };
+            const line = { at: new Date(c.at).toISOString(), label: c.label, icon: c.icon, chain: c.chain, area: c.area ?? null, trusted: c.trusted, opened: c.opened, requests };
             console.log(`[${this.shopId}] ui-click label=${c.label ?? "-"} opened=${c.opened.join("|") || "-"} requests=${requests.length}`);
             fs.appendFile(actionsFile, JSON.stringify(line) + "\n", { mode: 0o600 }, () => undefined);
           }
