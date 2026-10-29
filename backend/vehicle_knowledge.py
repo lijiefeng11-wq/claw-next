@@ -54,7 +54,9 @@ def _record(text):
 
 
 def _normalize(text):
-    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", text).casefold())
+    # Spaces separate an ASCII model from its brand/year. Deleting them turns
+    # "Brand A6 2022" into one identifier and defeats _contains' boundaries.
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", text).casefold()).strip()
 
 
 def _aliases(record):

@@ -48,6 +48,17 @@ class VehicleKnowledgeTests(unittest.TestCase):
         for query in ("示例A60", "示例A6L", "不存在", "", None):
             self.assertEqual(c.lookup(query)["status"], "not_found")
 
+    def test_query_separators_keep_english_brand_and_year_boundaries(self):
+        self.file.write_text(document(model="A6 20-24款"), encoding="utf-8")
+        catalog = vk.load_directory(self.root)
+        for query in ("虚构牌A6能用吗", "虚构牌A6 2022款能用吗", "Example A6能用吗",
+                      "Example\tＡ６　2022款能用吗", " A6 \n 2022款 "):
+            with self.subTest(query=query):
+                self.assertEqual(catalog.lookup(query)["status"], "matched")
+        for query in ("A60 2022款", "A6L 2022款", "XA6", "A 6"):
+            with self.subTest(query=query):
+                self.assertEqual(catalog.lookup(query)["status"], "not_found")
+
     def test_year_variant_and_window_are_never_silently_selected(self):
         for i in range(7):
             (self.root / (str(i) + ".md")).write_text(document(record="SUN-" + str(i), model="示例车A " + str(15+i) + "-24款"), encoding="utf-8")
