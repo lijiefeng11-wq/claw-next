@@ -12,11 +12,11 @@ from pathlib import Path
 from socketserver import TCPServer
 from urllib.parse import parse_qs, urlsplit
 
-from . import diagnostics, modelconfig, modelworker, promptdraft, vehicle_knowledge
+from . import chatrules, diagnostics, modelconfig, modelworker, promptdraft, promptmerge, vehicle_knowledge
 from .auth import AdminAuth
 from .content import MAX_EVENT_BYTES
 from .engine import ProviderFailure, decide, decision, immediate_decision, test_slot
-from .store import ApiError, Store, identifier, require
+from .store import ApiError, Store, identifier, require, validate_settings
 
 PROTOCOL_VERSION = "1.0"
 STATIC = Path(__file__).parent / "static"
@@ -105,6 +105,12 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             raise ApiError(400, "invalid_content_length") from None
         limit = MAX_EVENT_BYTES if self.command == "POST" and urlsplit(self.path).path == "/api/v1/events" else 262144
+        if self.command == "POST" and urlsplit(self.path).path == "/api/v1/admin/chat-import":
+            # JSON escaping can expand a 2 MiB text file. Only this authenticated
+            # import endpoint accepts the larger envelope; decoded text is capped.
+            limit = 8 * 1024 * 1024
+        elif self.command == "POST" and urlsplit(self.path).path == "/api/v1/admin/rule-draft":
+            limit = 4 * 1024 * 1024
         require(0 < size <= limit, "body_too_large" if size > limit else "body_required", 413 if size > limit else 400)
         try:
             value = json.loads(self.rfile.read(size), parse_constant=reject_constant, object_pairs_hook=unique_object)
@@ -178,7 +184,79 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             self.server.prompt_draft_slot.release()
 
+    def _admin_assist(self, path, store):
+        """Import/preview only; never persist uploaded conversations or drafts."""
+        importing = path.endswith("/chat-import")
+        merging = path.endswith("/prompt-merge")
+        with self.server.auth.lock:
+            identity = self._identity()
+            require(identity["role"] == "admin", "admin_required", 403)
+            require(not identity["must_change_password"], "admin_password_change_required", 403)
+            payload = self._json()
+            common = {"shop_id", "version", "shop_version"}
+            expected = {"shop_id", "filename", "text"} if importing else common | (
+                {"current_prompt", "supplement"} if merging else {"pairs", "existing_rules"})
+            require(set(payload) == expected, "invalid_assist_request")
+            require(identifier(payload["shop_id"]), "invalid_shop_id")
+            shop = next((s for s in store.shops() if s["shop_id"] == payload["shop_id"]), None)
+            require(shop is not None, "shop_not_found", 404)
+            shop_version = shop["settings"]["version"]
+            config = None
+            if not importing:
+                require(type(payload["shop_version"]) is int and payload["shop_version"] == shop_version,
+                        "shop_settings_changed", 409)
+                config = copy.deepcopy(store.model_config(self.server.config.get("model", {})))
+                require(type(payload["version"]) is int and payload["version"] == config["version"],
+                        "model_config_changed", 409)
+            if importing:
+                require(isinstance(payload["filename"], str) and len(payload["filename"]) <= 255,
+                        "invalid_chat_import")
+                require(isinstance(payload["text"], str), "invalid_chat_import")
+                try:
+                    text_size = len(payload["text"].encode("utf-8"))
+                except UnicodeError:
+                    raise ApiError(400, "invalid_chat_import") from None
+                require(0 < text_size <= 2 * 1024 * 1024, "invalid_chat_import")
+            elif merging:
+                for name, limit in (("current_prompt", 8000), ("supplement", 4000)):
+                    require(isinstance(payload[name], str) and 1 <= len(payload[name].strip()) <= limit,
+                            "invalid_prompt_merge")
+            else:
+                rules = validate_settings({"enabled": False, "mode": "rules", "system_prompt": "",
+                                           "rules": payload["existing_rules"]})["rules"]
+        require(self.server.prompt_draft_slot.acquire(blocking=False), "prompt_draft_busy", 429)
+        try:
+            try:
+                if importing:
+                    result = chatrules.parse_import(payload["filename"], payload["text"])
+                elif merging:
+                    result = promptmerge.generate(payload["current_prompt"], payload["supplement"], config)
+                else:
+                    pairs = chatrules.validate_pairs(payload["pairs"])
+                    result = chatrules.generate(pairs, rules, config)
+            except ValueError:
+                raise ApiError(400, "invalid_chat_import") from None
+            except ProviderFailure as exc:
+                diagnostics.emit("admin_assist_failed", code=exc.code)
+                raise ApiError(502, "assist_unavailable") from None
+            with self.server.auth.lock:
+                identity = self._identity()
+                require(identity["role"] == "admin" and not identity["must_change_password"], "admin_required", 403)
+                current = next((s for s in store.shops() if s["shop_id"] == payload["shop_id"]), None)
+                require(current is not None and current["settings"]["version"] == shop_version,
+                        "shop_settings_changed", 409)
+                if config is not None:
+                    require(store.model_config(self.server.config.get("model", {}))["version"] == config["version"],
+                            "model_config_changed", 409)
+                    result["version"] = config["version"]
+                return self._send(200, {**result, "shop_id": payload["shop_id"], "shop_version": shop_version})
+        finally:
+            self.server.prompt_draft_slot.release()
+
     def _admin_route(self, path, method, parts, store):
+        if method == "POST" and path in ("/api/v1/admin/chat-import", "/api/v1/admin/rule-draft",
+                                         "/api/v1/admin/prompt-merge"):
+            return self._admin_assist(path, store)
         if path == "/api/v1/admin/prompt-draft" and method == "POST":
             return self._prompt_draft(store)
         if path == "/api/v1/admin/model/test" and method == "POST":
@@ -233,7 +311,8 @@ class Handler(BaseHTTPRequestHandler):
         path, method = parsed.path, self.command
         if path == "/health" and method == "GET":
             return self._send(200, {"service": "claw-next", "protocol_version": PROTOCOL_VERSION, "status": "ok"})
-        static = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8"), "/style.css": ("style.css", "text/css; charset=utf-8")}
+        static = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+                  "/assist.js": ("assist.js", "text/javascript; charset=utf-8"), "/style.css": ("style.css", "text/css; charset=utf-8")}
         if path in static and method == "GET":
             name, mime = static[path]
             require((STATIC / name).is_file(), "ui_not_installed", 503)
