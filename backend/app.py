@@ -12,7 +12,7 @@ from pathlib import Path
 from socketserver import TCPServer
 from urllib.parse import parse_qs, urlsplit
 
-from . import diagnostics, modelconfig, modelworker
+from . import diagnostics, modelconfig, modelworker, vehicle_knowledge
 from .auth import AdminAuth
 from .content import MAX_EVENT_BYTES
 from .engine import decide, decision, immediate_decision, test_slot
@@ -50,6 +50,11 @@ def validate_config(config):
         client_ids.add(client["client_id"])
         tokens.add(token)
     require(isinstance(config.get("model", {}), dict), "invalid_model_config")
+    knowledge = config.get("vehicle_knowledge", {})
+    require(isinstance(knowledge, dict) and set(knowledge) <= shop_ids,
+            "invalid_vehicle_knowledge_config")
+    require(all(isinstance(path, str) and Path(path).is_absolute()
+                for path in knowledge.values()), "invalid_vehicle_knowledge_config")
 
 
 def reject_constant(_):
@@ -270,6 +275,8 @@ class Server(ThreadingHTTPServer):
         super().__init__((host, port), Handler)
         self.config = config
         try:
+            self.vehicle_catalogs = {shop: vehicle_knowledge.load_directory(path)
+                                     for shop, path in config.get("vehicle_knowledge", {}).items()}
             self.store = Store(data_dir, config["shops"])
             if startup_check is not None:
                 startup_check()
@@ -321,6 +328,12 @@ class Server(ThreadingHTTPServer):
                     return False
                 # next_job invokes this while holding the same lock as its job snapshot.
                 model_config = self.store.model_config(self.config.get("model", {}))
+                catalog = self.vehicle_catalogs.get(job["shop_id"])
+                if catalog is not None:
+                    # Local catalog selection comes from server configuration and
+                    # authenticated shop ownership, never from submitted context.
+                    job["vehicle_knowledge"] = catalog.lookup(
+                        job["payload"]["context"]["messages"][-1]["content"])
                 return True
 
             job = self.store.next_job(accept=available, after_shop=last_shop)
