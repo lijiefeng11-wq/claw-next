@@ -62,7 +62,10 @@ const PROBE_WORDS = new Set(
     "textarea editor avatar nickname name op ops operate operation action actions more close confirm ok primary default small mini " +
     "large text link inner outer main view tip tips tooltip badge dot second first last mask overlay popup layer scroll row col cell " +
     "table form radio checkbox switch option options dropdown trigger arrow up down img pic red yellow green blue gray grey orange " +
-    "purple color camera is has"
+    "purple color camera is has " +
+    "id ids uid uids ts time timestamp code success result error errors err total size type value values key keys extra ext " +
+    "req resp request response target source busy available max min limit num number nick avatar mobile phone desc reason " +
+    "start end begin expire expired create created modify modified enable enabled flag level priority sort seq version"
   ).split(" "),
 );
 const PROBE_WORDS_JSON = JSON.stringify([...PROBE_WORDS]);
@@ -138,6 +141,37 @@ export function schemaOf(text: string | null): unknown {
       // 以数字/长编号作键的对象（按 ID 索引）只保留一个样例结构，键名替换为占位符。
       if (keys.length && keys.every((k) => /^[0-9a-f-]{6,}$/i.test(k))) return { "<id>": walk((v as Record<string, unknown>)[keys[0]], depth + 1) };
       for (const k of keys.slice(0, 80)) out[k] = walk((v as Record<string, unknown>)[k], depth + 1);
+      return out;
+    }
+    return typeof v === "string" ? "str" : typeof v === "number" ? "num" : typeof v === "boolean" ? "bool" : typeof v;
+  };
+  return walk(value, 0);
+}
+
+/**
+ * 会话操作候选接口的字段结构：只保留由已知词组成的字段名；其余键（可能是买家/客服标识）合并为一个 "<key>" 样例，
+ * 另记匿名键个数 "<keys>"。不保留任何值。
+ */
+export function actionSchemaOf(text: string | null): unknown {
+  if (text === null) return "non_text";
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return "non_json";
+  }
+  const walk = (v: unknown, depth: number): unknown => {
+    if (v === null) return "null";
+    if (Array.isArray(v)) return v.length ? [walk(v[0], depth + 1)] : [];
+    if (typeof v === "object") {
+      if (depth > 7) return "obj";
+      const out: Record<string, unknown> = {};
+      let unknown = 0;
+      for (const [k, x] of Object.entries(v as Record<string, unknown>).slice(0, 80)) {
+        if (knownToken(k)) out[k] = walk(x, depth + 1);
+        else if (unknown++ === 0) out["<key>"] = walk(x, depth + 1);
+      }
+      if (unknown) out["<keys>"] = unknown;
       return out;
     }
     return typeof v === "string" ? "str" : typeof v === "number" ? "num" : typeof v === "boolean" ? "bool" : typeof v;
@@ -618,7 +652,7 @@ export class PddPageAdapter implements PlatformAdapter {
         const action = !p && schemaFile ? actionProbePath(params.request?.url) : null;
         if (action) {
           discovered.set(params.requestId, action);
-          if (typeof params.request.postData === "string") writeOnce("action_request", action, schemaOf(params.request.postData));
+          if (typeof params.request.postData === "string") writeOnce("action_request", action, actionSchemaOf(params.request.postData));
           return;
         }
         if (!p) return;
@@ -631,7 +665,7 @@ export class PddPageAdapter implements PlatformAdapter {
           discovered.delete(params.requestId);
           dbg
             .sendCommand("Network.getResponseBody", { requestId: params.requestId })
-            .then((r: any) => writeOnce("action_response", action, schemaOf(r.base64Encoded ? null : (r.body as string))))
+            .then((r: any) => writeOnce("action_response", action, actionSchemaOf(r.base64Encoded ? null : (r.body as string))))
             .catch(() => undefined);
           return;
         }

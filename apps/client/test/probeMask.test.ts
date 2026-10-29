@@ -1,6 +1,34 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { actionProbePath, maskPath } from "../src/main/pddAdapter.js";
+import { actionProbePath, actionSchemaOf, maskPath } from "../src/main/pddAdapter.js";
+
+const IDS = ["fictionalBuyerAlice", "alice", "ab", "x9f3k2", "chat-alice", "客服小乙"];
+
+test("会话操作接口结构：未知键匿名、保留已知字段名，输出不含任何标识", () => {
+  const body = {
+    success: true,
+    result: {
+      status: "ok",
+      fictionalBuyerAlice: { status: "offline" },
+      alice: { status: "online" },
+      ab: 1,
+      x9f3k2: [{ uid: "fictional-uid", nick: "虚构" }],
+      "chat-alice": { deep: { 客服小乙: { busy: true } } },
+    },
+    list: [{ fictionalBuyerAlice: 1, target_id: "fictional" }],
+  };
+  const out = JSON.stringify(actionSchemaOf(JSON.stringify(body)));
+  for (const id of IDS) assert.ok(!out.includes(id), "结构输出含有虚构标识");
+  assert.ok(!out.includes("fictional") && !out.includes("虚构"), "结构输出含有值");
+  const schema = actionSchemaOf(JSON.stringify(body)) as Record<string, any>;
+  assert.equal(schema.success, "bool");
+  assert.equal(schema.result.status, "str");
+  assert.equal(schema.result["<keys>"], 5);
+  assert.deepEqual(schema.result["<key>"], { status: "str" });
+  assert.deepEqual(schema.list, [{ target_id: "str", "<key>": "num", "<keys>": 1 }]);
+  assert.equal(actionSchemaOf("a=1&b=2"), "non_json");
+  assert.equal(actionSchemaOf(null), "non_text");
+});
 
 test("诊断路径：已知词组成的段保留，其余段替换为 :id", () => {
   assert.equal(maskPath("/plateau/chat/send_message"), "/plateau/chat/send_message");
