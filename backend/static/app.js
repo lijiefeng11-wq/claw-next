@@ -1071,7 +1071,7 @@
       } else {
         const message = err.code === "model_config_changed" ? "模型配置已改变，请重新生成。" :
           err.code === "prompt_draft_busy" ? "已有草稿正在生成，请稍后再试。" :
-          "生成失败或结果不完整，请检查主模型连接后重试。现有提示词未改变，也没有切换到备用模型。";
+          "草稿生成失败，可能是连接异常、超时或模型未输出完整正文。现有提示词未改变，也没有切换到备用模型。";
         setText(el["prompt-draft-status"], message);
       }
     } finally {
