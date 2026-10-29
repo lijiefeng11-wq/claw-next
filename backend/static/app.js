@@ -44,6 +44,7 @@
     formDirty: false,
     formDisabled: true,
     rules: [],
+    rulesPage: 0,
     ruleUid: 0,
     ruleSeq: 0,
     events: [],
@@ -78,6 +79,7 @@
   };
 
   const el = {};
+  let assist = null;
   const IDS = [
     "login-view", "login-panel", "login-form", "username-input", "password-input", "login-btn",
     "login-notice", "login-error",
@@ -95,6 +97,7 @@
     "settings-form", "enabled-input", "enabled-note", "mode-input", "prompt-input",
     "prompt-brief", "generate-prompt", "prompt-draft-status", "prompt-draft", "apply-prompt-draft",
     "rules-list", "rules-empty", "rules-count", "add-rule-btn", "rules-error",
+    "rules-prev", "rules-next", "rules-page",
     "settings-remote-note", "save-btn", "reset-btn", "save-status",
     "limit-select", "refresh-btn", "auto-refresh", "events-meta", "events-body", "events-empty",
     "model-form", "model-version", "model-note", "model-error",
@@ -678,9 +681,15 @@
   function renderRules() {
     const list = el["rules-list"];
     list.replaceChildren();
-    state.rules.forEach(function (rule, index) {
-      list.appendChild(buildRuleRow(rule, index));
+    const pages = Math.max(1, Math.ceil(state.rules.length / 10));
+    state.rulesPage = Math.min(Math.max(0, state.rulesPage), pages - 1);
+    const start = state.rulesPage * 10;
+    state.rules.slice(start, start + 10).forEach(function (rule, index) {
+      list.appendChild(buildRuleRow(rule, start + index));
     });
+    setText(el["rules-page"], "第 " + (state.rulesPage + 1) + " / " + pages + " 页 · 每页 10 条");
+    el["rules-prev"].disabled = state.formDisabled || state.rulesPage === 0;
+    el["rules-next"].disabled = state.formDisabled || state.rulesPage + 1 >= pages;
     const hasRules = state.rules.length > 0;
     el["rules-empty"].hidden = hasRules;
     if (hasRules) {
@@ -916,6 +925,7 @@
       return;
     }
     state.rules.push({ uid: nextUid(), id: generateRuleId(), contains: "", reply: "", description: "", send: null });
+    state.rulesPage = Math.floor((state.rules.length - 1) / 10);
     renderRules();
     onFormEdit();
     const rows = el["rules-list"].querySelectorAll(".rule-row");
@@ -931,6 +941,11 @@
     el["rules-error"].hidden = false;
     if (focusUid === undefined || focusUid === null) {
       return;
+    }
+    const index = state.rules.findIndex(function (rule) { return rule.uid === focusUid; });
+    if (index >= 0 && Math.floor(index / 10) !== state.rulesPage) {
+      state.rulesPage = Math.floor(index / 10);
+      renderRules();
     }
     const row = el["rules-list"].querySelector('.rule-row[data-uid="' + String(focusUid) + '"]');
     if (!row) {
@@ -1014,6 +1029,7 @@
   }
 
   function clearPromptDraft() {
+    if (assist) assist.reset();
     state.promptDraft.seq += 1;
     state.promptDraft.busy = false;
     state.promptDraft.shopId = null;
@@ -1098,6 +1114,7 @@
     state.formDirty = true;
     setText(el["save-status"], "有未保存的修改。");
     hideRulesError();
+    if (assist) assist.sync();
   }
 
   function renderSettings(settings) {
@@ -1120,6 +1137,7 @@
     showRemoteNote("");
     renderVersion(state.formVersion);
     setText(el["save-status"], "");
+    if (assist) assist.sync();
   }
 
   function applyRemoteSettings(remote) {
@@ -1170,6 +1188,9 @@
   function setFormDisabled(disabled) {
     state.formDisabled = disabled;
     syncPromptDraft();
+    if (assist) assist.sync();
+    el["rules-prev"].disabled = disabled || state.rulesPage === 0;
+    el["rules-next"].disabled = disabled || (state.rulesPage + 1) * 10 >= state.rules.length;
     ["enabled-input", "mode-input", "prompt-input", "save-btn", "reset-btn"].forEach(function (id) {
       byId(id).disabled = disabled;
     });
@@ -3136,6 +3157,7 @@
     if (state.formDirty && !window.confirm("放弃当前未保存的修改，恢复为服务器上的设置？")) {
       return;
     }
+    clearPromptDraft();
     renderSettings(source);
     setText(el["save-status"], "已恢复为服务器上的设置（未保存的修改已丢弃）。");
   }
@@ -3167,6 +3189,9 @@
     IDS.forEach(function (id) {
       el[id] = byId(id);
     });
+    assist = window.setupAdminAssist({ state: state, request: request, onEdit: onFormEdit,
+      renderRules: renderRules, newRuleId: generateRuleId, nextUid: nextUid,
+      validateRules: collectRules, handleError: handleError });
 
     el["login-form"].addEventListener("submit", function (event) {
       event.preventDefault();
@@ -3278,6 +3303,8 @@
     el["apply-prompt-draft"].addEventListener("click", applyPromptDraft);
     el["prompt-draft"].addEventListener("input", syncPromptDraft);
     el["add-rule-btn"].addEventListener("click", addRule);
+    el["rules-prev"].addEventListener("click", function () { state.rulesPage -= 1; renderRules(); });
+    el["rules-next"].addEventListener("click", function () { state.rulesPage += 1; renderRules(); });
     el["refresh-btn"].addEventListener("click", function () {
       showAlert("");
       refreshAll(false);

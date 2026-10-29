@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>Claw-Next 管理后台</title>
   <link rel="stylesheet" href="style.css">
+  <script src="assist.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
@@ -331,6 +332,28 @@
                 </details>
               </section>
 
+              <section class="assist-panel">
+                <details id="merge-panel">
+                  <summary>大白话补充提示词 <span class="small muted">保留原文，先预览合并稿</span></summary>
+                  <p class="field-help">把“还要加什么、哪条要改”写在这里。将当前提示词框中的文字和补充交给已保存的主模型整理，不会调用备用模型，也不会自动保存。</p>
+                  <label class="field"><span class="field-label">补充要求</span>
+                    <textarea id="merge-brief" rows="3" maxlength="4000" placeholder="例如：回答简短一点；不确定安装方法时先询问商品款式。" spellcheck="false"></textarea>
+                  </label>
+                  <button id="merge-generate" class="btn btn-sm" type="button">生成合并稿</button>
+                  <p id="merge-status" role="status" aria-live="polite" class="field-help"></p>
+                  <div id="merge-preview" hidden>
+                    <div class="assist-compare">
+                      <label class="field"><span class="field-label">合并前的提示词</span><textarea id="merge-before" rows="10" readonly></textarea></label>
+                      <label class="field"><span class="field-label">合并后的草稿（可编辑）</span><textarea id="merge-result" rows="10" maxlength="8000"></textarea></label>
+                    </div>
+                    <div id="merge-notes" class="field-help"></div>
+                    <label id="merge-confirm-label" class="assist-check" hidden><input id="merge-confirm" type="checkbox">我已逐项核对并处理提示词冲突</label>
+                    <button id="merge-apply" class="btn btn-sm" type="button" disabled>确认填入提示词</button>
+                    <p class="field-help">填入后还需点击“保存设置”。原有约束是否被保留、业务事实是否正确，需要你核对。</p>
+                  </div>
+                </details>
+              </section>
+
               <fieldset class="settings-group rules-group">
                 <legend>自动回复规则</legend>
                 <p class="field-help">关键词从上到下匹配。混合方式还会根据适用问题说明理解意思，命中后使用规则回复原文；实际发送由客户端核验后执行。</p>
@@ -346,12 +369,39 @@
                     <div><dt>序号与顺序</dt><dd>规则编号由页面自动生成；新增规则排在最后。发送条目来自当前会话候选，名称筛选应使用前台已有的名称。</dd></div>
                   </dl>
                 </details>
+                <section class="assist-panel" aria-labelledby="chat-import-title">
+                  <h3 id="chat-import-title">从聊天记录整理规则</h3>
+                  <p class="field-help">先导入这家店的记录，再核对问答，最后生成最多 30 条高频问题草稿。历史回答可能过时，不会直接成为当前规则。</p>
+                  <label class="field"><span class="field-label">聊天记录文件（UTF-8，最多 2 MB）</span><input id="chat-file" type="file" accept=".json,.jsonl,.csv,.txt"></label>
+                  <div class="assist-actions">
+                    <button id="chat-import" class="btn btn-sm" type="button" disabled>导入聊天记录</button>
+                    <button id="chat-clear" class="btn btn-sm btn-ghost" type="button">清除导入</button>
+                    <button id="rules-generate" class="btn btn-primary btn-sm" type="button" disabled>一键生成规则</button>
+                  </div>
+                  <p id="chat-status" class="field-help" role="status" aria-live="polite">尚未导入聊天记录。</p>
+                  <details class="help-box"><summary>支持什么文件，资料会发到哪里？</summary>
+                    <p>JSON / JSONL：每段对话包含 messages，消息用 role（买家 / 客服）、type（文本）、content（内容）。CSV：第一行为 question,answer 或 问题,回答。TXT：每行以“买家：”或“客服：”开头，空行分隔对话。不读取链接、图片或附件。</p>
+                    <p>导入只把所选文件交给后台整理，不调用模型。自动遮盖常见联系方式不保证完整，请先移除昵称、地址等个人信息，再核对下方预览。点击生成后，预览问答和当前规则才会发给主模型；若主模型为云端服务，这些文字会离开本机。</p>
+                    <p>最多处理 20000 条消息，均匀选取最多 200 个问答、24000 字用于分析；超出时会提示抽样。频次只指本次分析来源，不是全部聊天统计。每条问题至少有两个独立来源，不足时不会凑满 30 条。</p>
+                  </details>
+                  <details id="chat-preview" hidden><summary>核对本次用于分析的问答</summary><div id="chat-pairs" class="assist-source-list"></div></details>
+                  <label class="assist-check"><input id="chat-confirm" type="checkbox" disabled>已核对店铺、脱敏内容和问答来源，允许交给当前主模型分析</label>
+                  <p id="rule-draft-status" class="field-help" role="status" aria-live="polite"></p>
+                  <div id="rule-candidates" class="assist-candidates"></div>
+                  <button id="rules-apply" class="btn btn-sm" type="button" disabled>把选中的草稿填入规则</button>
+                  <p class="field-help">默认全部跳过。可能冲突会并排显示；你可以保留旧规则，或明确选择替换。填入后仍需“保存设置”，不会打开店铺开关。冲突检测可能遗漏，请人工核对。</p>
+                </section>
                 <div id="rules-list" class="rules-list"></div>
                 <p id="rules-empty" class="empty-hint" hidden>还没有规则。纯规则方式没有规则时转人工；混合方式可交模型判断。</p>
                 <div class="rules-actions">
                   <button id="add-rule-btn" class="btn btn-sm" type="button">添加规则</button>
                   <span id="rules-count" class="small muted"></span>
                 </div>
+                <nav class="rules-pagination" aria-label="规则分页">
+                  <button id="rules-prev" class="btn btn-ghost btn-sm" type="button">上一页</button>
+                  <span id="rules-page" aria-live="polite">第 1 / 1 页 · 每页 10 条</span>
+                  <button id="rules-next" class="btn btn-ghost btn-sm" type="button">下一页</button>
+                </nav>
                 <p id="rules-error" class="error-text" role="alert" hidden></p>
               </fieldset>
 
