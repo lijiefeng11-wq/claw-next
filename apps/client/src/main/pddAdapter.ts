@@ -149,7 +149,7 @@ const DOM_PROBE = `(() => {
 /**
  * 界面操作记录（隔离环境，页面脚本不可见）：人工每点一次可点击元素，记下它的界面标签（title/aria-label/
  * 不超过 8 字的文字）、图标类名与结构链，以及点击后新出现的弹窗标题。消息区、输入框内的点击不记录；
- * 会话列表内只记录不含文字的图标控件（标签只取 title/aria-label），选会话、点昵称不记录。
+ * 会话列表内只记录不含文字的图标控件（标签只取 title/aria-label 中完整的操作词），选会话、点昵称不记录。
  * 类名只保留不含数字的前 4 个，避免带出动态标识。不点击任何东西。另在开启时列出当前页面所有可点击控件，作为“按钮地图”。
  */
 export const UI_RECORDER = `(() => {
@@ -158,7 +158,7 @@ export const UI_RECORDER = `(() => {
   const LIST = "li.chat-item, .chat-list";
   const ICONISH = "i, svg, img, button, [role=button], [title], [aria-label], [class*=icon], [class*=star], [class*=collect], [class*=fav], [class*=mark], [class*=tag]";
   const short = (s) => { const t = (s || "").replace(/\\s+/g, " ").trim(); return t && t.length <= 8 && !/[0-9０-９¥￥@]/.test(t) ? t : null; };
-  const actionWord = (s) => { const t = short(s); return t && /星|收藏|转|标记|置顶|关注|已读|未读|删除|移除|屏蔽/.test(t) ? t : null; };
+  const actionWord = (s) => { const t = short(s); return t && /^(取消|已|标为|设为)?(收藏|标星|星标|标记|转移|转移会话|转接|置顶|关注|已读|未读|删除|移除|屏蔽)$/.test(t) ? t : null; };
   const btnish = (el) => el.matches("button, [role=button], [class*=btn], [class*=tab], [class*=menu]");
   const cls = (el) => (typeof el.className === "string" ? el.className : el.getAttribute("class") || "").trim().split(/\\s+/).filter((c) => c && c.length <= 32 && !/[0-9]/.test(c)).slice(0, 4);
   const sig = (el) => [el.tagName.toLowerCase(), ...cls(el)].join(".");
@@ -203,7 +203,7 @@ export const UI_MAP = `(() => {
   const SKIP = "ul.msg-list";
   const LIST = "li.chat-item, .chat-list";
   const short = (s) => { const t = (s || "").replace(/\\s+/g, " ").trim(); return t && t.length <= 8 && !/[0-9０-９¥￥@]/.test(t) ? t : null; };
-  const actionWord = (s) => { const t = short(s); return t && /星|收藏|转|标记|置顶|关注|已读|未读|删除|移除|屏蔽/.test(t) ? t : null; };
+  const actionWord = (s) => { const t = short(s); return t && /^(取消|已|标为|设为)?(收藏|标星|星标|标记|转移|转移会话|转接|置顶|关注|已读|未读|删除|移除|屏蔽)$/.test(t) ? t : null; };
   const btnish = (el) => el.matches("button, [role=button], [class*=btn], [class*=tab], [class*=menu]");
   const cls = (el) => (typeof el.className === "string" ? el.className : el.getAttribute("class") || "").trim().split(/\\s+/).filter((c) => c && c.length <= 32 && !/[0-9]/.test(c)).slice(0, 4);
   const sig = (el) => [el.tagName.toLowerCase(), ...cls(el)].join(".");

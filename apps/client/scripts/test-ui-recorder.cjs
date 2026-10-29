@@ -17,12 +17,16 @@ app.setPath("userData", temp);
 const { UI_RECORDER, UI_MAP } = require("../dist/src/main/pddAdapter.js");
 
 const NICK = "虚构买家甲";
+const NICK2 = "小星星";
+const NICK3 = "转转好物";
 const AGENT = "虚构客服乙";
 const HTML = `<!doctype html><meta charset="utf-8"><body style="font:14px sans-serif">
   <ul class="chat-list">
     <li class="chat-item active"><div class="chat-item-box u-7731942" data-random="9001-x">
       <span class="nickname" title="${NICK}">${NICK}</span>
       <img class="avatar" title="${NICK}" style="width:20px;height:20px">
+      <img class="avatar2" title="${NICK2}" style="width:20px;height:20px">
+      <img class="avatar3" title="${NICK3}" style="width:20px;height:20px">
       <span class="op" title="收藏"><i id="fav" class="icon icon-collect" style="display:inline-block;width:12px;height:12px"></i></span>
       <i id="star" class="icon icon-star star-c3f9a2" title="标星" style="display:inline-block;width:12px;height:12px"></i>
     </div></li>
@@ -49,7 +53,7 @@ app.whenReady().then(async () => {
     const wc = win.webContents;
     const iso = (code) => wc.executeJavaScriptInIsolatedWorld(1001, [{ code }]);
     await iso(UI_RECORDER);
-    for (const sel of ["#fav", "#star", ".nickname", ".avatar", ".chat-item-box", "#msgbtn", "#ta", "#transfer"]) {
+    for (const sel of ["#fav", "#star", ".nickname", ".avatar", ".avatar2", ".avatar3", ".chat-item-box", "#msgbtn", "#ta", "#transfer"]) {
       await wc.executeJavaScript(`document.querySelector(${JSON.stringify(sel)}).click()`);
       await sleep(50);
     }
@@ -61,9 +65,9 @@ app.whenReady().then(async () => {
     check("会话列表标星图标：标签取 title，含数字的类名被去掉", clicks.some((c) => c.area === "chat_list" && c.label === "标星" && c.chain.endsWith("i.icon.icon-star")), clicks);
     check("工具栏转移会话：记录按钮与弹窗标题", clicks.some((c) => c.label === "转移会话" && c.opened.includes("转移会话")), clicks);
     const listLabels = clicks.filter((c) => c.area === "chat_list").map((c) => c.label ?? "-").sort();
-    check("会话列表：选会话、点昵称不记录；头像只记图标、不取昵称 title", JSON.stringify(listLabels) === JSON.stringify(["-", "收藏", "标星"].sort()), clicks);
-    check("消息区、输入框内的点击不记录", clicks.length <= 4 && !clicks.some((c) => /msg-list|textarea/.test(c.chain)), clicks);
-    check("记录与按钮地图不含昵称、客服名、动态编号", !all.includes(NICK) && !all.includes(AGENT) && !/7731942|9001|c3f9a2/.test(all), all.slice(0, 400));
+    check("会话列表：选会话、点昵称不记录；头像只记图标、不取昵称 title（含“星”“转”的昵称也不取）", JSON.stringify(listLabels) === JSON.stringify(["-", "-", "-", "收藏", "标星"].sort()), clicks);
+    check("消息区、输入框内的点击不记录", clicks.length <= 6 && !clicks.some((c) => /msg-list|textarea/.test(c.chain)), clicks);
+    check("记录与按钮地图不含昵称、客服名、动态编号", ![NICK, NICK2, NICK3, AGENT].some((s) => all.includes(s)) && !/7731942|9001|c3f9a2/.test(all), all.slice(0, 400));
     check("按钮地图包含会话列表图标", map.some((m) => m.area === "chat_list" && m.label === "标星") && map.some((m) => m.area === "chat_list" && m.label === "收藏"), map);
     win.destroy();
   } catch (err) {
