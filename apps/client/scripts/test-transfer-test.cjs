@@ -3,7 +3,8 @@
  * 用法：npm run build 后 `npx --no-install electron scripts/test-transfer-test.cjs`（Linux CI 加 --no-sandbox）。
  *
  * 覆盖：inspect 只打开对话框和确认气泡、点取消并关闭，不点确认；execute 只点唯一匹配行的确认，点击前写尝试记录；
- * 目标不唯一/缺失时不点确认；无已打开对话、非诊断模式不执行；会话列表每行自带的“转移会话”按钮不点。
+ * 目标不唯一/缺失时不点确认；无已打开对话、非诊断模式不执行；会话列表每行自带的“转移会话”按钮不点；
+ * 已收藏会话被平台拒绝时自动点一次“取消收藏并转移”；会话离开列表记为页面确认。
  */
 const { app, BrowserWindow } = require("electron");
 const fs = require("node:fs");
@@ -14,7 +15,7 @@ const temp = fs.mkdtempSync(path.join(os.tmpdir(), "claw-transfer-test-"));
 app.setPath("userData", temp);
 const { PddPageAdapter } = require("../dist/src/main/pddAdapter.js");
 
-const page = (active, agents) => `<!doctype html><meta charset="utf-8"><body style="font:14px sans-serif;margin:0">
+const page = (active, agents, favorited = false) => `<!doctype html><meta charset="utf-8"><body style="font:14px sans-serif;margin:0">
   <div class="chat-list"><ul>
     <li class="chat-item"><div class="chat-item-box ${active ? "active" : ""}" data-random="9001-x">虚构买家</div><div class="transfer-chat-item-btn" onclick="clicks.push('list-btn')">转移会话</div></li>
     <li class="chat-item"><div class="chat-item-box" data-random="9002-x">虚构买家2</div><div class="transfer-chat-item-btn" onclick="clicks.push('list-btn')">转移会话</div></li>
@@ -25,6 +26,11 @@ const page = (active, agents) => `<!doctype html><meta charset="utf-8"><body sty
     <table><tbody id="rows"></tbody></table>
   </div>
   <div id="pop" class="el-popover" style="display:none;position:absolute;width:200px;height:110px;background:#fff"><ul><li onclick="clicks.push('reason')">催发货</li><li id="ok">无原因直接转移</li></ul><span id="send" onclick="clicks.push('send')" style="padding:2px">发送</span><span id="cancel" style="padding:2px">取消</span></div>
+  <div id="fail" style="display:none;position:absolute;left:150px;top:150px;width:500px;background:#fff">
+    <div><span>转移失败</span></div>
+    <div><p>转移会话失败，已收藏的会话不可转移</p><p>点击【取消收藏并转移】可完成转移</p></div>
+    <div><span id="unfav" style="padding:4px">取消收藏并转移</span><span id="keep" onclick="clicks.push('keep')" style="padding:4px">暂不转移收藏会话</span></div>
+  </div>
   <script>
     window.clicks = [];
     let pending = null;
@@ -44,11 +50,14 @@ const page = (active, agents) => `<!doctype html><meta charset="utf-8"><body sty
     document.getElementById("open").addEventListener("click", () => { clicks.push("open"); document.getElementById("dlg").style.display = "block"; });
     document.getElementById("x").addEventListener("click", () => { clicks.push("close"); document.getElementById("dlg").style.display = "none"; document.getElementById("pop").style.display = "none"; });
     document.getElementById("cancel").addEventListener("click", () => { clicks.push("cancel"); document.getElementById("pop").style.display = "none"; });
+    const leave = () => document.querySelector('[data-random="9001-x"]').closest("li").remove();
     document.getElementById("ok").addEventListener("click", () => {
       clicks.push("ok:" + pending);
       document.getElementById("pop").style.display = "none"; document.getElementById("dlg").style.display = "none";
-      const m = document.createElement("div"); m.className = "el-message"; m.textContent = "转移成功"; document.body.appendChild(m);
+      if (${JSON.stringify(favorited)}) document.getElementById("fail").style.display = "block";
+      else leave();
     });
+    document.getElementById("unfav").addEventListener("click", () => { clicks.push("unfav"); document.getElementById("fail").style.display = "none"; leave(); });
   </script></body>`;
 
 const results = [];
@@ -90,9 +99,17 @@ app.whenReady().then(async () => {
       const r = await adapter.transferTest("主账号", true);
       const clicks = await wc.executeJavaScript("window.clicks.slice()");
       const log = readLog();
-      check("execute：只确认唯一匹配行", r === "page_toast:转移成功" && JSON.stringify(clicks) === '["open","row:虚构主账号","ok:虚构主账号"]', { r, clicks });
+      check("execute：只确认唯一匹配行，会话离开列表记为页面确认", r === "page_confirmed:conversation_left_list" && JSON.stringify(clicks) === '["open","row:虚构主账号","ok:虚构主账号"]', { r, clicks });
       const ai = log.findIndex((l) => l.phase === "attempt");
-      check("execute：确认前写尝试记录", ai >= 0 && log[ai + 1]?.phase === "page_toast", log);
+      check("execute：确认前写尝试记录", ai >= 0 && log[ai + 1]?.phase === "page_confirmed", log);
+    }
+    {
+      fs.rmSync(logFile, { force: true });
+      const { wc, adapter } = await adapterFor(win, page(true, ["虚构主账号"], true));
+      const r = await adapter.transferTest("主账号", true);
+      const clicks = await wc.executeJavaScript("window.clicks.slice()");
+      check("已收藏：自动点一次“取消收藏并转移”，不点“暂不转移”", r === "page_confirmed:conversation_left_list,unfavorited" && JSON.stringify(clicks) === '["open","row:虚构主账号","ok:虚构主账号","unfav"]', { r, clicks });
+      check("已收藏：记录取消收藏步骤", readLog().some((l) => l.phase === "unfavorite_and_transfer"), readLog());
     }
     {
       const { wc, adapter } = await adapterFor(win, page(true, ["虚构主账号1", "虚构主账号2"]));

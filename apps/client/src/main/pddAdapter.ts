@@ -665,6 +665,20 @@ function popoverButtonsScript(near: Point): string {
   })()`;
 }
 
+/** 平台“转移失败”对话框：返回说明文字与“取消收藏并转移”按钮坐标（唯一时）；没有该对话框返回 null。 */
+const TRANSFER_FAIL_DIALOG = `(() => {
+  const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
+  const t = (e) => (e.innerText ?? "").trim();
+  const leaf = (root, s) => [...root.querySelectorAll("*")].filter((e) => vis(e) && t(e) === s && ![...e.children].some((c) => t(c) === s));
+  const title = leaf(document.body, "转移失败");
+  if (!title.length) return null;
+  let box = title[0];
+  for (let i = 0; i < 8 && box.parentElement && !/取消收藏并转移|不可转移|失败./.test(t(box).replace("转移失败", "")); i++) box = box.parentElement;
+  const btn = leaf(box, "取消收藏并转移");
+  const r = btn.length === 1 ? btn[0].getBoundingClientRect() : null;
+  return { text: t(box).replace(/\\s+/g, " ").slice(0, 80), unfav: r ? { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) } : null };
+})()`;
+
 const TRANSFER_DIALOG_CLOSE = `(() => {
   const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
   const dlg = [...document.querySelectorAll("div.el-dialog")].filter(vis).find((d) => (d.querySelector(".el-dialog__title")?.innerText ?? "").trim() === "转移会话");
@@ -2105,16 +2119,7 @@ export class PddPageAdapter implements PlatformAdapter {
         return `${click.status}:${click.reason}`;
       }
       opened = false;
-      for (let i = 0; i < 10; i++) {
-        await sleep(300);
-        const toast = await this.run<string>(`[...document.querySelectorAll(".el-message")].filter((e) => e.getClientRects().length > 0).map((e) => (e.innerText ?? "").trim().slice(0, 40)).join(" | ")`).catch(() => "");
-        if (toast) {
-          log({ phase: "page_toast", toast });
-          return `page_toast:${toast}`;
-        }
-      }
-      log({ phase: "unknown", reason: "no_page_toast" });
-      return "unknown:no_page_toast";
+      return await this.settleTransfer(uid, page, epoch, log);
     } finally {
       if (opened) {
         await sleep(300);
@@ -2122,6 +2127,39 @@ export class PddPageAdapter implements PlatformAdapter {
       }
       this.sending = false;
     }
+  }
+
+  /**
+   * 点了转移后判定结果：平台提示“已收藏的会话不可转移”时自动点一次“取消收藏并转移”；
+   * 该会话从会话列表消失记为页面确认；其他失败对话框记为页面失败；都没有记为 unknown。不重试。
+   */
+  private async settleTransfer(uid: string, page: PlatformPage, epoch: number, log: (rec: Record<string, unknown>) => void): Promise<string> {
+    let unfavorited = false;
+    for (let i = 0; i < 30; i++) {
+      await sleep(300);
+      const fail = await this.run<{ text: string; unfav: Point | null } | null>(TRANSFER_FAIL_DIALOG).catch(() => null);
+      if (fail && !unfavorited) {
+        if (!fail.text.includes("已收藏") || !fail.unfav) {
+          log({ phase: "page_failed", text: fail.text });
+          return `page_failed:${fail.text}`;
+        }
+        log({ phase: "unfavorite_and_transfer", text: fail.text });
+        const click = await this.nativeClick(fail.unfav, page, epoch);
+        if (click.status !== "dispatched") {
+          log({ phase: click.status, reason: click.reason });
+          return `${click.status}:${click.reason}`;
+        }
+        unfavorited = true;
+        continue;
+      }
+      const scan = await this.run<Scan>(SCAN).catch(() => null);
+      if (!fail && scan && !scan.items.some((it) => buyerFromListKey(it.key) === uid)) {
+        log({ phase: "page_confirmed", reason: "conversation_left_list", unfavorited });
+        return `page_confirmed:conversation_left_list${unfavorited ? ",unfavorited" : ""}`;
+      }
+    }
+    log({ phase: "unknown", reason: "conversation_still_listed", unfavorited });
+    return `unknown:conversation_still_listed${unfavorited ? ",unfavorited" : ""}`;
   }
 
   private async clearInput(text: string) {
