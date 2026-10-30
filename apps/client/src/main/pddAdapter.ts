@@ -2112,6 +2112,8 @@ export class PddPageAdapter implements PlatformAdapter {
       if (blocked) return `not_executed:${blocked}`;
       const before = await read();
       if (typeof before === "string") return `not_executed:${before}`;
+      // read() 里悬停等待期间可能换了对话：读到的状态须仍属于 conv 才能用。
+      if (!(await same())) return "not_executed:conversation_mismatch";
       const target = before.options.find((o) => o.color === color);
       if (!target) return `not_executed:color_missing(${before.options.map((o) => o.color).join(",")})`;
       if (before.star.active && target.checked) return "already";
@@ -2129,6 +2131,7 @@ export class PddPageAdapter implements PlatformAdapter {
         await sleep(500);
         if (!(await same())) break;
         const after = await read();
+        if (!(await same())) break;
         if (typeof after !== "string" && after.star.active && after.options.find((o) => o.color === color)?.checked) {
           log({ phase: "confirmed" });
           return "confirmed";

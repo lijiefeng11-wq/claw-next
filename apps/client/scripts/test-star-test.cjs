@@ -5,7 +5,8 @@
  * 覆盖：未收藏时只点红色项（不点星标本身）并以页面状态确认；已是红色时不点击；无已打开对话时不执行；
  * 非诊断模式不执行；点击前写本地尝试记录；
  * 反例（均零点击）：星标附近只有无关的四色菜单（未关联/星标浮层未打开）、星标无 aria-describedby 关联、两个关联浮层、
- * 颜色项被遮挡、取令牌后切换对话、悬停后（点击前）切换对话、消费时未过期但悬停期间过期。
+ * 颜色项被遮挡、取令牌后切换对话、悬停后（点击前）切换对话、消费时未过期但悬停期间过期；
+ * 读取或确认期间切到已是目标颜色的另一对话时，不报 already / confirmed。
  */
 const { app, BrowserWindow } = require("electron");
 const fs = require("node:fs");
@@ -41,12 +42,18 @@ const page = (opts = {}) => `<!doctype html><meta charset="utf-8"><body style="f
       const li = document.createElement("li");
       li.style.cssText = "width:30px;height:24px";
       li.innerHTML = '<span style="display:inline-block;width:16px;height:16px;border-radius:8px;background:' + bg + '"></span><i class="chat-icon-check" style="display:none;width:8px;height:8px"></i>';
-      li.addEventListener("click", () => { clicks.push(name); fav = name; render(); });
+      li.addEventListener("click", () => {
+        clicks.push(name); if (!${!!opts.noEffect}) fav = name; render();
+        if (${opts.switchAfterClickMs ?? 0}) setTimeout(() => { switchConv(); fav = "red"; render(); }, ${opts.switchAfterClickMs ?? 0});
+      });
       ul.appendChild(li);
     }
     const star = document.getElementById("star");
     star.addEventListener("click", () => { clicks.push("star"); fav = fav ? null : "red"; render(); });
+    let hovers = 0;
     star.addEventListener("mouseenter", () => {
+      hovers++;
+      if (hovers === ${opts.switchOnHoverN ?? 0}) { switchConv(); fav = "red"; render(); }
       if (!${!!opts.noStarPop}) document.getElementById("el-popover-1").style.display = "block";
       if (${!!opts.cover}) document.getElementById("cover").style.display = "block";
       if (${!!opts.switchOnHover}) { const [a, b] = document.querySelectorAll(".chat-item-box"); a.classList.remove("active"); b.classList.add("active"); }
@@ -135,6 +142,14 @@ app.whenReady().then(async () => {
     await zero("颜色项被遮挡：点击前核对不通过不点", { cover: true }, "not_executed:target_not_in_star_popover");
     await zero("取令牌后切换对话：不点", {}, "not_executed:conversation_mismatch", "switchConv()");
     await zero("悬停后、点击前切换对话：不点", { switchOnHover: true }, "not_executed:conversation_mismatch");
+    await zero("已收藏蓝色、读取期间切到已是红色的另一对话：不报 already", { switchOnHoverN: 1 }, "not_executed:conversation_mismatch", "setFav('blue')");
+    {
+      const { wc, adapter, conv } = await adapterFor(win, page({ noEffect: true, switchAfterClickMs: 700 }));
+      await wc.executeJavaScript("setFav('blue')");
+      const r = await adapter.starTest("red", conv, Date.now() + 60_000);
+      const clicks = await wc.executeJavaScript("window.clicks.slice()");
+      check("已收藏蓝色、点击未生效、确认读取期间切到已是红色的另一对话：不报 confirmed", r === "unknown:page_state_not_confirmed" && JSON.stringify(clicks) === '["red"]', { r, clicks });
+    }
     win.destroy();
   } catch (err) {
     check("运行", false, String((err && err.stack) || err).slice(0, 400));
