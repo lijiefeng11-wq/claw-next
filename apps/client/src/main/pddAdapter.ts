@@ -605,6 +605,7 @@ const STAR_ICON = `(() => {
  * 浮层归属只认触发控件关联：星标元素（或其 4 层内祖先/后代）的 aria-describedby 指向的 el-popover id，
  * 且该浮层可见、唯一、含至少三种已知颜色；位置相近、颜色相同的无关菜单不算。证明不了归属就不执行。
  * 传入 check 时改为点击前核对：该坐标处的元素须属于这个浮层中颜色为 check.color 的列表项，返回 "ok" 或原因。
+ * 不传 check 时返回同一页面快照：当前对话 key（唯一 active 项，否则 null）、星标是否已收藏、各颜色项。
  */
 function starOptionsScript(check?: { x: number; y: number; color: StarColor }): string {
   return `(() => {
@@ -637,11 +638,14 @@ function starOptionsScript(check?: { x: number; y: number; color: StarColor }): 
       if (!li || !pops[0].contains(li)) return "target_not_in_star_popover";
       return colorOf(li) === check.color ? "ok" : "target_color_mismatch";
     }
-    return [...pops[0].querySelectorAll("ul > li")].map((li) => {
+    const acts = [...document.querySelectorAll(${JSON.stringify(ITEM)})].filter((e) => e.classList.contains("active"));
+    const icon = stars[0].matches("i") ? stars[0] : stars[0].querySelector("i") ?? stars[0];
+    const options = [...pops[0].querySelectorAll("ul > li")].map((li) => {
       const r = li.getBoundingClientRect();
       const check = li.querySelector("i.chat-icon-check");
       return { color: colorOf(li), checked: !!check && check.getClientRects().length > 0 && getComputedStyle(check).visibility !== "hidden", x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
     });
+    return { conv: acts.length === 1 ? acts[0].getAttribute("data-random") : null, active: icon.classList.contains("active") || stars[0].classList.contains("active"), options };
   })()`;
 }
 
@@ -2074,7 +2078,11 @@ export class PddPageAdapter implements PlatformAdapter {
     const scan = await this.scanKeepingFresh();
     const active = scan?.items.filter((i) => i.active) ?? [];
     if (active.length !== 1) return null;
-    return crypto.createHash("sha256").update(`${this.watchEpoch}|${active[0].key}`).digest("hex").slice(0, 16);
+    return this.convTokenFor(active[0].key);
+  }
+
+  private convTokenFor(key: string): string {
+    return crypto.createHash("sha256").update(`${this.watchEpoch}|${key}`).digest("hex").slice(0, 16);
   }
 
   /** 诊断模式：供人工测试在用户确认时取当前对话令牌，之后的动作请求须携带它。 */
@@ -2102,9 +2110,11 @@ export class PddPageAdapter implements PlatformAdapter {
       if (typeof star === "string") return star;
       await hover(star);
       await sleep(500);
-      const options = await this.run<StarOption[] | string>(starOptionsScript()).catch(() => "script_failed");
-      if (typeof options === "string") return options;
-      return { star, options };
+      // 对话身份、星标状态与颜色项须来自同一次页面快照：分两次读时，中途换走又换回会把别的对话的颜色当成本对话的。
+      const snap = await this.run<{ conv: string | null; active: boolean; options: StarOption[] } | string>(starOptionsScript()).catch(() => "script_failed");
+      if (typeof snap === "string") return snap;
+      if (this.watchEpoch !== epoch || snap.conv === null || this.convTokenFor(snap.conv) !== conv) return "conversation_mismatch";
+      return { star: { x: star.x, y: star.y, active: snap.active }, options: snap.options };
     };
     this.sending = true;
     try {
@@ -2112,8 +2122,6 @@ export class PddPageAdapter implements PlatformAdapter {
       if (blocked) return `not_executed:${blocked}`;
       const before = await read();
       if (typeof before === "string") return `not_executed:${before}`;
-      // read() 里悬停等待期间可能换了对话：读到的状态须仍属于 conv 才能用。
-      if (!(await same())) return "not_executed:conversation_mismatch";
       const target = before.options.find((o) => o.color === color);
       if (!target) return `not_executed:color_missing(${before.options.map((o) => o.color).join(",")})`;
       if (before.star.active && target.checked) return "already";
@@ -2131,7 +2139,7 @@ export class PddPageAdapter implements PlatformAdapter {
         await sleep(500);
         if (!(await same())) break;
         const after = await read();
-        if (!(await same())) break;
+        if (after === "conversation_mismatch") break;
         if (typeof after !== "string" && after.star.active && after.options.find((o) => o.color === color)?.checked) {
           log({ phase: "confirmed" });
           return "confirmed";

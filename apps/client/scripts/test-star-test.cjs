@@ -6,7 +6,8 @@
  * 非诊断模式不执行；点击前写本地尝试记录；
  * 反例（均零点击）：星标附近只有无关的四色菜单（未关联/星标浮层未打开）、星标无 aria-describedby 关联、两个关联浮层、
  * 颜色项被遮挡、取令牌后切换对话、悬停后（点击前）切换对话、消费时未过期但悬停期间过期；
- * 读取或确认期间切到已是目标颜色的另一对话时，不报 already / confirmed。
+ * 读取或确认期间切到已是目标颜色的另一对话时，不报 already / confirmed；
+ * 颜色快照取自另一对话、结果交回前又切回原对话时也不追认（对话身份与星标状态须同一页面快照）。
  */
 const { app, BrowserWindow } = require("electron");
 const fs = require("node:fs");
@@ -64,6 +65,7 @@ const page = (opts = {}) => `<!doctype html><meta charset="utf-8"><body style="f
       [...ul.children].forEach((li, i) => { li.querySelector("i").style.display = Object.keys(colors)[i] === fav ? "inline-block" : "none"; });
     }
     window.setFav = (c) => { fav = c; render(); };
+    window.switchBack = () => { const [a, b] = document.querySelectorAll(".chat-item-box"); b.classList.remove("active"); a.classList.add("active"); };
     window.switchConv = () => { const [a, b] = document.querySelectorAll(".chat-item-box"); a.classList.remove("active"); b.classList.add("active"); };
   </script></body>`;
 
@@ -142,6 +144,28 @@ app.whenReady().then(async () => {
     await zero("颜色项被遮挡：点击前核对不通过不点", { cover: true }, "not_executed:target_not_in_star_popover");
     await zero("取令牌后切换对话：不点", {}, "not_executed:conversation_mismatch", "switchConv()");
     await zero("悬停后、点击前切换对话：不点", { switchOnHover: true }, "not_executed:conversation_mismatch");
+    // 颜色快照已在 B 上取到、结果交回前又切回 A：用包裹 adapter.run 精确模拟这一时序。
+    const flipAround = async (n, opts, expect, expectClicks) => {
+      const { wc, adapter, conv } = await adapterFor(win, page(opts));
+      await wc.executeJavaScript("setFav('blue')");
+      const orig = adapter.run.bind(adapter);
+      let snaps = 0;
+      adapter.run = async (code, ...rest) => {
+        const snap = code.includes("chat-icon-check") && code.includes("const check = null");
+        if (snap && ++snaps === n) {
+          await wc.executeJavaScript("switchConv(); setFav('red')");
+          const r = await orig(code, ...rest);
+          await wc.executeJavaScript("switchBack(); setFav('blue')");
+          return r;
+        }
+        return orig(code, ...rest);
+      };
+      const r = await adapter.starTest("red", conv, Date.now() + 60_000);
+      const clicks = await wc.executeJavaScript("window.clicks.slice()");
+      check(`A 蓝星、第 ${n} 次颜色快照取自已是红星的 B、交回前切回 A：不追认`, r === expect && JSON.stringify(clicks) === expectClicks, { r, clicks });
+    };
+    await flipAround(1, {}, "not_executed:conversation_mismatch", "[]");
+    await flipAround(2, { noEffect: true }, "unknown:page_state_not_confirmed", '["red"]');
     await zero("已收藏蓝色、读取期间切到已是红色的另一对话：不报 already", { switchOnHoverN: 1 }, "not_executed:conversation_mismatch", "setFav('blue')");
     {
       const { wc, adapter, conv } = await adapterFor(win, page({ noEffect: true, switchAfterClickMs: 700 }));
