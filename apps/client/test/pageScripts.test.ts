@@ -6,7 +6,7 @@ import { test } from "node:test";
 // 注入页面的脚本由模板字符串拼成：模板会吞掉无效转义（如正则里的 \/），只有在拼好后解析才能发现。
 test("拼多多适配器注入页面的脚本拼接后均可解析", () => {
   const src = fs.readFileSync(path.join(__dirname, "../src/main/pddAdapter.js"), "utf8");
-  const scope = { ITEM: "a", VIDEO_ROWS: "b", VIDEO_BTN: "c", CAMERA: "d", TEXTAREA: "e", SEND_BTN: "f", uid: "1", index: 0, urls: ["https://x.invalid/1"], covers: ["https://x.invalid/c"], text: "t", name: "n", guard: "", ids: ["1"], thumbOf: new Map([["1", "https://x.invalid/t"]]), GOODS_ROW: "g", GOODS_BTN: "h", thumb: "https://x.invalid/t", INSTRUCT_BTN: "i", INSTRUCT_DIALOG: "j", PROBE_WORDS_JSON: "[]", SAFE_CLASSES_JSON: "[]", star: { x: 1, y: 1 }, exclude: ".x", check: null, near: { x: 1, y: 1 }, target: "t", ok: [{ x: 1, y: 1 }], transferTargetSnippet: () => "const vis = () => true, t = () => '', trs = [], btn = null;" };
+  const scope = { ITEM: "a", VIDEO_ROWS: "b", VIDEO_BTN: "c", CAMERA: "d", TEXTAREA: "e", SEND_BTN: "f", uid: "1", index: 0, urls: ["https://x.invalid/1"], covers: ["https://x.invalid/c"], text: "t", name: "n", guard: "", ids: ["1"], thumbOf: new Map([["1", "https://x.invalid/t"]]), GOODS_ROW: "g", GOODS_BTN: "h", thumb: "https://x.invalid/t", INSTRUCT_BTN: "i", INSTRUCT_DIALOG: "j", PROBE_WORDS_JSON: "[]", SAFE_CLASSES_JSON: "[]", star: { x: 1, y: 1 }, exclude: ".x", check: null, near: { x: 1, y: 1 }, target: "t", ok: [{ x: 1, y: 1 }], LINK_PROBE: "null", transferTargetSnippet: () => "const vis = () => true, t = () => '', trs = [], btn = null;" };
   const fill = new Function(...Object.keys(scope), "tpl", "return eval(tpl);");
   let parsed = 0;
   for (let i = src.indexOf("`("); i !== -1; i = src.indexOf("`(", i)) {

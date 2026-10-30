@@ -185,7 +185,9 @@ const ACTION_FIELDS = new Set(
     "success result data code msg message error error_code error_msg errorCode errorMsg list total status type target " +
     "target_id targetId target_uid targetUid uid cs_uid csUid mall_id mallId id ids online busy available reason " +
     "star star_type starType is_star isStar color mark mark_type markType is_mark isMark collect is_collect isCollect " +
-    "collected favorite is_favorite isFavorite transfer transfer_type transferType server_time serverTime ts timestamp"
+    "collected favorite is_favorite isFavorite transfer transfer_type transferType server_time serverTime ts timestamp " +
+    // 转移对话框客服列表：只为确认接收人稳定标识与显示名对应哪个字段，仍只记字段名不记值。
+    "csid cs_id csId nickname nick_name nickName username user_name userName name"
   ).split(" "),
 );
 const ACTION_SCHEMA_DEPTH = 8;
@@ -229,6 +231,44 @@ export function actionSchemaOf(text: string | null): unknown {
 }
 
 /**
+ * 星标与转移按钮的浮层关联（只记个数与是否，不记 id 或文字）：与 starOptionsScript / popoverButtonsScript 的归属规则一致，
+ * 用于核实真实页面上 aria-describedby 是否存在、能否对应到 el-popover、该浮层当前是否可见。
+ */
+export const LINK_PROBE = `(() => {
+  const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
+  const t = (e) => (e.innerText ?? "").trim();
+  const ids = (el, stop, up) => {
+    const out = new Set();
+    const add = (e) => (e.getAttribute("aria-describedby") || "").split(/\\s+/).filter(Boolean).forEach((id) => out.add(id));
+    [el, ...el.querySelectorAll("[aria-describedby]")].forEach(add);
+    for (let e = el.parentElement, i = 0; e && e !== stop && i < up; e = e.parentElement, i++) add(e);
+    return [...out];
+  };
+  const judge = (list) => {
+    const pops = list.map((id) => document.getElementById(id)).filter((p) => p && p.matches("div.el-popover"));
+    return { has_aria: list.length > 0, resolves: pops.length, visible: pops.filter(vis).length };
+  };
+  const stars = [...document.querySelectorAll('[title="收藏该用户"]')].filter(vis);
+  const star = stars.length === 1 ? judge(ids(stars[0], null, 4)) : null;
+  const dlg = [...document.querySelectorAll("div.el-dialog")].filter(vis).find((d) => t(d.querySelector(".el-dialog__title") ?? d) === "转移会话");
+  const rows = dlg ? [...dlg.querySelectorAll("tr.el-table__row")].filter(vis) : [];
+  const rowLinks = rows.map((tr) => {
+    const btns = [...tr.querySelectorAll("*")].filter((e) => vis(e) && t(e) === "转移" && ![...e.children].some((c) => t(c) === "转移"));
+    return btns.length === 1 ? judge(ids(btns[0], tr.parentElement, 20)) : null;
+  });
+  return {
+    star_count: stars.length,
+    star,
+    transfer_dialog: !!dlg,
+    transfer_rows: rows.length,
+    rows_with_button: rowLinks.filter(Boolean).length,
+    rows_with_aria: rowLinks.filter((r) => r && r.has_aria).length,
+    rows_resolving: rowLinks.filter((r) => r && r.resolves === 1).length,
+    rows_popover_visible: rowLinks.filter((r) => r && r.visible > 0).length,
+  };
+})()`;
+
+/**
  * 页面结构诊断（在隔离环境执行，页面脚本不可见）：只收集元素标签、类名、data-* 属性名、
  * 可编辑区域，以及不超过 6 个字的按钮文字（界面标签，如“发送”）。不收集昵称、消息正文等内容。
  */
@@ -254,7 +294,7 @@ const DOM_PROBE = `(() => {
     }
   }
   const top = Object.entries(classes).filter(([, r]) => r.count >= 1).slice(0, 400).map(([chain, r]) => ({ chain, count: r.count, data: [...r.data].slice(0, 10) }));
-  return { url: location.pathname + location.hash.replace(/[0-9]{5,}/g, "<id>"), classes: top, editables, buttons: buttons.slice(0, 80) };
+  return { url: location.pathname + location.hash.replace(/[0-9]{5,}/g, "<id>"), classes: top, editables, buttons: buttons.slice(0, 80), links: ${LINK_PROBE} };
 })()`;
 
 /**

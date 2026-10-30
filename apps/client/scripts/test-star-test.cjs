@@ -16,7 +16,7 @@ const path = require("node:path");
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "claw-star-test-"));
 app.setPath("userData", temp);
-const { PddPageAdapter } = require("../dist/src/main/pddAdapter.js");
+const { PddPageAdapter, LINK_PROBE } = require("../dist/src/main/pddAdapter.js");
 
 const colors = { red: "rgb(240, 90, 90)", orange: "rgb(245, 170, 50)", blue: "rgb(100, 160, 220)", green: "rgb(90, 180, 100)" };
 const dots = (names) => names.map((n) => `<li style="width:30px;height:24px"><span style="display:inline-block;width:16px;height:16px;border-radius:8px;background:${colors[n]}"></span></li>`).join("");
@@ -136,6 +136,11 @@ app.whenReady().then(async () => {
       const r = await adapter.starTest("red", conv, Date.now() + 60_000);
       const clicks = await wc.executeJavaScript("window.clicks.slice()");
       check("非诊断模式：不执行", r === "not_executed:probe_mode_required" && clicks.length === 0, { r, clicks });
+    }
+    for (const [unlinked, expect] of [[false, { has_aria: true, resolves: 1 }], [true, { has_aria: false, resolves: 0 }]]) {
+      const { wc } = await adapterFor(win, page({ unlinked }));
+      const l = await wc.executeJavaScript(LINK_PROBE);
+      check(`诊断关联记录：星标${unlinked ? "无" : "有"}关联`, l.star_count === 1 && l.star.has_aria === expect.has_aria && l.star.resolves === expect.resolves && !JSON.stringify(l).includes("el-popover"), l);
     }
     await zero("星标附近只有无关四色菜单、星标浮层未打开：不点", { unrelated: true, noStarPop: true }, "not_executed:popover_missing");
     await zero("星标未关联浮层、附近有四色菜单：证明不了归属不点", { unrelated: true, unlinked: true }, "not_executed:popover_unlinked");

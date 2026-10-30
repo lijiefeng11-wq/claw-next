@@ -45,6 +45,14 @@ test("会话操作接口结构：由常用词拼成的标识键同样匿名（�
   assert.deepEqual(schema.result["<key>"], { "<key>": { online: "bool" }, "<keys>": 1 });
 });
 
+test("转移客服列表结构：保留 csid/昵称等字段名，以客服编号作键的字典与所有值仍匿名", () => {
+  const body = { success: true, result: { "cs-fictional-001": { "9001": { id: 9001, csid: "cs-fictional-001", nickname: "虚构主账号", username: "fictionalAgent", status: 1 } } } };
+  const out = JSON.stringify(actionSchemaOf(JSON.stringify(body)));
+  for (const v of ["cs-fictional-001", "9001", "虚构主账号", "fictionalAgent"]) assert.ok(!out.includes(v), "结构输出含有值或编号键");
+  const schema = actionSchemaOf(JSON.stringify(body)) as Record<string, any>;
+  assert.deepEqual(schema.result["<key>"]["<key>"], { id: "num", csid: "str", nickname: "str", username: "str", status: "num" });
+});
+
 test("会话操作接口结构：深层嵌套数组/对象有界返回，不抛异常", () => {
   const arrays = "[".repeat(20000) + "]".repeat(20000);
   const mixed = '{"data":['.repeat(5000) + "1" + "]}".repeat(5000);

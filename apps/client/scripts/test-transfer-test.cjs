@@ -18,7 +18,7 @@ const path = require("node:path");
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "claw-transfer-test-"));
 app.setPath("userData", temp);
-const { PddPageAdapter } = require("../dist/src/main/pddAdapter.js");
+const { PddPageAdapter, LINK_PROBE } = require("../dist/src/main/pddAdapter.js");
 
 const page = (active, agents, favorited = false) => `<!doctype html><meta charset="utf-8"><body style="font:14px sans-serif;margin:0">
   <div class="chat-list"><ul>
@@ -183,6 +183,12 @@ app.whenReady().then(async () => {
     {
       const { r, clicks } = await run(page(true, ["虚构客服A", T]), { before: "window.decoyOnRow = true" });
       check("页面别处另有同名按钮但没有遮挡：照常只确认目标", r === "unknown:left_list_observed" && JSON.stringify(clicks) === `["open","row:${T}","ok:${T}"]`, { r, clicks });
+    }
+    {
+      const { wc } = await adapterFor(win, page(true, ["虚构客服A", T]));
+      await wc.executeJavaScript("document.getElementById('dlg').style.display = 'block'; document.querySelectorAll('[aria-describedby]')[0].removeAttribute('aria-describedby')");
+      const l = await wc.executeJavaScript(LINK_PROBE);
+      check("诊断关联记录：对话框行数与按钮关联计数，不含客服名", l.transfer_dialog === true && l.transfer_rows === 2 && l.rows_with_button === 2 && l.rows_with_aria === 1 && !JSON.stringify(l).includes(T), l);
     }
     {
       const { r, clicks } = await run(page(false, [T]), { conv: "0123456789abcdef" });
