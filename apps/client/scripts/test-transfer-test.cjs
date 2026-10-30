@@ -22,6 +22,7 @@ const page = (active, agents, favorited = false) => `<!doctype html><meta charse
     <li class="chat-item"><div class="chat-item-box ${active ? "active" : ""}" data-random="9001-x">虚构买家</div><div class="transfer-chat-item-btn" onclick="clicks.push('list-btn')">转移会话</div></li>
     <li class="chat-item"><div class="chat-item-box" data-random="9002-x">虚构买家2</div><div class="transfer-chat-item-btn" onclick="clicks.push('list-btn')">转移会话</div></li>
   </ul></div>
+  <ul class="msg-list"><li class="onemsg"><div class="buyer-item">虚构买家新消息</div></li></ul>
   <div style="position:absolute;left:400px;top:20px"><span id="open" style="padding:4px">转移会话</span></div>
   <div id="dlg" class="el-dialog" style="display:none;position:absolute;left:100px;top:80px;width:600px;background:#fff">
     <div><span class="el-dialog__title">转移会话</span><button class="el-dialog__headerbtn" id="x" style="width:20px;height:20px">x</button></div>
@@ -100,7 +101,7 @@ app.whenReady().then(async () => {
       const { wc, adapter, conv } = await adapterFor(win, html, probe);
       if (before) await wc.executeJavaScript(before);
       const r = await adapter.transferTest(T, confirm, override ?? conv, allow);
-      return { r, clicks: await wc.executeJavaScript("window.clicks.slice()"), log: readLog() };
+      return { r, clicks: await wc.executeJavaScript("window.clicks.slice()"), log: readLog(), fresh: adapter.pendingFreshBuyer };
     };
     const noOk = (clicks) => !clicks.some((c) => c.startsWith("ok") || c === "unfav");
     {
@@ -109,8 +110,9 @@ app.whenReady().then(async () => {
       check("inspect：不写尝试记录；日志不含客服名", !log.some((l) => l.phase === "attempt") && !JSON.stringify(log).includes("虚构客服A"), log);
     }
     {
-      const { r, clicks, log } = await run(page(true, ["虚构客服A", T]));
+      const { r, clicks, log, fresh } = await run(page(true, ["虚构客服A", T]));
       check("execute：只确认名称列精确匹配的行；离开列表只记观察，业务 unknown", r === "unknown:left_list_observed" && JSON.stringify(clicks) === `["open","row:${T}","ok:${T}"]`, { r, clicks });
+      check("执行期间的扫描不吞掉新买家消息标记", fresh === true, fresh);
       const ai = log.findIndex((l) => l.phase === "attempt");
       check("execute：确认前写尝试记录，日志不含客服名", ai >= 0 && log[ai + 1]?.observed === "left_list" && !JSON.stringify(log).includes(T), log);
     }

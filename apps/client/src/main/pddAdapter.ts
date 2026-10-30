@@ -2016,9 +2016,16 @@ export class PddPageAdapter implements PlatformAdapter {
    * 诊断模式下的人工触发测试：在当前已打开的对话上把“收藏该用户”设为指定颜色（只点颜色项，不点星标本身，避免误取消）。
    * 点击前写本地尝试记录；结果只以页面状态判定（星标 active 且该颜色带勾），无平台回执；不重试。
    */
+  /** 诊断测试用的 SCAN：SCAN 会把最后一条消息标为已见，新买家消息标记须交回 watch()，否则会漏掉 reload。 */
+  private async scanKeepingFresh(): Promise<Scan | null> {
+    const scan = await this.run<Scan>(SCAN).catch(() => null);
+    if (scan?.freshBuyer) this.pendingFreshBuyer = true;
+    return scan;
+  }
+
   /** 当前打开对话的绑定令牌：页面代次＋列表项键的摘要（不含可读身份）；没有唯一打开的对话返回 null。 */
   private async activeConvToken(): Promise<string | null> {
-    const scan = await this.run<Scan>(SCAN).catch(() => null);
+    const scan = await this.scanKeepingFresh();
     const active = scan?.items.filter((i) => i.active) ?? [];
     if (active.length !== 1) return null;
     return crypto.createHash("sha256").update(`${this.watchEpoch}|${active[0].key}`).digest("hex").slice(0, 16);
@@ -2102,7 +2109,7 @@ export class PddPageAdapter implements PlatformAdapter {
     let opened = false;
     try {
       if (!(await same())) return "not_executed:conversation_mismatch";
-      const active = (await this.run<Scan>(SCAN).catch(() => null))?.items.find((i) => i.active);
+      const active = (await this.scanKeepingFresh())?.items.find((i) => i.active);
       const uid = active ? buyerFromListKey(active.key) : null;
       if (!uid) return "not_executed:no_active_conversation";
       const open = await this.run<Point | string>(textTargetScript("转移会话", ".chat-list, li.chat-item, .el-dialog")).catch(() => "script_failed");
@@ -2192,7 +2199,7 @@ export class PddPageAdapter implements PlatformAdapter {
         unfavorited = true;
         continue;
       }
-      const scan = await this.run<Scan>(SCAN).catch(() => null);
+      const scan = await this.scanKeepingFresh();
       // 列表为空可能是筛选/刷新/加载中，不算观察到离开。
       if (!fail && scan && scan.items.length > 0 && !scan.items.some((it) => buyerFromListKey(it.key) === uid)) {
         log({ phase: "unknown", observed: "left_list", unfavorited });

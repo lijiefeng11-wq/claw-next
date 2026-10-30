@@ -25,6 +25,7 @@ const page = (opts = {}) => `<!doctype html><meta charset="utf-8"><body style="f
     <li class="chat-item"><div class="chat-item-box ${opts.active === false ? "" : "active"}" data-random="9001-x">虚构买家</div></li>
     <li class="chat-item"><div class="chat-item-box" data-random="9002-x">虚构买家2</div></li>
   </ul>
+  <ul class="msg-list"><li class="onemsg"><div class="buyer-item">虚构买家新消息</div></li></ul>
   <div style="position:absolute;left:400px;top:40px"><span><i id="star" title="收藏该用户" style="display:inline-block;width:20px;height:20px;background:#eee"></i></span></div>
   <div id="pop" class="el-popover" style="display:none;position:absolute;left:300px;top:70px;width:220px;height:40px"><ul style="display:flex;gap:10px;margin:0;padding:8px;list-style:none"></ul></div>
   ${opts.unrelated ? `<div class="el-popover" style="position:absolute;left:330px;top:200px;width:120px;height:40px"><ul style="display:flex;gap:10px;margin:0;padding:8px;list-style:none">${dots(["red", "blue"])}</ul></div>` : ""}
@@ -93,6 +94,7 @@ app.whenReady().then(async () => {
     {
       const { wc, adapter, conv } = await adapterFor(win, page());
       check("对话令牌：16 位摘要，不含可读身份", /^[0-9a-f]{16}$/.test(conv ?? "") && !String(conv).includes("9001"), conv);
+      check("取令牌不吞掉新买家消息标记（交回 watch）", adapter.pendingFreshBuyer === true, adapter.pendingFreshBuyer);
       const r = await adapter.starTest("red", conv);
       const clicks = await wc.executeJavaScript("window.clicks.slice()");
       const log = fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8").trim().split("\n").map((l) => JSON.parse(l)) : [];
