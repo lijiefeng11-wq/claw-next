@@ -653,14 +653,15 @@ const TRANSFER_ROWS = `(() => {
   });
 })()`;
 
-/** 离 near 最近的可见 el-popover 中的按钮文字与坐标。 */
+/** 离 near 最近的可见 el-popover 中的可点击项（最深层的短文字元素，平台确认气泡不一定用 button）文字与坐标。 */
 function popoverButtonsScript(near: Point): string {
   return `(() => {
     const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
     const d = (p) => { const r = p.getBoundingClientRect(); return Math.abs(r.left + r.width / 2 - ${near.x}) + Math.abs(r.top + r.height / 2 - ${near.y}); };
     const pops = [...document.querySelectorAll("div.el-popover")].filter(vis).sort((a, b) => d(a) - d(b));
     if (!pops.length) return "popover_missing";
-    return [...pops[0].querySelectorAll("button")].filter(vis).map((b) => { const r = b.getBoundingClientRect(); return { text: (b.innerText ?? "").trim().slice(0, 20), x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; });
+    const t = (e) => (e.innerText ?? "").trim();
+    return [...pops[0].querySelectorAll("*")].filter((e) => vis(e) && t(e) && t(e).length <= 8 && ![...e.children].some((c) => t(c) === t(e))).map((b) => { const r = b.getBoundingClientRect(); return { text: t(b), x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; });
   })()`;
 }
 
