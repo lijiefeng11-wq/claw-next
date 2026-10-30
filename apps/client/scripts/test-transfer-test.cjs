@@ -6,7 +6,9 @@
  * 目标不唯一/缺失时不点确认；无已打开对话、非诊断模式不执行；会话列表每行自带的“转移会话”按钮不点；
  * 已收藏会话被平台拒绝时，请求允许才点一次“取消收藏并转移”，默认点“暂不转移”并返回需确认；
  * 会话离开非空列表只记观察（业务 unknown），临时空列表不算；日志不含客服名；
- * 反例：备注列含目标名、包含关系、同名、点行后重排、取令牌/打开对话框/点行后切换对话、消费后打开对话框期间过期，均不确认。
+ * 目标行在表格滚动区外时先滚动到可见、核对点击点确实落在该按钮上；
+ * 反例：备注列含目标名、包含关系、同名、点行后重排、点行后弹出别的客服的气泡、按钮未关联气泡、
+ * 取令牌/打开对话框/点行后切换对话、消费后打开对话框期间过期，均不确认。
  */
 const { app, BrowserWindow } = require("electron");
 const fs = require("node:fs");
@@ -26,9 +28,9 @@ const page = (active, agents, favorited = false) => `<!doctype html><meta charse
   <div style="position:absolute;left:400px;top:20px"><span id="open" style="padding:4px">转移会话</span></div>
   <div id="dlg" class="el-dialog" style="display:none;position:absolute;left:100px;top:80px;width:600px;background:#fff">
     <div><span class="el-dialog__title">转移会话</span><button class="el-dialog__headerbtn" id="x" style="width:20px;height:20px">x</button></div>
-    <table><tbody id="rows"></tbody></table>
+    <div id="scroll" style="max-height:120px;overflow:auto"><table><tbody id="rows"></tbody></table></div>
   </div>
-  <div id="pop" class="el-popover" style="display:none;position:absolute;width:200px;height:110px;background:#fff"><ul><li onclick="clicks.push('reason')">催发货</li><li id="ok">无原因直接转移</li></ul><span id="send" onclick="clicks.push('send')" style="padding:2px">发送</span><span id="cancel" style="padding:2px">取消</span></div>
+  <div id="el-popover-none" class="el-popover" style="display:none;position:absolute;width:200px;height:110px;background:#fff"><ul><li onclick="clicks.push('reason')">催发货</li><li id="ok">无原因直接转移</li></ul><span id="send" onclick="clicks.push('send')" style="padding:2px">发送</span><span id="cancel" style="padding:2px">取消</span></div>
   <div id="fail" style="display:none;position:absolute;left:150px;top:150px;width:500px;background:#fff">
     <div><span>转移失败</span></div>
     <div><p>转移会话失败，已收藏的会话不可转移</p><p>点击【取消收藏并转移】可完成转移</p></div>
@@ -43,24 +45,27 @@ const page = (active, agents, favorited = false) => `<!doctype html><meta charse
       const [name, note] = Array.isArray(agent) ? agent : [agent, "在线"];
       const tr = document.createElement("tr");
       tr.className = "el-table__row";
-      tr.innerHTML = "<td>" + name + "</td><td>" + note + "</td><td><div class='cell'><span><div style='width:40px;height:20px'>转移</div></span></div></td>";
+      tr.innerHTML = "<td>" + name + "</td><td>" + note + "</td><td><div class='cell'><span aria-describedby='el-popover-r" + i + "'><div style='width:40px;height:20px'>转移</div></span></div></td>";
       tr.querySelector("td:last-child div div").addEventListener("click", (e) => {
         clicks.push("row:" + name); pending = name;
+        let owner = i;
+        if (window.hijackOnRow) { owner = (i + 1) % agents.length; pending = Array.isArray(agents[owner]) ? agents[owner][0] : agents[owner]; }
         if (window.switchOnRow) switchConv();
         if (window.reorderOnRow) [...rows.children].reverse().forEach((r) => rows.appendChild(r));
-        const r = e.target.getBoundingClientRect(), p = document.getElementById("pop");
+        const r = e.target.getBoundingClientRect(), p = document.querySelector(".el-popover");
+        p.id = "el-popover-r" + owner;
         p.style.left = (r.left - 60) + "px"; p.style.top = (r.bottom + 4) + "px"; p.style.display = "block";
       });
       rows.appendChild(tr);
     });
     window.switchConv = () => { const [a, b] = document.querySelectorAll(".chat-item-box"); a.classList.remove("active"); b.classList.add("active"); };
     document.getElementById("open").addEventListener("click", () => { clicks.push("open"); document.getElementById("dlg").style.display = "block"; if (window.switchOnOpen) switchConv(); });
-    document.getElementById("x").addEventListener("click", () => { clicks.push("close"); document.getElementById("dlg").style.display = "none"; document.getElementById("pop").style.display = "none"; });
-    document.getElementById("cancel").addEventListener("click", () => { clicks.push("cancel"); document.getElementById("pop").style.display = "none"; });
+    document.getElementById("x").addEventListener("click", () => { clicks.push("close"); document.getElementById("dlg").style.display = "none"; document.querySelector(".el-popover").style.display = "none"; });
+    document.getElementById("cancel").addEventListener("click", () => { clicks.push("cancel"); document.querySelector(".el-popover").style.display = "none"; });
     const leave = () => document.querySelector('[data-random="9001-x"]').closest("li").remove();
     document.getElementById("ok").addEventListener("click", () => {
       clicks.push("ok:" + pending);
-      document.getElementById("pop").style.display = "none"; document.getElementById("dlg").style.display = "none";
+      document.querySelector(".el-popover").style.display = "none"; document.getElementById("dlg").style.display = "none";
       if (${JSON.stringify(favorited)}) document.getElementById("fail").style.display = "block";
       else if (window.emptyOnOk) document.querySelectorAll(".chat-list li").forEach((li) => li.remove());
       else leave();
@@ -148,6 +153,19 @@ app.whenReady().then(async () => {
     {
       const { r, clicks } = await run(page(true, ["虚构客服A", T]), { before: "window.reorderOnRow = true" });
       check("点行后表格重排：不确认", r === "not_executed:target_moved" && noOk(clicks), { r, clicks });
+    }
+    {
+      const fillers = Array.from({ length: 12 }, (_, i) => "虚构客服" + i);
+      const { r, clicks } = await run(page(true, [...fillers, T]));
+      check("目标行在表格滚动区外：先滚动到可见再点，仍只确认目标", r === "unknown:left_list_observed" && JSON.stringify(clicks) === `["open","row:${T}","ok:${T}"]`, { r, clicks });
+    }
+    {
+      const { r, clicks } = await run(page(true, ["虚构客服A", T]), { before: "window.hijackOnRow = true" });
+      check("点行后弹出的是别的客服的气泡：不确认", r === "not_executed:popover_missing" && noOk(clicks), { r, clicks });
+    }
+    {
+      const { r, clicks } = await run(page(true, ["虚构客服A", T]), { before: "document.querySelectorAll('[aria-describedby]').forEach((e) => e.removeAttribute('aria-describedby'))" });
+      check("目标按钮未关联气泡：证明不了归属不确认", r === "not_executed:popover_unlinked" && noOk(clicks), { r, clicks });
     }
     {
       const { r, clicks } = await run(page(false, [T]), { conv: "0123456789abcdef" });

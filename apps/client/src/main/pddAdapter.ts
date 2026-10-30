@@ -672,14 +672,45 @@ const TRANSFER_ROWS = `(() => {
   });
 })()`;
 
-/** 离 near 最近的可见 el-popover 中的可点击项（最深层的短文字元素，平台确认气泡不一定用 button）文字与坐标。 */
-function popoverButtonsScript(near: Point): string {
-  return `(() => {
+/** “转移会话”对话框里名称列恰为 target 的唯一行及其唯一“转移”按钮（页面内脚本片段，供下面两个脚本共用）。 */
+function transferTargetSnippet(target: string): string {
+  return `
     const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
-    const d = (p) => { const r = p.getBoundingClientRect(); return Math.abs(r.left + r.width / 2 - ${near.x}) + Math.abs(r.top + r.height / 2 - ${near.y}); };
-    const pops = [...document.querySelectorAll("div.el-popover")].filter(vis).sort((a, b) => d(a) - d(b));
-    if (!pops.length) return "popover_missing";
     const t = (e) => (e.innerText ?? "").trim();
+    const dlg = [...document.querySelectorAll("div.el-dialog")].filter(vis).find((d) => t(d.querySelector(".el-dialog__title") ?? d) === "转移会话");
+    if (!dlg) return "dialog_missing";
+    const trs = [...dlg.querySelectorAll("tr.el-table__row")].filter((tr) => t(tr.querySelector("td") ?? tr).slice(0, 40) === ${JSON.stringify(target)});
+    if (trs.length !== 1) return trs.length ? "target_not_unique" : "target_missing";
+    const btns = [...trs[0].querySelectorAll("*")].filter((e) => vis(e) && t(e) === "转移" && ![...e.children].some((c) => t(c) === "转移"));
+    if (btns.length !== 1) return "target_button_not_unique";
+    const btn = btns[0];`;
+}
+
+/** 目标行的“转移”按钮：滚动到可见区域后取中心坐标，并核对该点确实落在这个按钮上（行在表格滚动区外、被遮挡都不点）。 */
+function transferTargetScript(target: string): string {
+  return `(() => {${transferTargetSnippet(target)}
+    btn.scrollIntoView({ block: "nearest" });
+    const r = btn.getBoundingClientRect();
+    const x = Math.round(r.left + r.width / 2), y = Math.round(r.top + r.height / 2);
+    const hit = document.elementFromPoint(x, y);
+    if (!hit || !(btn === hit || btn.contains(hit))) return "target_button_covered";
+    return { x, y };
+  })()`;
+}
+
+/**
+ * 目标行“转移”按钮弹出的确认气泡中的可点击项（最深层的短文字元素）文字与坐标。
+ * 气泡归属只认该按钮（或其在行内的祖先/后代）aria-describedby 指向的 el-popover id；别的行的气泡、位置相近都不算。
+ */
+function popoverButtonsScript(target: string): string {
+  return `(() => {${transferTargetSnippet(target)}
+    const linked = new Set();
+    const addIds = (e) => (e.getAttribute("aria-describedby") || "").split(/\\s+/).filter(Boolean).forEach((id) => linked.add(id));
+    [btn, ...btn.querySelectorAll("[aria-describedby]")].forEach(addIds);
+    for (let e = btn.parentElement; e && e !== trs[0].parentElement; e = e.parentElement) addIds(e);
+    if (!linked.size) return "popover_unlinked";
+    const pops = [...document.querySelectorAll("div.el-popover")].filter((p) => p.id && linked.has(p.id) && vis(p));
+    if (pops.length !== 1) return pops.length ? "popover_not_unique" : "popover_missing";
     return [...pops[0].querySelectorAll("*")].filter((e) => vis(e) && t(e) && t(e).length <= 8 && ![...e.children].some((c) => t(c) === t(e))).map((b) => { const r = b.getBoundingClientRect(); return { text: t(b), x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; });
   })()`;
 }
@@ -2145,19 +2176,19 @@ export class PddPageAdapter implements PlatformAdapter {
       const matches = rows.filter((r) => r.cells[0] === target);
       log({ phase: "rows", rows: rows.length, matches: matches.length });
       if (matches.length !== 1 || !matches[0].button) return `not_executed:target_${matches.length ? "not_unique_or_no_button" : "missing"}`;
-      const row = matches[0];
+      const btn = await this.run<Point | string>(transferTargetScript(target)).catch(() => "script_failed");
+      if (typeof btn === "string") return `not_executed:${btn}`;
       blocked = await gate();
       if (blocked) return `not_executed:${blocked}`;
-      if ((await this.nativeClick(row.button!, page, epoch)).status !== "dispatched") return "not_executed:row_click_failed";
+      if ((await this.nativeClick(btn, page, epoch)).status !== "dispatched") return "not_executed:row_click_failed";
       await sleep(500);
       // 点行后重读：目标行须仍唯一且仍在刚才点的位置（表格重排/身份变化时可能点到了别人）。
-      const again = await this.run<TransferRow[] | string>(TRANSFER_ROWS).catch(() => "script_failed");
-      const still = typeof again === "string" ? [] : again.filter((r) => r.cells[0] === target);
-      if (still.length !== 1 || !still[0].button || Math.abs(still[0].button.x - row.button!.x) > 2 || Math.abs(still[0].button.y - row.button!.y) > 2) {
+      const again = await this.run<Point | string>(transferTargetScript(target)).catch(() => "script_failed");
+      if (typeof again === "string" || Math.abs(again.x - btn.x) > 2 || Math.abs(again.y - btn.y) > 2) {
         log({ phase: "not_executed", reason: "target_moved" });
         return "not_executed:target_moved";
       }
-      const buttons = await this.run<{ text: string; x: number; y: number }[] | string>(popoverButtonsScript(row.button!)).catch(() => "script_failed");
+      const buttons = await this.run<{ text: string; x: number; y: number }[] | string>(popoverButtonsScript(target)).catch(() => "script_failed");
       log({ phase: "popover", buttons: typeof buttons === "string" ? buttons : buttons.length });
       if (typeof buttons === "string") return `not_executed:${buttons}`;
       // 气泡里另有转移原因和“发送”（可能向买家发消息），只认“无原因直接转移”。
@@ -2168,6 +2199,14 @@ export class PddPageAdapter implements PlatformAdapter {
         return `inspected:rows=${rows.length},confirm_buttons=${ok.length}`;
       }
       if (ok.length !== 1) return `not_executed:confirm_button_${ok.length ? "not_unique" : "missing"}`;
+      // 点确认前再核对：目标行关联的气泡里仍是同一位置的“无原因直接转移”，且该点没有被别的元素盖住。
+      const recheck = await this.run<{ text: string; x: number; y: number }[] | string>(popoverButtonsScript(target)).catch(() => "script_failed");
+      const okNow = typeof recheck === "string" ? [] : recheck.filter((b) => b.text === "无原因直接转移");
+      const covered = await this.run<boolean>(`(() => { let h = document.elementFromPoint(${ok[0].x}, ${ok[0].y}); while (h && !(h.innerText ?? "").trim()) h = h.parentElement; return !h || h.innerText.trim() !== "无原因直接转移"; })()`).catch(() => true);
+      if (okNow.length !== 1 || okNow[0].x !== ok[0].x || okNow[0].y !== ok[0].y || covered) {
+        log({ phase: "not_executed", reason: "confirm_moved" });
+        return "not_executed:confirm_moved";
+      }
       blocked = await gate();
       if (blocked) {
         log({ phase: "not_executed", reason: blocked });
