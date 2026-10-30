@@ -586,6 +586,46 @@ const SCAN = `(() => {
 
 type Scan = { items: { key: string; unread: boolean; active: boolean }[]; freshBuyer: boolean };
 
+export type StarColor = "red" | "orange" | "blue" | "green";
+type StarOption = { color: StarColor | "other"; checked: boolean; x: number; y: number };
+type StarState = { star: { x: number; y: number; active: boolean }; options: StarOption[] };
+
+/** 对话工具栏的“收藏该用户”星标：返回中心坐标与是否已收藏（active）。 */
+const STAR_ICON = `(() => {
+  const els = [...document.querySelectorAll('[title="收藏该用户"]')].filter((e) => e.getClientRects().length > 0);
+  if (els.length !== 1) return els.length ? "star_not_unique" : "star_missing";
+  const icon = els[0].matches("i") ? els[0] : els[0].querySelector("i") ?? els[0];
+  const r = icon.getBoundingClientRect();
+  return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), active: icon.classList.contains("active") || els[0].classList.contains("active") };
+})()`;
+
+/** 星标悬停后弹出的颜色列表（离星标最近的可见 el-popover），按色点背景色识别颜色，带 chat-icon-check 的为当前颜色。 */
+function starOptionsScript(star: { x: number; y: number }): string {
+  return `(() => {
+    const near = (p) => { const r = p.getBoundingClientRect(); return Math.abs(r.left + r.width / 2 - ${star.x}) + Math.abs(r.top - ${star.y}); };
+    const pops = [...document.querySelectorAll("div.el-popover")].filter((p) => p.getClientRects().length > 0 && p.querySelectorAll("ul > li").length >= 2).sort((a, b) => near(a) - near(b));
+    if (!pops.length) return "popover_missing";
+    const colorOf = (li) => {
+      for (const el of [li, ...li.querySelectorAll("*")]) {
+        const m = /rgba?\\((\\d+), (\\d+), (\\d+)(?:, ([\\d.]+))?\\)/.exec(getComputedStyle(el).backgroundColor);
+        if (!m || m[4] === "0") continue;
+        const [r, g, b] = [+m[1], +m[2], +m[3]];
+        if (r > 200 && g > 200 && b > 200) continue;
+        if (r > 200 && g < 130 && b < 130) return "red";
+        if (r > 200 && g >= 130 && b < 120) return "orange";
+        if (b > 170 && r < 160) return "blue";
+        if (g > 140 && r < 160 && b < 160) return "green";
+      }
+      return "other";
+    };
+    return [...pops[0].querySelectorAll("ul > li")].map((li) => {
+      const r = li.getBoundingClientRect();
+      const check = li.querySelector("i.chat-icon-check");
+      return { color: colorOf(li), checked: !!check && check.getClientRects().length > 0 && getComputedStyle(check).visibility !== "hidden", x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    });
+  })()`;
+}
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** 自动清理平台引导弹窗的间隔。 */
 export const POPUP_SWEEP_INTERVAL_MS = 2000;
@@ -1894,6 +1934,64 @@ export class PddPageAdapter implements PlatformAdapter {
       return blocked ? "intercepted" : "no_send_request";
     } finally {
       this.outgoing = null;
+      this.sending = false;
+    }
+  }
+
+  /**
+   * 诊断模式下的人工触发测试：在当前已打开的对话上把“收藏该用户”设为指定颜色（只点颜色项，不点星标本身，避免误取消）。
+   * 点击前写本地尝试记录；结果只以页面状态判定（星标 active 且该颜色带勾），无平台回执；不重试。
+   */
+  async starTest(color: StarColor): Promise<string> {
+    if (!this.probeFile) return "not_executed:probe_mode_required";
+    if (!this.window || this.window.isDestroyed() || !this.tracker.status(true).logged_in) return "not_executed:not_ready";
+    if (this.sending || this.outgoing || this.popupSweep) return "not_executed:busy";
+    const page = this.window, epoch = this.watchEpoch;
+    const log = (rec: Record<string, unknown>) => fs.appendFileSync(path.join(path.dirname(this.probeFile!), "star-test.jsonl"), JSON.stringify({ at: new Date().toISOString(), color, ...rec }) + "\n", { mode: 0o600 });
+    const activeUid = async () => {
+      const scan = await this.run<Scan>(SCAN).catch(() => null);
+      const active = scan?.items.find((i) => i.active);
+      return active ? buyerFromListKey(active.key) : null;
+    };
+    const hover = (pt: { x: number; y: number }) => page.webContents.debugger.sendCommand("Input.dispatchMouseEvent", { type: "mouseMoved", x: pt.x, y: pt.y }).catch(() => undefined);
+    const read = async (): Promise<StarState | string> => {
+      const star = await this.run<{ x: number; y: number; active: boolean } | string>(STAR_ICON).catch(() => "script_failed");
+      if (typeof star === "string") return star;
+      await hover(star);
+      await sleep(500);
+      const options = await this.run<StarOption[] | string>(starOptionsScript(star)).catch(() => "script_failed");
+      if (typeof options === "string") return options;
+      return { star, options };
+    };
+    this.sending = true;
+    try {
+      const uid = await activeUid();
+      if (!uid) return "not_executed:no_active_conversation";
+      const before = await read();
+      if (typeof before === "string") return `not_executed:${before}`;
+      const target = before.options.find((o) => o.color === color);
+      if (!target) return `not_executed:color_missing(${before.options.map((o) => o.color).join(",")})`;
+      if (before.star.active && target.checked) return "already";
+      if ((await activeUid()) !== uid || this.watchEpoch !== epoch) return "not_executed:conversation_changed";
+      log({ phase: "attempt", before: { active: before.star.active, checked: before.options.find((o) => o.checked)?.color ?? null } });
+      const click = await this.nativeClick({ x: target.x, y: target.y }, page, epoch);
+      if (click.status !== "dispatched") {
+        log({ phase: click.status, reason: click.reason });
+        return `${click.status}:${click.reason}`;
+      }
+      for (let i = 0; i < 6; i++) {
+        await sleep(500);
+        if ((await activeUid()) !== uid) break;
+        const after = await read();
+        if (typeof after !== "string" && after.star.active && after.options.find((o) => o.color === color)?.checked) {
+          log({ phase: "confirmed" });
+          return "confirmed";
+        }
+      }
+      log({ phase: "unknown", reason: "page_state_not_confirmed" });
+      return "unknown:page_state_not_confirmed";
+    } finally {
+      await hover({ x: 1, y: 1 });
       this.sending = false;
     }
   }

@@ -16,7 +16,7 @@ import { APP_WEB_PREFERENCES } from "../core/security.js";
 import { bindShopIdentity } from "../core/shopIdentity.js";
 import { shopView } from "../core/view.js";
 import { installFileLogging } from "./logger.js";
-import { PddPageAdapter } from "./pddAdapter.js";
+import { PddPageAdapter, type StarColor } from "./pddAdapter.js";
 import { SecretStore } from "./secrets.js";
 import { ARG_LAUNCHED_BY_AGENT, ARG_NO_HANDOVER, ARG_SUPERVISED, startupDecision, userDataFromArgv } from "../core/startup.js";
 import { StartupManager } from "./startupManager.js";
@@ -563,6 +563,24 @@ function devClickProbeWatcher() {
   }, 2000);
 }
 
+/** 诊断模式人工测试：在 diag/<店铺>/star-test.request 写入颜色（red/orange/blue/green，空文件为 red），对当前对话执行一次收藏颜色设置。 */
+function devStarTestWatcher() {
+  setInterval(() => {
+    for (const [shopId, slot] of controller.slotsForDev()) {
+      const flag = path.join(userData, "diag", shopId, "star-test.request");
+      if (!fs.existsSync(flag)) continue;
+      const raw = fs.readFileSync(flag, "utf8").trim() || "red";
+      fs.rmSync(flag, { force: true });
+      if (!(slot.adapter instanceof PddPageAdapter)) continue;
+      if (!["red", "orange", "blue", "green"].includes(raw)) {
+        console.log(`[${shopId}] star-test not_executed:bad_color`);
+        continue;
+      }
+      void slot.adapter.starTest(raw as StarColor).then((r) => console.log(`[${shopId}] star-test ${r}`));
+    }
+  }, 2000);
+}
+
 async function devAutoConnect(configPath: string) {
   let clients: { shop_id?: unknown; token?: unknown }[];
   try {
@@ -666,6 +684,7 @@ app.whenReady().then(async () => {
     await devAutoConnect(process.env.CLAW_NEXT_DEV_BACKEND_CONFIG);
     devClickProbeWatcher();
   }
+  if (!SMOKE && process.env.CLAW_NEXT_PDD_PROBE === "1") devStarTestWatcher();
   if (SMOKE) {
     try {
       await smoke();
