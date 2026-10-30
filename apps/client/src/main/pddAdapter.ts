@@ -626,6 +626,54 @@ function starOptionsScript(star: { x: number; y: number }): string {
   })()`;
 }
 
+type Point = { x: number; y: number };
+type TransferRow = { cells: string[]; button: Point | null };
+
+/** 页面内可见、文字恰为 text 的最深层元素中心坐标；scope 为限定范围的选择器。不唯一或缺失时返回原因。 */
+function textTargetScript(text: string, scope = "body"): string {
+  return `(() => {
+    const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
+    const roots = [...document.querySelectorAll(${JSON.stringify(scope)})].filter(vis);
+    const hits = roots.flatMap((r) => [...r.querySelectorAll("*")]).filter((e) => vis(e) && (e.innerText ?? "").trim() === ${JSON.stringify(text)} && ![...e.children].some((c) => (c.innerText ?? "").trim() === ${JSON.stringify(text)}));
+    if (hits.length !== 1) return hits.length ? "not_unique" : "missing";
+    const r = hits[0].getBoundingClientRect();
+    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+  })()`;
+}
+
+/** 可见的“转移会话”对话框中的客服行：各列文字与该行“转移”按钮坐标。 */
+const TRANSFER_ROWS = `(() => {
+  const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
+  const dlg = [...document.querySelectorAll("div.el-dialog")].filter(vis).find((d) => (d.querySelector(".el-dialog__title")?.innerText ?? "").trim() === "转移会话");
+  if (!dlg) return "dialog_missing";
+  return [...dlg.querySelectorAll("tr.el-table__row")].filter(vis).map((tr) => {
+    const cells = [...tr.querySelectorAll("td")].map((td) => (td.innerText ?? "").trim().slice(0, 40));
+    const btn = [...tr.querySelectorAll("*")].filter((e) => vis(e) && (e.innerText ?? "").trim() === "转移" && ![...e.children].some((c) => (c.innerText ?? "").trim() === "转移"));
+    const r = btn.length === 1 ? btn[0].getBoundingClientRect() : null;
+    return { cells, button: r ? { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) } : null };
+  });
+})()`;
+
+/** 离 near 最近的可见 el-popover 中的按钮文字与坐标。 */
+function popoverButtonsScript(near: Point): string {
+  return `(() => {
+    const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
+    const d = (p) => { const r = p.getBoundingClientRect(); return Math.abs(r.left + r.width / 2 - ${near.x}) + Math.abs(r.top + r.height / 2 - ${near.y}); };
+    const pops = [...document.querySelectorAll("div.el-popover")].filter(vis).sort((a, b) => d(a) - d(b));
+    if (!pops.length) return "popover_missing";
+    return [...pops[0].querySelectorAll("button")].filter(vis).map((b) => { const r = b.getBoundingClientRect(); return { text: (b.innerText ?? "").trim().slice(0, 20), x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; });
+  })()`;
+}
+
+const TRANSFER_DIALOG_CLOSE = `(() => {
+  const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
+  const dlg = [...document.querySelectorAll("div.el-dialog")].filter(vis).find((d) => (d.querySelector(".el-dialog__title")?.innerText ?? "").trim() === "转移会话");
+  const b = dlg?.querySelector(".el-dialog__headerbtn");
+  if (!b || !vis(b)) return "missing";
+  const r = b.getBoundingClientRect();
+  return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+})()`;
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** 自动清理平台引导弹窗的间隔。 */
 export const POPUP_SWEEP_INTERVAL_MS = 2000;
@@ -1992,6 +2040,85 @@ export class PddPageAdapter implements PlatformAdapter {
       return "unknown:page_state_not_confirmed";
     } finally {
       await hover({ x: 1, y: 1 });
+      this.sending = false;
+    }
+  }
+
+  /**
+   * 诊断模式下的人工触发测试：把当前对话转移给名称含 target 的唯一客服。
+   * confirm=false 只打开转移对话框和确认气泡、记录内容后关闭，不点确认；confirm=true 才点确认。
+   * 点确认前写本地尝试记录；结果只看页面提示，无平台回执；不重试。
+   */
+  async transferTest(target: string, confirm: boolean): Promise<string> {
+    if (!this.probeFile) return "not_executed:probe_mode_required";
+    if (!this.window || this.window.isDestroyed() || !this.tracker.status(true).logged_in) return "not_executed:not_ready";
+    if (this.sending || this.outgoing || this.popupSweep) return "not_executed:busy";
+    if (!target.trim()) return "not_executed:no_target";
+    const page = this.window, epoch = this.watchEpoch;
+    const log = (rec: Record<string, unknown>) => fs.appendFileSync(path.join(path.dirname(this.probeFile!), "transfer-test.jsonl"), JSON.stringify({ at: new Date().toISOString(), target, confirm, ...rec }) + "\n", { mode: 0o600 });
+    const activeUid = async () => {
+      const scan = await this.run<Scan>(SCAN).catch(() => null);
+      const active = scan?.items.find((i) => i.active);
+      return active ? buyerFromListKey(active.key) : null;
+    };
+    const close = async () => {
+      const x = await this.run<Point | string>(TRANSFER_DIALOG_CLOSE).catch(() => "missing");
+      if (typeof x !== "string") await this.nativeClick(x, page, epoch);
+    };
+    this.sending = true;
+    let opened = false;
+    try {
+      const uid = await activeUid();
+      if (!uid) return "not_executed:no_active_conversation";
+      const open = await this.run<Point | string>(textTargetScript("转移会话")).catch(() => "script_failed");
+      if (typeof open === "string") return `not_executed:open_button_${open}`;
+      if ((await this.nativeClick(open, page, epoch)).status !== "dispatched") return "not_executed:open_click_failed";
+      opened = true;
+      let rows: TransferRow[] | string = "dialog_missing";
+      for (let i = 0; i < 10 && (typeof rows === "string" || !rows.length); i++) {
+        await sleep(300);
+        rows = await this.run<TransferRow[] | string>(TRANSFER_ROWS).catch(() => "script_failed");
+      }
+      if (typeof rows === "string") return `not_executed:${rows}`;
+      const matches = rows.filter((r) => r.cells.some((c) => c.includes(target)));
+      log({ phase: "rows", rows: rows.map((r) => ({ cells: r.cells, button: !!r.button })), matches: matches.length });
+      if (matches.length !== 1 || !matches[0].button) return `not_executed:target_${matches.length ? "not_unique_or_no_button" : "missing"}`;
+      const row = matches[0];
+      if ((await this.nativeClick(row.button!, page, epoch)).status !== "dispatched") return "not_executed:row_click_failed";
+      await sleep(500);
+      const buttons = await this.run<{ text: string; x: number; y: number }[] | string>(popoverButtonsScript(row.button!)).catch(() => "script_failed");
+      log({ phase: "popover", buttons: typeof buttons === "string" ? buttons : buttons.map((b) => b.text) });
+      if (typeof buttons === "string") return `not_executed:${buttons}`;
+      const ok = buttons.filter((b) => ["确定", "确认", "确认转移", "转移", "是"].includes(b.text));
+      if (!confirm) {
+        const cancel = buttons.find((b) => b.text === "取消");
+        if (cancel) await this.nativeClick(cancel, page, epoch);
+        return `inspected:rows=${rows.length},confirm_buttons=${ok.length}`;
+      }
+      if (ok.length !== 1) return `not_executed:confirm_button_${ok.length ? "not_unique" : "missing"}`;
+      if ((await activeUid()) !== uid || this.watchEpoch !== epoch) return "not_executed:conversation_changed";
+      log({ phase: "attempt", row: row.cells });
+      const click = await this.nativeClick(ok[0], page, epoch);
+      if (click.status !== "dispatched") {
+        log({ phase: click.status, reason: click.reason });
+        return `${click.status}:${click.reason}`;
+      }
+      opened = false;
+      for (let i = 0; i < 10; i++) {
+        await sleep(300);
+        const toast = await this.run<string>(`[...document.querySelectorAll(".el-message")].filter((e) => e.getClientRects().length > 0).map((e) => (e.innerText ?? "").trim().slice(0, 40)).join(" | ")`).catch(() => "");
+        if (toast) {
+          log({ phase: "page_toast", toast });
+          return `page_toast:${toast}`;
+        }
+      }
+      log({ phase: "unknown", reason: "no_page_toast" });
+      return "unknown:no_page_toast";
+    } finally {
+      if (opened) {
+        await sleep(300);
+        await close();
+      }
       this.sending = false;
     }
   }

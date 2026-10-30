@@ -581,6 +581,24 @@ function devStarTestWatcher() {
   }, 2000);
 }
 
+/** 诊断模式人工测试：在 diag/<店铺>/transfer-test.request 写入 “inspect 客服名” 或 “execute 客服名”，对当前对话执行一次转移测试。 */
+function devTransferTestWatcher() {
+  setInterval(() => {
+    for (const [shopId, slot] of controller.slotsForDev()) {
+      const flag = path.join(userData, "diag", shopId, "transfer-test.request");
+      if (!fs.existsSync(flag)) continue;
+      const m = /^(inspect|execute)\s+(.+)$/.exec(fs.readFileSync(flag, "utf8").trim());
+      fs.rmSync(flag, { force: true });
+      if (!(slot.adapter instanceof PddPageAdapter)) continue;
+      if (!m) {
+        console.log(`[${shopId}] transfer-test not_executed:bad_request`);
+        continue;
+      }
+      void slot.adapter.transferTest(m[2], m[1] === "execute").then((r) => console.log(`[${shopId}] transfer-test ${r}`));
+    }
+  }, 2000);
+}
+
 async function devAutoConnect(configPath: string) {
   let clients: { shop_id?: unknown; token?: unknown }[];
   try {
@@ -684,7 +702,10 @@ app.whenReady().then(async () => {
     await devAutoConnect(process.env.CLAW_NEXT_DEV_BACKEND_CONFIG);
     devClickProbeWatcher();
   }
-  if (!SMOKE && process.env.CLAW_NEXT_PDD_PROBE === "1") devStarTestWatcher();
+  if (!SMOKE && process.env.CLAW_NEXT_PDD_PROBE === "1") {
+    devStarTestWatcher();
+    devTransferTestWatcher();
+  }
   if (SMOKE) {
     try {
       await smoke();
