@@ -296,8 +296,9 @@ const DOM_PROBE = `(() => {
     }
   }
   const top = Object.entries(classes).filter(([, r]) => r.count >= 1).slice(0, 400).map(([chain, r]) => ({ chain, count: r.count, data: [...r.data].slice(0, 10) }));
-  return { url: location.pathname + location.hash.replace(/[0-9]{5,}/g, "<id>"), classes: top, editables, buttons: buttons.slice(0, 80), links: ${LINK_PROBE} };
+  return { url: location.pathname + location.hash.replace(/[0-9]{5,}/g, "<id>"), classes: top, editables, buttons: buttons.slice(0, 80), links: (() => { try { return ${LINK_PROBE}; } catch (e) { return { error: String(e && e.name), message: String(e && e.message).slice(0, 160) }; } })() };
 })()`;
+export { DOM_PROBE };
 
 /**
  * 界面操作记录（隔离环境，页面脚本不可见）：人工每点一次可点击元素，记下它的界面标签（title/aria-label/
@@ -1504,7 +1505,10 @@ export class PddPageAdapter implements PlatformAdapter {
             const items = randoms.map((v) => ({ prefix_is_known_buyer: known.has((/^[0-9]+/.exec(v) ?? [""])[0]), shape: v.replace(/[0-9]/g, "9").replace(/[^9]/g, (c) => (c === "-" || c === "_" ? c : "a")) }));
             fs.writeFile(domFile, JSON.stringify({ at: new Date().toISOString(), items, ...r }, null, 1), { mode: 0o600 }, () => undefined);
           })
-          .catch(() => undefined);
+          .catch((err: unknown) => {
+            const e = err as { name?: unknown; message?: unknown } | null;
+            fs.writeFile(domFile, JSON.stringify({ at: new Date().toISOString(), error: String(e?.name), message: String(e?.message).slice(0, 160) }, null, 1), { mode: 0o600 }, () => undefined);
+          });
       }, 10_000);
       win.on("closed", () => clearInterval(timer));
       this.startUiRecorder(win, this.probeFile);
