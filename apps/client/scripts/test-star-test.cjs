@@ -16,7 +16,7 @@ const path = require("node:path");
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "claw-star-test-"));
 app.setPath("userData", temp);
-const { PddPageAdapter, LINK_PROBE } = require("../dist/src/main/pddAdapter.js");
+const { PddPageAdapter, LINK_PROBE, DOM_PROBE } = require("../dist/src/main/pddAdapter.js");
 
 const colors = { red: "rgb(240, 90, 90)", orange: "rgb(245, 170, 50)", blue: "rgb(100, 160, 220)", green: "rgb(90, 180, 100)" };
 const dots = (names) => names.map((n) => `<li style="width:30px;height:24px"><span style="display:inline-block;width:16px;height:16px;border-radius:8px;background:${colors[n]}"></span></li>`).join("");
@@ -141,6 +141,15 @@ app.whenReady().then(async () => {
       const { wc } = await adapterFor(win, page({ unlinked }));
       const l = await wc.executeJavaScript(LINK_PROBE);
       check(`诊断关联记录：星标${unlinked ? "无" : "有"}关联`, l.star_count === 1 && l.star.has_aria === expect.has_aria && l.star.resolves === expect.resolves && !JSON.stringify(l).includes("el-popover"), l);
+    }
+    {
+      const { wc } = await adapterFor(win, page({}));
+      const ok = await wc.executeJavaScriptInIsolatedWorld(1001, [{ code: DOM_PROBE }]);
+      await wc.executeJavaScriptInIsolatedWorld(1001, [{ code: `Element.prototype.getClientRects = () => { throw new TypeError("probe-fixture"); }; true` }]);
+      const broken = await wc.executeJavaScriptInIsolatedWorld(1001, [{ code: DOM_PROBE }]);
+      check("页面结构记录：关联检查出错时整体仍返回，links 只记错误类型与说明",
+        ok.links && ok.links.star_count === 1 && Array.isArray(broken.buttons) && broken.links.error === "TypeError" && broken.links.message === "probe-fixture",
+        { ok: ok.links, broken: broken.links });
     }
     await zero("星标附近只有无关四色菜单、星标浮层未打开：不点", { unrelated: true, noStarPop: true }, "not_executed:popover_missing");
     await zero("星标未关联浮层、附近有四色菜单：证明不了归属不点", { unrelated: true, unlinked: true }, "not_executed:popover_unlinked");

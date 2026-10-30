@@ -29,7 +29,8 @@ test("拼多多适配器注入页面的脚本拼接后均可解析", () => {
   }
   assert.ok(parsed >= 10, `只找到 ${parsed} 段脚本`);
   assert.ok(scope.LINK_PROBE.includes("rows_popover_visible"), "未取到真实 LINK_PROBE");
-  assert.match(src, /links: \$\{LINK_PROBE\}/, "DOM_PROBE 应直接引用本地 LINK_PROBE");
+  assert.match(src, /\$\{LINK_PROBE\}/, "DOM_PROBE 应直接引用本地 LINK_PROBE");
+  assert.doesNotMatch(src, /\$\{exports\./, "注入脚本模板不得引用 exports.*");
 });
 
 // 解析通过不代表语义正确：执行实际生成的说明书对话框脚本，核对遮挡元素的结构记录。
