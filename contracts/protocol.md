@@ -350,14 +350,16 @@ status 只能 sent/not_sent/unknown。sent 必须具有平台明确成功回执�
 | 字段 | 必填 | 类型与限制 |
 |---|---|---|
 | `conv_state` | 确认 `mark_conversation` 或 `transfer_conversation` 时必填 | 对象，只允许下列三键 |
-| `conv_state.marked` | 是 | 布尔 |
-| `conv_state.color` | 是 | `red`/`orange`/`blue`/`green`；`marked=false` 时为 null |
+| `conv_state.marked` | 是 | 布尔或 null；null 表示本次没有可靠读到（见下） |
+| `conv_state.color` | 是 | `red`/`orange`/`blue`/`green`；`marked` 为 false 或 null 时为 null |
 | `conv_state.observed_at` | 是 | 有限数字（Unix 秒） |
 | `transfer_targets` | 否（仅确认 `transfer_conversation` 时允许） | 数组，最多 50 项；省略或空表示前台没有读到可转接客服 |
 | `target_id` | 是 | 非空字符串 ≤64，数组内唯一；前台生成的不透明编号，不是平台编号 |
 | `name` | 是 | 非空字符串 ≤40，客服账号在转移对话框“名称列”的显示名 |
 | `observed_at` | 是 | 有限数字 |
 
+- **状态取不到时如实上报 `marked=null`，不得捏造 false，也不得丢弃事件。** 适用：星标元素缺失或不唯一、页面加载中、读数与本次 `context_revision` 不对应（过期）、浮层归属无法证明。能力已确认只表示“可以执行”，不等于这次读到了状态。
+- `marked=null` 的事件：后台不得生成 mark 或 transfer；正常 reply / send_item / handoff 流程照常（handoff 仍只是建议）。前台执行 mark/transfer 前若重读发现状态取不到或与提交时不一致，不点击，回执 `not_sent`（reason `conv_state_unavailable` / `conv_state_changed`）。
 - 不上传客服状态数值（语义未知，不推断在线）、备注、接待量或任何平台账号编号。
 - `target_id` 只在本店、本租约、本对话、本 `context_revision` 内有效；前台私有映射为平台稳定客服标识（不随上下文上传、不写日志）。客服列表或映射变化使 `context_revision` 递增。
 
@@ -371,11 +373,13 @@ status 只能 sent/not_sent/unknown。sent 必须具有平台明确成功回执�
 新增两个 action，一次事件一项，不附文字：
 
 ```json
-{"action":"mark","mark":{"color":"red"},"reason":"fallback:timeout","expires_at":1790000060.0}
+{"action":"mark","mark":{"color":"red"},"reason":"fallback:model_timeout","expires_at":1790000060.0}
 {"action":"transfer","transfer":{"target_id":"t-1","unmark_policy":{"allow":true,"version":3}},"reason":"fallback:unhandled","expires_at":1790000060.0}
 ```
 
 - `mark.color` 四选一；若 `conv_state` 已是该颜色，后台不生成 mark。
+- 一事件一动作：不组合“先发文字再转人工”，也不组合“先标星再转移”。店铺兜底配置对每类情形（`unhandled` 无法处理 / `error` 报错 / `model_timeout` 模型超时）各选一种：不处理、handoff 建议、mark（选颜色）、transfer（填账号显示名）——四者互斥；规则与话术共用同一套结构化处理方式，配置带店铺策略版本，决定里携带该版本，版本变化后旧决定 claim 409。
+- **超时边界。** `fallback:model_timeout` 只指“在事件既有预算内、模型调用超时后的兜底”：它是普通决定，照常受 `expires_at`、claim 许可和契约 A 预算约束，不重置或延长任何预算。总预算已耗尽的事件按契约 A 以 `handoff` + `reply_deadline_exceeded` 终结，**不可复活、不可 claim，也不生成 mark/transfer**；若以后要求预算耗尽后仍自动转人工，须另定独立的动作时限与归属，并重新审查。
 - `transfer.unmark_policy` 是店铺**一次配置的固定策略**及其版本：`allow=true` 表示“遇平台以已收藏为由拒绝转移时，取消收藏后再转一次”；未配置视为 `allow=false`。前台只按决定里携带的策略执行，不自行放宽。策略版本变化后，旧版本的决定不能 claim（409）。
 - claim 核验、10 秒许可、一事件一尝试、unknown 规则与 reply 相同；claim 额外核验能力与（transfer 时）策略版本。
 
@@ -387,7 +391,8 @@ status 只能 sent/not_sent/unknown。sent 必须具有平台明确成功回执�
 4. **transfer**：点“转移会话”→ 以稳定标识核对的目标行“转移”→“无原因直接转移”。若平台以“已收藏”拒绝：
    - `allow=false`：点“暂不转移收藏会话”，回执 `not_sent`（reason `blocked_by_mark`）。平台已拒绝且未改变状态，这是确定结论。
    - `allow=true`：点“取消收藏并转移”。
-   - 任一步结果不明即停止，不补做后续步骤，不把未知当失败重来。
+   - 平台的“取消收藏并转移”是**一次页面点击**，页面随后自行发出取消收藏与再次转移两个请求；前台把它记为一个步骤 `unmark_and_transfer`，不拆成两次点击。
+   - 任一步结果不明即停止，不补做后续步骤，不把未知当失败重来；不自动恢复收藏，不重试。
 5. **确认截止 = claim_expires_at − 2 秒**。
 
 ### 回执
@@ -395,17 +400,31 @@ status 只能 sent/not_sent/unknown。sent 必须具有平台明确成功回执�
 沿用 `status: sent/not_sent/unknown`，`sent` 表示平台写入已确认；另带：
 
 ```json
-{"attempt_id":"attempt-001","status":"unknown","steps":[{"step":"transfer","status":"not_sent","reason":"blocked_by_mark"},{"step":"unmark","status":"unknown"},{"step":"transfer_retry","status":"unknown"}],"page_observed":"left_list"}
+{"attempt_id":"attempt-001","status":"unknown","steps":[{"step":"transfer","status":"not_sent","reason":"blocked_by_mark"},{"step":"unmark_and_transfer","status":"unknown","unmarked":null}],"page_observed":"left_list"}
 ```
+
+- `steps` **只列已开始的步骤**（已持久化尝试并点击，或平台已对其明确答复）；未开始的步骤省略，不用 unknown 占位。
+- 步骤状态：`sent` 平台明确成功；`not_sent` 平台明确拒绝或未点击；`unknown` 已点击但结果不明。`unmark_and_transfer` 另带 `unmarked`：`true` 收藏已确认被取消，`false` 确认未取消，`null` 不明。
+- 整体聚合（只看**最后一个转移步骤**是否确认成功）：
+
+| 情形 | 整体 status | 说明 |
+|---|---|---|
+| `transfer`=sent | sent | |
+| `transfer`=not_sent(blocked_by_mark)，策略不允许 | not_sent | 收藏未改变 |
+| `transfer`=not_sent(blocked_by_mark) → `unmark_and_transfer`=sent，`unmarked=true` | sent | 收藏已取消，属于策略预期 |
+| `transfer`=not_sent → `unmark_and_transfer`=not_sent，`unmarked=true` | not_sent | **收藏已被取消但未转移**，管理界面须显示这一状态改变；不自动恢复收藏、不重试 |
+| `transfer`=not_sent → `unmark_and_transfer`=not_sent，`unmarked=false` | not_sent | 状态未改变 |
+| 任一步 unknown（含 `unmarked=null`） | unknown | 不重试、不补做 |
+| `transfer`=unknown | unknown | 不再进行后续步骤 |
 
 - `sent` 须同时满足：平台对应接口明确成功（字段语义核实后补入判据），且该成功与本对话、本次请求（transfer 时还有指定接收人的稳定标识）对应。缺失或冲突一律 `unknown`。
 - `page_observed` 只是页面观察（mark：星标状态与颜色；transfer：会话离开非空会话列表），**不能**单独构成 `sent`，也不能据此触发任何补做动作。
-- 复合步骤里任一步 unknown，整体 unknown；只有全部步骤确认才 `sent`。`steps` 只记步骤名与状态，不含客服名、买家标识或平台原文。
+- 被明确拒绝的步骤永远不能聚合为 `sent`；整体 `sent` 只来自最后一个转移步骤的明确成功。`steps` 只记步骤名、状态与 `unmarked`，不含客服名、买家标识或平台原文。
 - unknown 规则同主协议：永久保留、不重试、不覆盖，只锁定该事件。
 
 ### 测试要求（实现阶段）
 
-至少覆盖：能力协商四种组合 × 两个能力；未确认能力时的字段与 action；字段校验（必填、类型、上限、重复、未知字段）；接收人名称零项/多项/包含关系/备注命中不得生成；策略版本变化后 claim 409；`allow=false` 遇收藏拒绝报 not_sent 且不取消收藏；`allow=true` 时取消收藏或再次转移任一步 unknown 即停止；页面观察不得报 sent；点击前切换会话、浮层不属于星标、目标行重排均不点击；临时空列表不算离开。
+至少覆盖：能力协商四种组合 × 两个能力；未确认能力时的字段与 action；字段校验（必填、类型、上限、重复、未知字段）；接收人名称零项/多项/包含关系/备注命中不得生成；策略版本变化后 claim 409；`allow=false` 遇收藏拒绝报 not_sent 且不取消收藏；`allow=true` 时取消收藏或再次转移任一步 unknown 即停止；能力已确认但状态取不到/过期/歧义时上报 `marked=null`、不生成 mark/transfer 且正常回复照常；回执聚合表每一行（含“收藏已取消但转移失败”）、未开始步骤省略；`reply_deadline_exceeded` 终结事件不生成 mark/transfer、不能 claim；模型超时兜底不重置预算；页面观察不得报 sent；点击前切换会话、浮层不属于星标、目标行重排均不点击；临时空列表不算离开。
 
 ## unknown 人工核查（1.0 补充）
 
