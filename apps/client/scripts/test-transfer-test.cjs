@@ -24,7 +24,7 @@ const page = (active, agents) => `<!doctype html><meta charset="utf-8"><body sty
     <div><span class="el-dialog__title">转移会话</span><button class="el-dialog__headerbtn" id="x" style="width:20px;height:20px">x</button></div>
     <table><tbody id="rows"></tbody></table>
   </div>
-  <div id="pop" class="el-popover" style="display:none;position:absolute;width:200px;height:60px;background:#fff"><p>确定转移该会话吗？</p><span id="cancel" style="padding:2px">取消</span><span id="ok" style="padding:2px">确定</span></div>
+  <div id="pop" class="el-popover" style="display:none;position:absolute;width:200px;height:110px;background:#fff"><ul><li onclick="clicks.push('reason')">催发货</li><li id="ok">无原因直接转移</li></ul><span id="send" onclick="clicks.push('send')" style="padding:2px">发送</span><span id="cancel" style="padding:2px">取消</span></div>
   <script>
     window.clicks = [];
     let pending = null;

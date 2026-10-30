@@ -2089,7 +2089,8 @@ export class PddPageAdapter implements PlatformAdapter {
       const buttons = await this.run<{ text: string; x: number; y: number }[] | string>(popoverButtonsScript(row.button!)).catch(() => "script_failed");
       log({ phase: "popover", buttons: typeof buttons === "string" ? buttons : buttons.map((b) => b.text) });
       if (typeof buttons === "string") return `not_executed:${buttons}`;
-      const ok = buttons.filter((b) => ["确定", "确认", "确认转移", "转移", "是"].includes(b.text));
+      // 气泡里另有转移原因和“发送”（可能向买家发消息），只认“无原因直接转移”。
+      const ok = buttons.filter((b) => b.text === "无原因直接转移");
       if (!confirm) {
         const cancel = buttons.find((b) => b.text === "取消");
         if (cancel) await this.nativeClick(cancel, page, epoch);
