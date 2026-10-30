@@ -324,6 +324,89 @@ status 只能 sent/not_sent/unknown。sent 必须具有平台明确成功回执�
 - **订单明细**：同一订单同一商品的多个规格都保留在 `items`；达到 `goods` 10 项上限时，`items` 不被删减、`goods_ref` 省略；超过 5 条明细；原摘要与 `items` 首项不同时不报错。
 - **归属**：跨买家的迟到响应不得进入本对话。
 
+## 会话操作：收藏标星与转人工（1.3 草案，双方审查通过前不生效）
+
+用途：店铺配置的兜底处理（处理不了、报错、超时等）可以选择“给该买家会话标星（选颜色）”或“把该会话转给指定客服账号（转人工）”。本段生效前，上文 `handoff` 仍只是建议，前台不执行任何平台转接或收藏；**回复文字里出现“转人工”等字样永远不触发平台操作**。仅观察模式不执行本段动作。
+
+拼多多页面实测事实（前台诊断记录，只记结构）：
+- 收藏与标星是同一状态，颜色为红/橙/蓝/绿四选一；未收藏时选颜色即收藏。
+- 转移入口为会话工具栏“转移会话”，对话框按客服行选择，再选“无原因直接转移”（另有原因项与“发送”，前台不点）。
+- **已收藏的会话不可转移**：平台返回失败并给出“取消收藏并转移 / 暂不转移收藏会话”。页面在“取消收藏并转移”后依次发出 `unmark_conversation`、`move_conversation`，随后页面自行发出 `close_conversation`（前台不主动调用该接口，其作用对象与必要性待核实）。
+- 平台响应字段语义（`result.result`、`error_code` 等）尚未核实；核实前不得据此判定成功。
+
+### 能力协商
+
+- 心跳 `capabilities` 新增两个独立能力名 `"mark_conversation"` 与 `"transfer_conversation"`，规则与 `send_item` 相同：以最近一次成功心跳响应为准，与 instance + session + generation 绑定；租约变化重新确认；撤回后在途判断不得产出、已生成的不能 claim、点击前发现撤回则不点击报 `not_sent`。
+- **`transfer_conversation` 在稳定接收人标识核实前不得在任何一端声明**（见下文“接收人”）。
+- 兼容组合：未确认能力时后台只返回旧 action，并对事件中的 `conv_state` / `transfer_targets` 返回 400；客户端收到不认识或未确认能力的 action 一律不执行、不 claim，本地按 none 记录。
+
+### 前台提交（`context`）
+
+```json
+"conv_state":{"marked":true,"color":"red","observed_at":1790000000},
+"transfer_targets":[{"target_id":"t-1","name":"主账号","observed_at":1790000000}]
+```
+
+| 字段 | 必填 | 类型与限制 |
+|---|---|---|
+| `conv_state` | 确认 `mark_conversation` 或 `transfer_conversation` 时必填 | 对象，只允许下列三键 |
+| `conv_state.marked` | 是 | 布尔 |
+| `conv_state.color` | 是 | `red`/`orange`/`blue`/`green`；`marked=false` 时为 null |
+| `conv_state.observed_at` | 是 | 有限数字（Unix 秒） |
+| `transfer_targets` | 否（仅确认 `transfer_conversation` 时允许） | 数组，最多 50 项；省略或空表示前台没有读到可转接客服 |
+| `target_id` | 是 | 非空字符串 ≤64，数组内唯一；前台生成的不透明编号，不是平台编号 |
+| `name` | 是 | 非空字符串 ≤40，客服账号在转移对话框“名称列”的显示名 |
+| `observed_at` | 是 | 有限数字 |
+
+- 不上传客服状态数值（语义未知，不推断在线）、备注、接待量或任何平台账号编号。
+- `target_id` 只在本店、本租约、本对话、本 `context_revision` 内有效；前台私有映射为平台稳定客服标识（不随上下文上传、不写日志）。客服列表或映射变化使 `context_revision` 递增。
+
+### 接收人
+
+- 后台配置的是**账号显示名**（如“主账号”）；生成决定时只在本事件 `transfer_targets` 中按 `name` **完全相等**查找，恰好一项才可用其 `target_id`；零项或多项不得生成 transfer，改为 `handoff` 建议并在 reason 中说明。
+- 前台执行时以私有映射的**平台稳定客服标识**核对对话框行，不能只比显示名。该标识的字段须由前台以脱敏结构核实后补入本段；**补入并经双方审查前，`transfer_conversation` 不启用**。
+
+### 决定
+
+新增两个 action，一次事件一项，不附文字：
+
+```json
+{"action":"mark","mark":{"color":"red"},"reason":"fallback:timeout","expires_at":1790000060.0}
+{"action":"transfer","transfer":{"target_id":"t-1","unmark_policy":{"allow":true,"version":3}},"reason":"fallback:unhandled","expires_at":1790000060.0}
+```
+
+- `mark.color` 四选一；若 `conv_state` 已是该颜色，后台不生成 mark。
+- `transfer.unmark_policy` 是店铺**一次配置的固定策略**及其版本：`allow=true` 表示“遇平台以已收藏为由拒绝转移时，取消收藏后再转一次”；未配置视为 `allow=false`。前台只按决定里携带的策略执行，不自行放宽。策略版本变化后，旧版本的决定不能 claim（409）。
+- claim 核验、10 秒许可、一事件一尝试、unknown 规则与 reply 相同；claim 额外核验能力与（transfer 时）策略版本。
+
+### 前台执行
+
+1. claim 前后与点击前的重核同 `send_item` 第 1–3 步；另核对 `conv_state` 与当前页面一致、`target_id` 映射仍在。
+2. 每个平台写入步骤之前先本地持久化该步尝试（attempt_id + 步骤名），再点击；只点平台页面自身按钮，不拼接平台请求。
+3. **mark**：只点星标颜色浮层中的目标颜色项（不点星标本身；浮层须可证明属于当前会话星标）。
+4. **transfer**：点“转移会话”→ 以稳定标识核对的目标行“转移”→“无原因直接转移”。若平台以“已收藏”拒绝：
+   - `allow=false`：点“暂不转移收藏会话”，回执 `not_sent`（reason `blocked_by_mark`）。平台已拒绝且未改变状态，这是确定结论。
+   - `allow=true`：点“取消收藏并转移”。
+   - 任一步结果不明即停止，不补做后续步骤，不把未知当失败重来。
+5. **确认截止 = claim_expires_at − 2 秒**。
+
+### 回执
+
+沿用 `status: sent/not_sent/unknown`，`sent` 表示平台写入已确认；另带：
+
+```json
+{"attempt_id":"attempt-001","status":"unknown","steps":[{"step":"transfer","status":"not_sent","reason":"blocked_by_mark"},{"step":"unmark","status":"unknown"},{"step":"transfer_retry","status":"unknown"}],"page_observed":"left_list"}
+```
+
+- `sent` 须同时满足：平台对应接口明确成功（字段语义核实后补入判据），且该成功与本对话、本次请求（transfer 时还有指定接收人的稳定标识）对应。缺失或冲突一律 `unknown`。
+- `page_observed` 只是页面观察（mark：星标状态与颜色；transfer：会话离开非空会话列表），**不能**单独构成 `sent`，也不能据此触发任何补做动作。
+- 复合步骤里任一步 unknown，整体 unknown；只有全部步骤确认才 `sent`。`steps` 只记步骤名与状态，不含客服名、买家标识或平台原文。
+- unknown 规则同主协议：永久保留、不重试、不覆盖，只锁定该事件。
+
+### 测试要求（实现阶段）
+
+至少覆盖：能力协商四种组合 × 两个能力；未确认能力时的字段与 action；字段校验（必填、类型、上限、重复、未知字段）；接收人名称零项/多项/包含关系/备注命中不得生成；策略版本变化后 claim 409；`allow=false` 遇收藏拒绝报 not_sent 且不取消收藏；`allow=true` 时取消收藏或再次转移任一步 unknown 即停止；页面观察不得报 sent；点击前切换会话、浮层不属于星标、目标行重排均不点击；临时空列表不算离开。
+
 ## unknown 人工核查（1.0 补充）
 
 unknown 表示前台无法确认平台是否发出。管理员可到平台聊天记录人工核对后记录结论（仅追加记录）：
@@ -425,7 +508,7 @@ settings 返回上述字段加 version。mode=rules/model/hybrid。规则可带�
 
 ## 非本版本能力
 
-前台已有拼多多平台适配：每店独立平台工作台登录、店铺身份交叉核验、被动读取平台页面自身加载的会话与订单数据、经核验的单次点击发送，多店各自隔离、可在界面切换。以下仍不在本版本内：订单/售后的主动实时查询（只有前台从页面被动读取、随上下文附带的只读订单摘要）、备注/库存写入、自动转接执行（handoff 只是建议）、云端托管资源。管理界面仅管理本项目。
+前台已有拼多多平台适配：每店独立平台工作台登录、店铺身份交叉核验、被动读取平台页面自身加载的会话与订单数据、经核验的单次点击发送，多店各自隔离、可在界面切换。以下仍不在本版本内：订单/售后的主动实时查询（只有前台从页面被动读取、随上下文附带的只读订单摘要）、备注/库存写入、自动转接执行（handoff 只是建议；收藏标星与转人工见“会话操作（1.3 草案）”，双方审查通过且能力协商确认前不生效）、云端托管资源。管理界面仅管理本项目。
 
 实现、测试通过、进程启动、平台确认与真实业务验收是不同证据。正式接管店铺前须逐店完成线上验收；不能凭模拟或虚构数据测试宣称已完成实盘迁移。
 
