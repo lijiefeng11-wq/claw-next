@@ -397,7 +397,7 @@ status 只能 sent/not_sent/unknown。sent 必须具有平台明确成功回执�
 
 ### 回执
 
-沿用 `status: sent/not_sent/unknown`，`sent` 表示平台写入已确认；另带：
+沿用 `status: sent/not_sent/unknown`，`sent` 表示平台写入已确认。**mark/transfer 不发聊天消息，回执不带 `platform_message_id`（必须省略或为 null）**：主协议“sent 必须有非空 platform_message_id”只适用于 reply/send_item，本段动作以下列 `steps` 与成功判据代替，前台不得编造消息编号。另带：
 
 ```json
 {"attempt_id":"attempt-001","status":"unknown","steps":[{"step":"transfer","status":"not_sent","reason":"blocked_by_mark"},{"step":"unmark_and_transfer","status":"unknown","unmarked":null}],"page_observed":"left_list"}
@@ -405,7 +405,8 @@ status 只能 sent/not_sent/unknown。sent 必须具有平台明确成功回执�
 
 - `steps` **只列已开始的步骤**（已持久化尝试并点击，或平台已对其明确答复）；未开始的步骤省略，不用 unknown 占位。
 - 步骤状态：`sent` 平台明确成功；`not_sent` 平台明确拒绝或未点击；`unknown` 已点击但结果不明。`unmark_and_transfer` 另带 `unmarked`：`true` 收藏已确认被取消，`false` 确认未取消，`null` 不明。
-- 整体聚合（只看**最后一个转移步骤**是否确认成功）：
+- **mark** 只有一个步骤 `mark`（带 `color`）：`mark`=sent → 整体 sent；not_sent → not_sent；unknown → unknown。示例：`{"attempt_id":"attempt-002","status":"sent","steps":[{"step":"mark","status":"sent","color":"red"}],"page_observed":"marked"}`。
+- **transfer** 整体聚合（只看**最后一个转移步骤**是否确认成功）：
 
 | 情形 | 整体 status | 说明 |
 |---|---|---|
@@ -419,12 +420,13 @@ status 只能 sent/not_sent/unknown。sent 必须具有平台明确成功回执�
 
 - `sent` 须同时满足：平台对应接口明确成功（字段语义核实后补入判据），且该成功与本对话、本次请求（transfer 时还有指定接收人的稳定标识）对应。缺失或冲突一律 `unknown`。
 - `page_observed` 只是页面观察（mark：星标状态与颜色；transfer：会话离开非空会话列表），**不能**单独构成 `sent`，也不能据此触发任何补做动作。
-- 被明确拒绝的步骤永远不能聚合为 `sent`；整体 `sent` 只来自最后一个转移步骤的明确成功。`steps` 只记步骤名、状态与 `unmarked`，不含客服名、买家标识或平台原文。
+- 被明确拒绝的步骤永远不能聚合为 `sent`；transfer 的整体 `sent` 只来自最后一个转移步骤的明确成功，mark 的整体 `sent` 只来自 `mark` 步骤的明确成功。`steps` 只记步骤名、状态、`color`（仅 mark）与 `unmarked`，不含客服名、买家标识或平台原文。
+- 后台按 `decision.action` 校验回执：mark/transfer 带 `platform_message_id` 返回 400；`steps` 与 action 不匹配（如 mark 回执出现转移步骤）返回 400。
 - unknown 规则同主协议：永久保留、不重试、不覆盖，只锁定该事件。
 
 ### 测试要求（实现阶段）
 
-至少覆盖：能力协商四种组合 × 两个能力；未确认能力时的字段与 action；字段校验（必填、类型、上限、重复、未知字段）；接收人名称零项/多项/包含关系/备注命中不得生成；策略版本变化后 claim 409；`allow=false` 遇收藏拒绝报 not_sent 且不取消收藏；`allow=true` 时取消收藏或再次转移任一步 unknown 即停止；能力已确认但状态取不到/过期/歧义时上报 `marked=null`、不生成 mark/transfer 且正常回复照常；回执聚合表每一行（含“收藏已取消但转移失败”）、未开始步骤省略；`reply_deadline_exceeded` 终结事件不生成 mark/transfer、不能 claim；模型超时兜底不重置预算；页面观察不得报 sent；点击前切换会话、浮层不属于星标、目标行重排均不点击；临时空列表不算离开。
+至少覆盖：能力协商四种组合 × 两个能力；未确认能力时的字段与 action；字段校验（必填、类型、上限、重复、未知字段）；接收人名称零项/多项/包含关系/备注命中不得生成；策略版本变化后 claim 409；`allow=false` 遇收藏拒绝报 not_sent 且不取消收藏；`allow=true` 时取消收藏或再次转移任一步 unknown 即停止；能力已确认但状态取不到/过期/歧义时上报 `marked=null`、不生成 mark/transfer 且正常回复照常；回执聚合表每一行（含“收藏已取消但转移失败”）与 mark 单步骤三种状态、未开始步骤省略；mark/transfer 的 sent 不带 platform_message_id 可被接受、带了返回 400；`reply_deadline_exceeded` 终结事件不生成 mark/transfer、不能 claim；模型超时兜底不重置预算；页面观察不得报 sent；点击前切换会话、浮层不属于星标、目标行重排均不点击；临时空列表不算离开。
 
 ## unknown 人工核查（1.0 补充）
 
