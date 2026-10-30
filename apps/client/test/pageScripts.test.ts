@@ -6,7 +6,7 @@ import { test } from "node:test";
 // 注入页面的脚本由模板字符串拼成：模板会吞掉无效转义（如正则里的 \/），只有在拼好后解析才能发现。
 test("拼多多适配器注入页面的脚本拼接后均可解析", () => {
   const src = fs.readFileSync(path.join(__dirname, "../src/main/pddAdapter.js"), "utf8");
-  const scope = { ITEM: "a", VIDEO_ROWS: "b", VIDEO_BTN: "c", CAMERA: "d", TEXTAREA: "e", SEND_BTN: "f", uid: "1", index: 0, urls: ["https://x.invalid/1"], covers: ["https://x.invalid/c"], text: "t", name: "n", guard: "", ids: ["1"], thumbOf: new Map([["1", "https://x.invalid/t"]]), GOODS_ROW: "g", GOODS_BTN: "h", thumb: "https://x.invalid/t", INSTRUCT_BTN: "i", INSTRUCT_DIALOG: "j", PROBE_WORDS_JSON: "[]", SAFE_CLASSES_JSON: "[]", star: { x: 1, y: 1 }, exclude: ".x", check: null, near: { x: 1, y: 1 }, target: "t", ok: [{ x: 1, y: 1 }], transferTargetSnippet: () => "const vis = () => true, t = () => '', trs = [], btn = null;" };
+  const scope = { ITEM: "a", VIDEO_ROWS: "b", VIDEO_BTN: "c", CAMERA: "d", TEXTAREA: "e", SEND_BTN: "f", uid: "1", index: 0, urls: ["https://x.invalid/1"], covers: ["https://x.invalid/c"], text: "t", name: "n", guard: "", ids: ["1"], thumbOf: new Map([["1", "https://x.invalid/t"]]), GOODS_ROW: "g", GOODS_BTN: "h", thumb: "https://x.invalid/t", INSTRUCT_BTN: "i", INSTRUCT_DIALOG: "j", PROBE_WORDS_JSON: "[]", SAFE_CLASSES_JSON: "[]", star: { x: 1, y: 1 }, exclude: ".x", check: null, near: { x: 1, y: 1 }, target: "t", ok: [{ x: 1, y: 1 }], LINK_PROBE: "", transferTargetSnippet: () => "const vis = () => true, t = () => '', trs = [], btn = null;" };
   const fill = new Function(...Object.keys(scope), "tpl", "return eval(tpl);");
   let parsed = 0;
   for (let i = src.indexOf("`("); i !== -1; i = src.indexOf("`(", i)) {
@@ -18,14 +18,18 @@ test("拼多多适配器注入页面的脚本拼接后均可解析", () => {
       else if (c === "}" && depth) depth--;
       else if (c === "`" && !depth) break;
     }
-    const tpl = src.slice(i, j + 1);
+    const start = i;
+    const tpl = src.slice(start, j + 1);
     i = j + 1;
     if (!/^`\((async )?\(\) =>/.test(tpl)) continue;
     const code = fill(...Object.values(scope), tpl) as string;
     assert.doesNotThrow(() => new Function(code), `脚本无法解析：${code.slice(0, 80)}`);
+    if (src.slice(0, start).endsWith("const LINK_PROBE = ")) scope.LINK_PROBE = code;
     parsed++;
   }
   assert.ok(parsed >= 10, `只找到 ${parsed} 段脚本`);
+  assert.ok(scope.LINK_PROBE.includes("rows_popover_visible"), "未取到真实 LINK_PROBE");
+  assert.match(src, /links: \$\{LINK_PROBE\}/, "DOM_PROBE 应直接引用本地 LINK_PROBE");
 });
 
 // 解析通过不代表语义正确：执行实际生成的说明书对话框脚本，核对遮挡元素的结构记录。
