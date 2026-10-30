@@ -568,7 +568,7 @@ function devClickProbeWatcher() {
  * 诊断模式人工测试（只在 CLAW_NEXT_PDD_PROBE=1 时启动）：
  * - diag/<店铺>/conversation.request：取当前打开对话的令牌，写入 conversation.json，供用户确认目标对话；
  * - diag/<店铺>/action.request：JSON 请求（一次性 id、有效期、对话令牌、动作），校验见 parseDevAction；
- *   id 先记入 action-consumed.jsonl 再执行，同一 id 不会执行第二次。
+ *   id 先记入 action-consumed.jsonl 再执行，同一 id 不会执行第二次；有效期一直传到每次点击前核对。
  */
 function devActionWatcher() {
   setInterval(() => {
@@ -593,7 +593,7 @@ function devActionWatcher() {
         continue;
       }
       fs.appendFileSync(consumedFile, JSON.stringify({ at: new Date().toISOString(), id: req.id, action: req.action }) + "\n", { mode: 0o600 });
-      const run = req.action === "star" ? adapter.starTest(req.color, req.conv) : adapter.transferTest(req.target, req.action === "transfer", req.conv, req.allowUnfavorite);
+      const run = req.action === "star" ? adapter.starTest(req.color, req.conv, req.exp) : adapter.transferTest(req.target, req.action === "transfer", req.conv, req.exp, req.allowUnfavorite);
       void run.then((r) => console.log(`[${shopId}] dev-action ${req.action} ${r}`));
     }
   }, 2000);

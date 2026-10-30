@@ -602,12 +602,18 @@ const STAR_ICON = `(() => {
 
 /**
  * 星标悬停后弹出的颜色列表，按色点背景色识别颜色，带 chat-icon-check 的为当前颜色。
- * 只认星标附近（300px 内）、至少含三种已知颜色的唯一可见 el-popover；无关菜单、多个候选都不认。
+ * 浮层归属只认触发控件关联：星标元素（或其 4 层内祖先/后代）的 aria-describedby 指向的 el-popover id，
+ * 且该浮层可见、唯一、含至少三种已知颜色；位置相近、颜色相同的无关菜单不算。证明不了归属就不执行。
  * 传入 check 时改为点击前核对：该坐标处的元素须属于这个浮层中颜色为 check.color 的列表项，返回 "ok" 或原因。
  */
-function starOptionsScript(star: { x: number; y: number }, check?: { x: number; y: number; color: StarColor }): string {
+function starOptionsScript(check?: { x: number; y: number; color: StarColor }): string {
   return `(() => {
-    const dist = (p) => { const r = p.getBoundingClientRect(); return Math.max(0, r.left - ${star.x}, ${star.x} - r.right) + Math.max(0, r.top - ${star.y}, ${star.y} - r.bottom); };
+    const stars = [...document.querySelectorAll('[title="收藏该用户"]')].filter((e) => e.getClientRects().length > 0);
+    if (stars.length !== 1) return stars.length ? "star_not_unique" : "star_missing";
+    const linked = new Set();
+    const addIds = (e) => (e.getAttribute("aria-describedby") || "").split(/\\s+/).filter(Boolean).forEach((id) => linked.add(id));
+    [stars[0], ...stars[0].querySelectorAll("[aria-describedby]")].forEach(addIds);
+    for (let e = stars[0].parentElement, i = 0; e && i < 4; e = e.parentElement, i++) addIds(e);
     const colorOf = (li) => {
       for (const el of [li, ...li.querySelectorAll("*")]) {
         const m = /rgba?\\((\\d+), (\\d+), (\\d+)(?:, ([\\d.]+))?\\)/.exec(getComputedStyle(el).backgroundColor);
@@ -622,8 +628,8 @@ function starOptionsScript(star: { x: number; y: number }, check?: { x: number; 
       return "other";
     };
     const known = (p) => new Set([...p.querySelectorAll("ul > li")].map(colorOf).filter((c) => c !== "other")).size;
-    const pops = [...document.querySelectorAll("div.el-popover")].filter((p) => p.getClientRects().length > 0 && getComputedStyle(p).visibility !== "hidden" && dist(p) <= 300 && known(p) >= 3);
-    if (pops.length !== 1) return pops.length ? "popover_not_unique" : "popover_missing";
+    const pops = [...document.querySelectorAll("div.el-popover")].filter((p) => p.id && linked.has(p.id) && p.getClientRects().length > 0 && getComputedStyle(p).visibility !== "hidden" && known(p) >= 3);
+    if (pops.length !== 1) return pops.length ? "popover_not_unique" : linked.size ? "popover_missing" : "popover_unlinked";
     const check = ${JSON.stringify(check ?? null)};
     if (check) {
       const hit = document.elementFromPoint(check.x, check.y);
@@ -2036,34 +2042,43 @@ export class PddPageAdapter implements PlatformAdapter {
     return this.probeFile ? this.activeConvToken() : null;
   }
 
-  async starTest(color: StarColor, conv: string): Promise<string> {
+  /** 每次点击前的核对：对话须仍是 conv 指定的那个，且请求未过 exp；通过返回 null，否则返回原因。 */
+  private async actionGate(epoch: number, conv: string, exp: number): Promise<string | null> {
+    if (this.watchEpoch !== epoch || conv === null || (await this.activeConvToken()) !== conv) return "conversation_mismatch";
+    return Date.now() > exp ? "expired" : null;
+  }
+
+  async starTest(color: StarColor, conv: string, exp: number): Promise<string> {
     if (!this.probeFile) return "not_executed:probe_mode_required";
     if (!this.window || this.window.isDestroyed() || !this.tracker.status(true).logged_in) return "not_executed:not_ready";
     if (this.sending || this.outgoing || this.popupSweep) return "not_executed:busy";
     const page = this.window, epoch = this.watchEpoch;
     const log = (rec: Record<string, unknown>) => fs.appendFileSync(path.join(path.dirname(this.probeFile!), "star-test.jsonl"), JSON.stringify({ at: new Date().toISOString(), color, ...rec }) + "\n", { mode: 0o600 });
     const same = async () => this.watchEpoch === epoch && (await this.activeConvToken()) === conv && conv !== null;
+    const gate = () => this.actionGate(epoch, conv, exp);
     const hover = (pt: { x: number; y: number }) => page.webContents.debugger.sendCommand("Input.dispatchMouseEvent", { type: "mouseMoved", x: pt.x, y: pt.y }).catch(() => undefined);
     const read = async (): Promise<StarState | string> => {
       const star = await this.run<{ x: number; y: number; active: boolean } | string>(STAR_ICON).catch(() => "script_failed");
       if (typeof star === "string") return star;
       await hover(star);
       await sleep(500);
-      const options = await this.run<StarOption[] | string>(starOptionsScript(star)).catch(() => "script_failed");
+      const options = await this.run<StarOption[] | string>(starOptionsScript()).catch(() => "script_failed");
       if (typeof options === "string") return options;
       return { star, options };
     };
     this.sending = true;
     try {
-      if (!(await same())) return "not_executed:conversation_mismatch";
+      let blocked = await gate();
+      if (blocked) return `not_executed:${blocked}`;
       const before = await read();
       if (typeof before === "string") return `not_executed:${before}`;
       const target = before.options.find((o) => o.color === color);
       if (!target) return `not_executed:color_missing(${before.options.map((o) => o.color).join(",")})`;
       if (before.star.active && target.checked) return "already";
-      if (!(await same())) return "not_executed:conversation_mismatch";
-      const owned = await this.run<string>(starOptionsScript(before.star, { x: target.x, y: target.y, color })).catch(() => "script_failed");
+      const owned = await this.run<string>(starOptionsScript({ x: target.x, y: target.y, color })).catch(() => "script_failed");
       if (owned !== "ok") return `not_executed:${owned}`;
+      blocked = await gate();
+      if (blocked) return `not_executed:${blocked}`;
       log({ phase: "attempt", before: { active: before.star.active, checked: before.options.find((o) => o.checked)?.color ?? null } });
       const click = await this.nativeClick({ x: target.x, y: target.y }, page, epoch);
       if (click.status !== "dispatched") {
@@ -2093,7 +2108,7 @@ export class PddPageAdapter implements PlatformAdapter {
    * 每次点击前核对当前对话仍是 conv 指定的那个，不符则不点。点确认前写本地尝试记录；结果只看页面状态，无平台回执；不重试。
    * 平台拒绝转移已收藏会话时，只有 allowUnfavorite 才点“取消收藏并转移”，否则返回需确认。
    */
-  async transferTest(target: string, confirm: boolean, conv: string, allowUnfavorite = false): Promise<string> {
+  async transferTest(target: string, confirm: boolean, conv: string, exp: number, allowUnfavorite = false): Promise<string> {
     if (!this.probeFile) return "not_executed:probe_mode_required";
     if (!this.window || this.window.isDestroyed() || !this.tracker.status(true).logged_in) return "not_executed:not_ready";
     if (this.sending || this.outgoing || this.popupSweep) return "not_executed:busy";
@@ -2101,6 +2116,7 @@ export class PddPageAdapter implements PlatformAdapter {
     const page = this.window, epoch = this.watchEpoch;
     const log = (rec: Record<string, unknown>) => fs.appendFileSync(path.join(path.dirname(this.probeFile!), "transfer-test.jsonl"), JSON.stringify({ at: new Date().toISOString(), confirm, ...rec }) + "\n", { mode: 0o600 });
     const same = async () => this.watchEpoch === epoch && (await this.activeConvToken()) === conv && conv !== null;
+    const gate = () => this.actionGate(epoch, conv, exp);
     const close = async () => {
       const x = await this.run<Point | string>(TRANSFER_DIALOG_CLOSE).catch(() => "missing");
       if (typeof x !== "string") await this.nativeClick(x, page, epoch);
@@ -2108,12 +2124,15 @@ export class PddPageAdapter implements PlatformAdapter {
     this.sending = true;
     let opened = false;
     try {
-      if (!(await same())) return "not_executed:conversation_mismatch";
+      let blocked = await gate();
+      if (blocked) return `not_executed:${blocked}`;
       const active = (await this.scanKeepingFresh())?.items.find((i) => i.active);
       const uid = active ? buyerFromListKey(active.key) : null;
       if (!uid) return "not_executed:no_active_conversation";
       const open = await this.run<Point | string>(textTargetScript("转移会话", ".chat-list, li.chat-item, .el-dialog")).catch(() => "script_failed");
       if (typeof open === "string") return `not_executed:open_button_${open}`;
+      blocked = await gate();
+      if (blocked) return `not_executed:${blocked}`;
       if ((await this.nativeClick(open, page, epoch)).status !== "dispatched") return "not_executed:open_click_failed";
       opened = true;
       let rows: TransferRow[] | string = "dialog_missing";
@@ -2127,7 +2146,8 @@ export class PddPageAdapter implements PlatformAdapter {
       log({ phase: "rows", rows: rows.length, matches: matches.length });
       if (matches.length !== 1 || !matches[0].button) return `not_executed:target_${matches.length ? "not_unique_or_no_button" : "missing"}`;
       const row = matches[0];
-      if (!(await same())) return "not_executed:conversation_mismatch";
+      blocked = await gate();
+      if (blocked) return `not_executed:${blocked}`;
       if ((await this.nativeClick(row.button!, page, epoch)).status !== "dispatched") return "not_executed:row_click_failed";
       await sleep(500);
       // 点行后重读：目标行须仍唯一且仍在刚才点的位置（表格重排/身份变化时可能点到了别人）。
@@ -2148,7 +2168,11 @@ export class PddPageAdapter implements PlatformAdapter {
         return `inspected:rows=${rows.length},confirm_buttons=${ok.length}`;
       }
       if (ok.length !== 1) return `not_executed:confirm_button_${ok.length ? "not_unique" : "missing"}`;
-      if (!(await same())) return "not_executed:conversation_mismatch";
+      blocked = await gate();
+      if (blocked) {
+        log({ phase: "not_executed", reason: blocked });
+        return `not_executed:${blocked}`;
+      }
       log({ phase: "attempt" });
       const click = await this.nativeClick(ok[0], page, epoch);
       if (click.status !== "dispatched") {
@@ -2156,7 +2180,7 @@ export class PddPageAdapter implements PlatformAdapter {
         return `${click.status}:${click.reason}`;
       }
       opened = false;
-      return await this.settleTransfer(uid, page, epoch, same, allowUnfavorite, log);
+      return await this.settleTransfer(uid, page, epoch, same, gate, allowUnfavorite, log);
     } finally {
       if (opened) {
         await sleep(300);
@@ -2171,7 +2195,7 @@ export class PddPageAdapter implements PlatformAdapter {
    * 否则点“暂不转移收藏会话”（保持原状）并返回需确认。会话离开非空列表只记为观察结果，业务上仍是 unknown
    * （没有平台回执与目标关联）；其他失败对话框记为页面失败。不重试。
    */
-  private async settleTransfer(uid: string, page: PlatformPage, epoch: number, same: () => Promise<boolean>, allowUnfavorite: boolean, log: (rec: Record<string, unknown>) => void): Promise<string> {
+  private async settleTransfer(uid: string, page: PlatformPage, epoch: number, same: () => Promise<boolean>, gate: () => Promise<string | null>, allowUnfavorite: boolean, log: (rec: Record<string, unknown>) => void): Promise<string> {
     let unfavorited = false;
     for (let i = 0; i < 30; i++) {
       await sleep(300);
@@ -2186,9 +2210,11 @@ export class PddPageAdapter implements PlatformAdapter {
           if (fail.keep && (await same())) await this.nativeClick(fail.keep, page, epoch);
           return "needs_confirmation:unfavorite";
         }
-        if (!(await same())) {
-          log({ phase: "unknown", reason: "conversation_mismatch_before_unfavorite" });
-          return "unknown:conversation_mismatch_before_unfavorite";
+        // 首次转移已点过，结果仍按 unknown；过期或换了对话就不再补做取消收藏。
+        const blocked = await gate();
+        if (blocked) {
+          log({ phase: "unknown", reason: `${blocked}_before_unfavorite` });
+          return `unknown:${blocked}_before_unfavorite`;
         }
         log({ phase: "unfavorite_and_transfer" });
         const click = await this.nativeClick(fail.unfav, page, epoch);

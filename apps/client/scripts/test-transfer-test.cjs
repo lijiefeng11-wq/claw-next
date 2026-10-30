@@ -6,7 +6,7 @@
  * 目标不唯一/缺失时不点确认；无已打开对话、非诊断模式不执行；会话列表每行自带的“转移会话”按钮不点；
  * 已收藏会话被平台拒绝时，请求允许才点一次“取消收藏并转移”，默认点“暂不转移”并返回需确认；
  * 会话离开非空列表只记观察（业务 unknown），临时空列表不算；日志不含客服名；
- * 反例：备注列含目标名、包含关系、同名、点行后重排、取令牌/打开对话框/点行后切换对话，均不确认。
+ * 反例：备注列含目标名、包含关系、同名、点行后重排、取令牌/打开对话框/点行后切换对话、消费后打开对话框期间过期，均不确认。
  */
 const { app, BrowserWindow } = require("electron");
 const fs = require("node:fs");
@@ -96,11 +96,11 @@ app.whenReady().then(async () => {
     const win = new BrowserWindow({ show: false, width: 900, height: 600, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
     win.showInactive();
     const T = "虚构主账号";
-    const run = async (html, { confirm = true, allow = false, before, conv: override, probe = true } = {}) => {
+    const run = async (html, { confirm = true, allow = false, before, conv: override, probe = true, ttl = 60_000 } = {}) => {
       fs.rmSync(logFile, { force: true });
       const { wc, adapter, conv } = await adapterFor(win, html, probe);
       if (before) await wc.executeJavaScript(before);
-      const r = await adapter.transferTest(T, confirm, override ?? conv, allow);
+      const r = await adapter.transferTest(T, confirm, override ?? conv, Date.now() + ttl, allow);
       return { r, clicks: await wc.executeJavaScript("window.clicks.slice()"), log: readLog(), fresh: adapter.pendingFreshBuyer };
     };
     const noOk = (clicks) => !clicks.some((c) => c.startsWith("ok") || c === "unfav");
@@ -115,6 +115,10 @@ app.whenReady().then(async () => {
       check("执行期间的扫描不吞掉新买家消息标记", fresh === true, fresh);
       const ai = log.findIndex((l) => l.phase === "attempt");
       check("execute：确认前写尝试记录，日志不含客服名", ai >= 0 && log[ai + 1]?.observed === "left_list" && !JSON.stringify(log).includes(T), log);
+    }
+    {
+      const { r, clicks, log } = await run(page(true, ["虚构客服A", T]), { ttl: 600 });
+      check("消费时未过期、打开对话框期间过期：不点确认", r === "not_executed:expired" && noOk(clicks) && !log.some((l) => l.phase === "attempt"), { r, clicks });
     }
     {
       const { r, clicks, log } = await run(page(true, [T], true), { allow: true });
