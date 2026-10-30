@@ -403,6 +403,14 @@ try {
     const out = line ? JSON.parse(line) : null;
     if (r.status !== 0 || !out?.ok) throw new Error(`点击记录回归失败：${line ?? r.stderr?.slice(-300) ?? r.status}`);
   });
+  for (const [name, script] of [["诊断收藏颜色测试：只点星标颜色浮层，会话不符或浮层不确定时零点击", "test-star-test.cjs"], ["诊断转移会话测试：只确认名称精确匹配的唯一目标，会话不符或重排不确认，取消收藏须请求允许", "test-transfer-test.cjs"]]) {
+    await step(name, async () => {
+      const r = spawnSync(require("electron"), [...(process.platform === "linux" ? ["--no-sandbox"] : []), path.join(clientRoot, "scripts", script)], { encoding: "utf8", timeout: 200_000 });
+      const line = (r.stdout || "").split("\n").reverse().find((l) => l.startsWith("{"));
+      const out = line ? JSON.parse(line) : null;
+      if (r.status !== 0 || !out?.ok) throw new Error(`${script} 失败：${line ?? r.stderr?.slice(-300) ?? r.status}`);
+    });
+  }
   await step("界面 HTML 中不含客户端口令", async () => {
     if ((await page.content()).includes(token)) throw new Error("口令出现在页面中");
   });

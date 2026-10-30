@@ -1,4 +1,5 @@
 import { session } from "electron";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { AdapterEvent, HistoryLoad, HistoryResult, ImageFetchResult, PlatformAdapter, PlatformNav, PlatformNavAction, PlatformStatus, SendItemRequest, SendRequest, SendResult } from "../core/adapter.js";
@@ -599,12 +600,14 @@ const STAR_ICON = `(() => {
   return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), active: icon.classList.contains("active") || els[0].classList.contains("active") };
 })()`;
 
-/** 星标悬停后弹出的颜色列表（离星标最近的可见 el-popover），按色点背景色识别颜色，带 chat-icon-check 的为当前颜色。 */
-function starOptionsScript(star: { x: number; y: number }): string {
+/**
+ * 星标悬停后弹出的颜色列表，按色点背景色识别颜色，带 chat-icon-check 的为当前颜色。
+ * 只认星标附近（300px 内）、至少含三种已知颜色的唯一可见 el-popover；无关菜单、多个候选都不认。
+ * 传入 check 时改为点击前核对：该坐标处的元素须属于这个浮层中颜色为 check.color 的列表项，返回 "ok" 或原因。
+ */
+function starOptionsScript(star: { x: number; y: number }, check?: { x: number; y: number; color: StarColor }): string {
   return `(() => {
-    const near = (p) => { const r = p.getBoundingClientRect(); return Math.abs(r.left + r.width / 2 - ${star.x}) + Math.abs(r.top - ${star.y}); };
-    const pops = [...document.querySelectorAll("div.el-popover")].filter((p) => p.getClientRects().length > 0 && p.querySelectorAll("ul > li").length >= 2).sort((a, b) => near(a) - near(b));
-    if (!pops.length) return "popover_missing";
+    const dist = (p) => { const r = p.getBoundingClientRect(); return Math.max(0, r.left - ${star.x}, ${star.x} - r.right) + Math.max(0, r.top - ${star.y}, ${star.y} - r.bottom); };
     const colorOf = (li) => {
       for (const el of [li, ...li.querySelectorAll("*")]) {
         const m = /rgba?\\((\\d+), (\\d+), (\\d+)(?:, ([\\d.]+))?\\)/.exec(getComputedStyle(el).backgroundColor);
@@ -618,6 +621,16 @@ function starOptionsScript(star: { x: number; y: number }): string {
       }
       return "other";
     };
+    const known = (p) => new Set([...p.querySelectorAll("ul > li")].map(colorOf).filter((c) => c !== "other")).size;
+    const pops = [...document.querySelectorAll("div.el-popover")].filter((p) => p.getClientRects().length > 0 && getComputedStyle(p).visibility !== "hidden" && dist(p) <= 300 && known(p) >= 3);
+    if (pops.length !== 1) return pops.length ? "popover_not_unique" : "popover_missing";
+    const check = ${JSON.stringify(check ?? null)};
+    if (check) {
+      const hit = document.elementFromPoint(check.x, check.y);
+      const li = hit && hit.closest("li");
+      if (!li || !pops[0].contains(li)) return "target_not_in_star_popover";
+      return colorOf(li) === check.color ? "ok" : "target_color_mismatch";
+    }
     return [...pops[0].querySelectorAll("ul > li")].map((li) => {
       const r = li.getBoundingClientRect();
       const check = li.querySelector("i.chat-icon-check");
@@ -665,7 +678,7 @@ function popoverButtonsScript(near: Point): string {
   })()`;
 }
 
-/** 平台“转移失败”对话框：返回说明文字与“取消收藏并转移”按钮坐标（唯一时）；没有该对话框返回 null。 */
+/** 平台“转移失败”对话框：返回说明文字（只在本进程内判断类别，不写日志）与两个按钮坐标（唯一时）；没有该对话框返回 null。 */
 const TRANSFER_FAIL_DIALOG = `(() => {
   const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
   const t = (e) => (e.innerText ?? "").trim();
@@ -674,9 +687,8 @@ const TRANSFER_FAIL_DIALOG = `(() => {
   if (!title.length) return null;
   let box = title[0];
   for (let i = 0; i < 8 && box.parentElement && !/取消收藏并转移|不可转移|失败./.test(t(box).replace("转移失败", "")); i++) box = box.parentElement;
-  const btn = leaf(box, "取消收藏并转移");
-  const r = btn.length === 1 ? btn[0].getBoundingClientRect() : null;
-  return { text: t(box).replace(/\\s+/g, " ").slice(0, 80), unfav: r ? { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) } : null };
+  const at = (s) => { const b = leaf(box, s); if (b.length !== 1) return null; const r = b[0].getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; };
+  return { text: t(box).replace(/\\s+/g, " ").slice(0, 80), unfav: at("取消收藏并转移"), keep: at("暂不转移收藏会话") };
 })()`;
 
 const TRANSFER_DIALOG_CLOSE = `(() => {
@@ -2004,17 +2016,26 @@ export class PddPageAdapter implements PlatformAdapter {
    * 诊断模式下的人工触发测试：在当前已打开的对话上把“收藏该用户”设为指定颜色（只点颜色项，不点星标本身，避免误取消）。
    * 点击前写本地尝试记录；结果只以页面状态判定（星标 active 且该颜色带勾），无平台回执；不重试。
    */
-  async starTest(color: StarColor): Promise<string> {
+  /** 当前打开对话的绑定令牌：页面代次＋列表项键的摘要（不含可读身份）；没有唯一打开的对话返回 null。 */
+  private async activeConvToken(): Promise<string | null> {
+    const scan = await this.run<Scan>(SCAN).catch(() => null);
+    const active = scan?.items.filter((i) => i.active) ?? [];
+    if (active.length !== 1) return null;
+    return crypto.createHash("sha256").update(`${this.watchEpoch}|${active[0].key}`).digest("hex").slice(0, 16);
+  }
+
+  /** 诊断模式：供人工测试在用户确认时取当前对话令牌，之后的动作请求须携带它。 */
+  async activeConversationToken(): Promise<string | null> {
+    return this.probeFile ? this.activeConvToken() : null;
+  }
+
+  async starTest(color: StarColor, conv: string): Promise<string> {
     if (!this.probeFile) return "not_executed:probe_mode_required";
     if (!this.window || this.window.isDestroyed() || !this.tracker.status(true).logged_in) return "not_executed:not_ready";
     if (this.sending || this.outgoing || this.popupSweep) return "not_executed:busy";
     const page = this.window, epoch = this.watchEpoch;
     const log = (rec: Record<string, unknown>) => fs.appendFileSync(path.join(path.dirname(this.probeFile!), "star-test.jsonl"), JSON.stringify({ at: new Date().toISOString(), color, ...rec }) + "\n", { mode: 0o600 });
-    const activeUid = async () => {
-      const scan = await this.run<Scan>(SCAN).catch(() => null);
-      const active = scan?.items.find((i) => i.active);
-      return active ? buyerFromListKey(active.key) : null;
-    };
+    const same = async () => this.watchEpoch === epoch && (await this.activeConvToken()) === conv && conv !== null;
     const hover = (pt: { x: number; y: number }) => page.webContents.debugger.sendCommand("Input.dispatchMouseEvent", { type: "mouseMoved", x: pt.x, y: pt.y }).catch(() => undefined);
     const read = async (): Promise<StarState | string> => {
       const star = await this.run<{ x: number; y: number; active: boolean } | string>(STAR_ICON).catch(() => "script_failed");
@@ -2027,14 +2048,15 @@ export class PddPageAdapter implements PlatformAdapter {
     };
     this.sending = true;
     try {
-      const uid = await activeUid();
-      if (!uid) return "not_executed:no_active_conversation";
+      if (!(await same())) return "not_executed:conversation_mismatch";
       const before = await read();
       if (typeof before === "string") return `not_executed:${before}`;
       const target = before.options.find((o) => o.color === color);
       if (!target) return `not_executed:color_missing(${before.options.map((o) => o.color).join(",")})`;
       if (before.star.active && target.checked) return "already";
-      if ((await activeUid()) !== uid || this.watchEpoch !== epoch) return "not_executed:conversation_changed";
+      if (!(await same())) return "not_executed:conversation_mismatch";
+      const owned = await this.run<string>(starOptionsScript(before.star, { x: target.x, y: target.y, color })).catch(() => "script_failed");
+      if (owned !== "ok") return `not_executed:${owned}`;
       log({ phase: "attempt", before: { active: before.star.active, checked: before.options.find((o) => o.checked)?.color ?? null } });
       const click = await this.nativeClick({ x: target.x, y: target.y }, page, epoch);
       if (click.status !== "dispatched") {
@@ -2043,7 +2065,7 @@ export class PddPageAdapter implements PlatformAdapter {
       }
       for (let i = 0; i < 6; i++) {
         await sleep(500);
-        if ((await activeUid()) !== uid) break;
+        if (!(await same())) break;
         const after = await read();
         if (typeof after !== "string" && after.star.active && after.options.find((o) => o.color === color)?.checked) {
           log({ phase: "confirmed" });
@@ -2061,20 +2083,17 @@ export class PddPageAdapter implements PlatformAdapter {
   /**
    * 诊断模式下的人工触发测试：把当前对话转移给名称含 target 的唯一客服。
    * confirm=false 只打开转移对话框和确认气泡、记录内容后关闭，不点确认；confirm=true 才点确认。
-   * 点确认前写本地尝试记录；结果只看页面提示，无平台回执；不重试。
+   * 每次点击前核对当前对话仍是 conv 指定的那个，不符则不点。点确认前写本地尝试记录；结果只看页面状态，无平台回执；不重试。
+   * 平台拒绝转移已收藏会话时，只有 allowUnfavorite 才点“取消收藏并转移”，否则返回需确认。
    */
-  async transferTest(target: string, confirm: boolean): Promise<string> {
+  async transferTest(target: string, confirm: boolean, conv: string, allowUnfavorite = false): Promise<string> {
     if (!this.probeFile) return "not_executed:probe_mode_required";
     if (!this.window || this.window.isDestroyed() || !this.tracker.status(true).logged_in) return "not_executed:not_ready";
     if (this.sending || this.outgoing || this.popupSweep) return "not_executed:busy";
     if (!target.trim()) return "not_executed:no_target";
     const page = this.window, epoch = this.watchEpoch;
-    const log = (rec: Record<string, unknown>) => fs.appendFileSync(path.join(path.dirname(this.probeFile!), "transfer-test.jsonl"), JSON.stringify({ at: new Date().toISOString(), target, confirm, ...rec }) + "\n", { mode: 0o600 });
-    const activeUid = async () => {
-      const scan = await this.run<Scan>(SCAN).catch(() => null);
-      const active = scan?.items.find((i) => i.active);
-      return active ? buyerFromListKey(active.key) : null;
-    };
+    const log = (rec: Record<string, unknown>) => fs.appendFileSync(path.join(path.dirname(this.probeFile!), "transfer-test.jsonl"), JSON.stringify({ at: new Date().toISOString(), confirm, ...rec }) + "\n", { mode: 0o600 });
+    const same = async () => this.watchEpoch === epoch && (await this.activeConvToken()) === conv && conv !== null;
     const close = async () => {
       const x = await this.run<Point | string>(TRANSFER_DIALOG_CLOSE).catch(() => "missing");
       if (typeof x !== "string") await this.nativeClick(x, page, epoch);
@@ -2082,7 +2101,9 @@ export class PddPageAdapter implements PlatformAdapter {
     this.sending = true;
     let opened = false;
     try {
-      const uid = await activeUid();
+      if (!(await same())) return "not_executed:conversation_mismatch";
+      const active = (await this.run<Scan>(SCAN).catch(() => null))?.items.find((i) => i.active);
+      const uid = active ? buyerFromListKey(active.key) : null;
       if (!uid) return "not_executed:no_active_conversation";
       const open = await this.run<Point | string>(textTargetScript("转移会话", ".chat-list, li.chat-item, .el-dialog")).catch(() => "script_failed");
       if (typeof open === "string") return `not_executed:open_button_${open}`;
@@ -2094,14 +2115,23 @@ export class PddPageAdapter implements PlatformAdapter {
         rows = await this.run<TransferRow[] | string>(TRANSFER_ROWS).catch(() => "script_failed");
       }
       if (typeof rows === "string") return `not_executed:${rows}`;
-      const matches = rows.filter((r) => r.cells.some((c) => c.includes(target)));
-      log({ phase: "rows", rows: rows.map((r) => ({ cells: r.cells, button: !!r.button })), matches: matches.length });
+      // 只认第一列（客服名）与用户指定名称完全相同；备注、状态等其他列命中不算。
+      const matches = rows.filter((r) => r.cells[0] === target);
+      log({ phase: "rows", rows: rows.length, matches: matches.length });
       if (matches.length !== 1 || !matches[0].button) return `not_executed:target_${matches.length ? "not_unique_or_no_button" : "missing"}`;
       const row = matches[0];
+      if (!(await same())) return "not_executed:conversation_mismatch";
       if ((await this.nativeClick(row.button!, page, epoch)).status !== "dispatched") return "not_executed:row_click_failed";
       await sleep(500);
+      // 点行后重读：目标行须仍唯一且仍在刚才点的位置（表格重排/身份变化时可能点到了别人）。
+      const again = await this.run<TransferRow[] | string>(TRANSFER_ROWS).catch(() => "script_failed");
+      const still = typeof again === "string" ? [] : again.filter((r) => r.cells[0] === target);
+      if (still.length !== 1 || !still[0].button || Math.abs(still[0].button.x - row.button!.x) > 2 || Math.abs(still[0].button.y - row.button!.y) > 2) {
+        log({ phase: "not_executed", reason: "target_moved" });
+        return "not_executed:target_moved";
+      }
       const buttons = await this.run<{ text: string; x: number; y: number }[] | string>(popoverButtonsScript(row.button!)).catch(() => "script_failed");
-      log({ phase: "popover", buttons: typeof buttons === "string" ? buttons : buttons.map((b) => b.text) });
+      log({ phase: "popover", buttons: typeof buttons === "string" ? buttons : buttons.length });
       if (typeof buttons === "string") return `not_executed:${buttons}`;
       // 气泡里另有转移原因和“发送”（可能向买家发消息），只认“无原因直接转移”。
       const ok = buttons.filter((b) => b.text === "无原因直接转移");
@@ -2111,15 +2141,15 @@ export class PddPageAdapter implements PlatformAdapter {
         return `inspected:rows=${rows.length},confirm_buttons=${ok.length}`;
       }
       if (ok.length !== 1) return `not_executed:confirm_button_${ok.length ? "not_unique" : "missing"}`;
-      if ((await activeUid()) !== uid || this.watchEpoch !== epoch) return "not_executed:conversation_changed";
-      log({ phase: "attempt", row: row.cells });
+      if (!(await same())) return "not_executed:conversation_mismatch";
+      log({ phase: "attempt" });
       const click = await this.nativeClick(ok[0], page, epoch);
       if (click.status !== "dispatched") {
         log({ phase: click.status, reason: click.reason });
         return `${click.status}:${click.reason}`;
       }
       opened = false;
-      return await this.settleTransfer(uid, page, epoch, log);
+      return await this.settleTransfer(uid, page, epoch, same, allowUnfavorite, log);
     } finally {
       if (opened) {
         await sleep(300);
@@ -2130,20 +2160,30 @@ export class PddPageAdapter implements PlatformAdapter {
   }
 
   /**
-   * 点了转移后判定结果：平台提示“已收藏的会话不可转移”时自动点一次“取消收藏并转移”；
-   * 该会话从会话列表消失记为页面确认；其他失败对话框记为页面失败；都没有记为 unknown。不重试。
+   * 点了转移后观察页面：平台提示“已收藏的会话不可转移”时，allowUnfavorite 才点一次“取消收藏并转移”，
+   * 否则点“暂不转移收藏会话”（保持原状）并返回需确认。会话离开非空列表只记为观察结果，业务上仍是 unknown
+   * （没有平台回执与目标关联）；其他失败对话框记为页面失败。不重试。
    */
-  private async settleTransfer(uid: string, page: PlatformPage, epoch: number, log: (rec: Record<string, unknown>) => void): Promise<string> {
+  private async settleTransfer(uid: string, page: PlatformPage, epoch: number, same: () => Promise<boolean>, allowUnfavorite: boolean, log: (rec: Record<string, unknown>) => void): Promise<string> {
     let unfavorited = false;
     for (let i = 0; i < 30; i++) {
       await sleep(300);
-      const fail = await this.run<{ text: string; unfav: Point | null } | null>(TRANSFER_FAIL_DIALOG).catch(() => null);
+      const fail = await this.run<{ text: string; unfav: Point | null; keep: Point | null } | null>(TRANSFER_FAIL_DIALOG).catch(() => null);
       if (fail && !unfavorited) {
         if (!fail.text.includes("已收藏") || !fail.unfav) {
-          log({ phase: "page_failed", text: fail.text });
-          return `page_failed:${fail.text}`;
+          log({ phase: "page_failed", kind: "other" });
+          return "page_failed:other";
         }
-        log({ phase: "unfavorite_and_transfer", text: fail.text });
+        if (!allowUnfavorite) {
+          log({ phase: "needs_confirmation", kind: "favorited" });
+          if (fail.keep && (await same())) await this.nativeClick(fail.keep, page, epoch);
+          return "needs_confirmation:unfavorite";
+        }
+        if (!(await same())) {
+          log({ phase: "unknown", reason: "conversation_mismatch_before_unfavorite" });
+          return "unknown:conversation_mismatch_before_unfavorite";
+        }
+        log({ phase: "unfavorite_and_transfer" });
         const click = await this.nativeClick(fail.unfav, page, epoch);
         if (click.status !== "dispatched") {
           log({ phase: click.status, reason: click.reason });
@@ -2153,13 +2193,14 @@ export class PddPageAdapter implements PlatformAdapter {
         continue;
       }
       const scan = await this.run<Scan>(SCAN).catch(() => null);
-      if (!fail && scan && !scan.items.some((it) => buyerFromListKey(it.key) === uid)) {
-        log({ phase: "page_confirmed", reason: "conversation_left_list", unfavorited });
-        return `page_confirmed:conversation_left_list${unfavorited ? ",unfavorited" : ""}`;
+      // 列表为空可能是筛选/刷新/加载中，不算观察到离开。
+      if (!fail && scan && scan.items.length > 0 && !scan.items.some((it) => buyerFromListKey(it.key) === uid)) {
+        log({ phase: "unknown", observed: "left_list", unfavorited });
+        return `unknown:left_list_observed${unfavorited ? ",unfavorited" : ""}`;
       }
     }
-    log({ phase: "unknown", reason: "conversation_still_listed", unfavorited });
-    return `unknown:conversation_still_listed${unfavorited ? ",unfavorited" : ""}`;
+    log({ phase: "unknown", observed: "none", unfavorited });
+    return `unknown:not_observed${unfavorited ? ",unfavorited" : ""}`;
   }
 
   private async clearInput(text: string) {

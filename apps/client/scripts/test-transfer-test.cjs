@@ -4,7 +4,9 @@
  *
  * 覆盖：inspect 只打开对话框和确认气泡、点取消并关闭，不点确认；execute 只点唯一匹配行的确认，点击前写尝试记录；
  * 目标不唯一/缺失时不点确认；无已打开对话、非诊断模式不执行；会话列表每行自带的“转移会话”按钮不点；
- * 已收藏会话被平台拒绝时自动点一次“取消收藏并转移”；会话离开列表记为页面确认。
+ * 已收藏会话被平台拒绝时，请求允许才点一次“取消收藏并转移”，默认点“暂不转移”并返回需确认；
+ * 会话离开非空列表只记观察（业务 unknown），临时空列表不算；日志不含客服名；
+ * 反例：备注列含目标名、包含关系、同名、点行后重排、取令牌/打开对话框/点行后切换对话，均不确认。
  */
 const { app, BrowserWindow } = require("electron");
 const fs = require("node:fs");
@@ -29,25 +31,29 @@ const page = (active, agents, favorited = false) => `<!doctype html><meta charse
   <div id="fail" style="display:none;position:absolute;left:150px;top:150px;width:500px;background:#fff">
     <div><span>转移失败</span></div>
     <div><p>转移会话失败，已收藏的会话不可转移</p><p>点击【取消收藏并转移】可完成转移</p></div>
-    <div><span id="unfav" style="padding:4px">取消收藏并转移</span><span id="keep" onclick="clicks.push('keep')" style="padding:4px">暂不转移收藏会话</span></div>
+    <div><span id="unfav" style="padding:4px">取消收藏并转移</span><span id="keep" onclick="clicks.push('keep'); document.getElementById('fail').style.display = 'none'" style="padding:4px">暂不转移收藏会话</span></div>
   </div>
   <script>
     window.clicks = [];
     let pending = null;
     const agents = ${JSON.stringify(agents)};
     const rows = document.getElementById("rows");
-    agents.forEach((name, i) => {
+    agents.forEach((agent, i) => {
+      const [name, note] = Array.isArray(agent) ? agent : [agent, "在线"];
       const tr = document.createElement("tr");
       tr.className = "el-table__row";
-      tr.innerHTML = "<td>" + name + "</td><td>在线</td><td><div class='cell'><span><div style='width:40px;height:20px'>转移</div></span></div></td>";
+      tr.innerHTML = "<td>" + name + "</td><td>" + note + "</td><td><div class='cell'><span><div style='width:40px;height:20px'>转移</div></span></div></td>";
       tr.querySelector("td:last-child div div").addEventListener("click", (e) => {
         clicks.push("row:" + name); pending = name;
+        if (window.switchOnRow) switchConv();
+        if (window.reorderOnRow) [...rows.children].reverse().forEach((r) => rows.appendChild(r));
         const r = e.target.getBoundingClientRect(), p = document.getElementById("pop");
         p.style.left = (r.left - 60) + "px"; p.style.top = (r.bottom + 4) + "px"; p.style.display = "block";
       });
       rows.appendChild(tr);
     });
-    document.getElementById("open").addEventListener("click", () => { clicks.push("open"); document.getElementById("dlg").style.display = "block"; });
+    window.switchConv = () => { const [a, b] = document.querySelectorAll(".chat-item-box"); a.classList.remove("active"); b.classList.add("active"); };
+    document.getElementById("open").addEventListener("click", () => { clicks.push("open"); document.getElementById("dlg").style.display = "block"; if (window.switchOnOpen) switchConv(); });
     document.getElementById("x").addEventListener("click", () => { clicks.push("close"); document.getElementById("dlg").style.display = "none"; document.getElementById("pop").style.display = "none"; });
     document.getElementById("cancel").addEventListener("click", () => { clicks.push("cancel"); document.getElementById("pop").style.display = "none"; });
     const leave = () => document.querySelector('[data-random="9001-x"]').closest("li").remove();
@@ -55,6 +61,7 @@ const page = (active, agents, favorited = false) => `<!doctype html><meta charse
       clicks.push("ok:" + pending);
       document.getElementById("pop").style.display = "none"; document.getElementById("dlg").style.display = "none";
       if (${JSON.stringify(favorited)}) document.getElementById("fail").style.display = "block";
+      else if (window.emptyOnOk) document.querySelectorAll(".chat-list li").forEach((li) => li.remove());
       else leave();
     });
     document.getElementById("unfav").addEventListener("click", () => { clicks.push("unfav"); document.getElementById("fail").style.display = "none"; leave(); });
@@ -65,7 +72,7 @@ const check = (name, ok, detail) => results.push({ name, ok: !!ok, detail });
 const watchdog = setTimeout(() => {
   console.log(JSON.stringify({ ok: false, error: "timeout", results }));
   app.exit(2);
-}, 60_000);
+}, 180_000);
 
 async function adapterFor(win, html, probe = true) {
   await win.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
@@ -76,7 +83,8 @@ async function adapterFor(win, html, probe = true) {
   fs.mkdirSync(path.join(temp, "diag", "fixture"), { recursive: true });
   adapter.window = pg;
   adapter.tracker = { status: () => ({ logged_in: true }), end() {} };
-  return { wc, adapter };
+  const conv = probe ? await adapter.activeConversationToken() : "0123456789abcdef";
+  return { wc, adapter, conv };
 }
 
 const logFile = path.join(temp, "diag", "fixture", "transfer-test.jsonl");
@@ -86,53 +94,73 @@ app.whenReady().then(async () => {
   try {
     const win = new BrowserWindow({ show: false, width: 900, height: 600, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
     win.showInactive();
+    const T = "虚构主账号";
+    const run = async (html, { confirm = true, allow = false, before, conv: override, probe = true } = {}) => {
+      fs.rmSync(logFile, { force: true });
+      const { wc, adapter, conv } = await adapterFor(win, html, probe);
+      if (before) await wc.executeJavaScript(before);
+      const r = await adapter.transferTest(T, confirm, override ?? conv, allow);
+      return { r, clicks: await wc.executeJavaScript("window.clicks.slice()"), log: readLog() };
+    };
+    const noOk = (clicks) => !clicks.some((c) => c.startsWith("ok") || c === "unfav");
     {
-      const { wc, adapter } = await adapterFor(win, page(true, ["虚构客服A", "虚构主账号"]));
-      const r = await adapter.transferTest("主账号", false);
-      const clicks = await wc.executeJavaScript("window.clicks.slice()");
-      check("inspect：打开、点行、取消、关闭，不点确认", r.startsWith("inspected:rows=2,confirm_buttons=1") && JSON.stringify(clicks) === '["open","row:虚构主账号","cancel","close"]', { r, clicks });
-      check("inspect：不写尝试记录", !readLog().some((l) => l.phase === "attempt"), readLog());
+      const { r, clicks, log } = await run(page(true, ["虚构客服A", T]), { confirm: false });
+      check("inspect：打开、点行、取消、关闭，不点确认", r.startsWith("inspected:rows=2,confirm_buttons=1") && JSON.stringify(clicks) === `["open","row:${T}","cancel","close"]`, { r, clicks });
+      check("inspect：不写尝试记录；日志不含客服名", !log.some((l) => l.phase === "attempt") && !JSON.stringify(log).includes("虚构客服A"), log);
     }
     {
-      fs.rmSync(logFile, { force: true });
-      const { wc, adapter } = await adapterFor(win, page(true, ["虚构客服A", "虚构主账号"]));
-      const r = await adapter.transferTest("主账号", true);
-      const clicks = await wc.executeJavaScript("window.clicks.slice()");
-      const log = readLog();
-      check("execute：只确认唯一匹配行，会话离开列表记为页面确认", r === "page_confirmed:conversation_left_list" && JSON.stringify(clicks) === '["open","row:虚构主账号","ok:虚构主账号"]', { r, clicks });
+      const { r, clicks, log } = await run(page(true, ["虚构客服A", T]));
+      check("execute：只确认名称列精确匹配的行；离开列表只记观察，业务 unknown", r === "unknown:left_list_observed" && JSON.stringify(clicks) === `["open","row:${T}","ok:${T}"]`, { r, clicks });
       const ai = log.findIndex((l) => l.phase === "attempt");
-      check("execute：确认前写尝试记录", ai >= 0 && log[ai + 1]?.phase === "page_confirmed", log);
+      check("execute：确认前写尝试记录，日志不含客服名", ai >= 0 && log[ai + 1]?.observed === "left_list" && !JSON.stringify(log).includes(T), log);
     }
     {
-      fs.rmSync(logFile, { force: true });
-      const { wc, adapter } = await adapterFor(win, page(true, ["虚构主账号"], true));
-      const r = await adapter.transferTest("主账号", true);
-      const clicks = await wc.executeJavaScript("window.clicks.slice()");
-      check("已收藏：自动点一次“取消收藏并转移”，不点“暂不转移”", r === "page_confirmed:conversation_left_list,unfavorited" && JSON.stringify(clicks) === '["open","row:虚构主账号","ok:虚构主账号","unfav"]', { r, clicks });
-      check("已收藏：记录取消收藏步骤", readLog().some((l) => l.phase === "unfavorite_and_transfer"), readLog());
+      const { r, clicks, log } = await run(page(true, [T], true), { allow: true });
+      check("已收藏且请求允许取消收藏：点一次“取消收藏并转移”", r === "unknown:left_list_observed,unfavorited" && JSON.stringify(clicks) === `["open","row:${T}","ok:${T}","unfav"]`, { r, clicks });
+      check("已收藏：记录取消收藏步骤", log.some((l) => l.phase === "unfavorite_and_transfer"), log);
     }
     {
-      const { wc, adapter } = await adapterFor(win, page(true, ["虚构主账号1", "虚构主账号2"]));
-      const r = await adapter.transferTest("主账号", true);
-      const clicks = await wc.executeJavaScript("window.clicks.slice()");
-      check("目标不唯一：不点行、不确认，关闭对话框", r.startsWith("not_executed:target_") && JSON.stringify(clicks) === '["open","close"]', { r, clicks });
+      const { r, clicks } = await run(page(true, [T], true));
+      check("已收藏、默认不允许：不取消收藏，点“暂不转移”，返回需确认", r === "needs_confirmation:unfavorite" && JSON.stringify(clicks) === `["open","row:${T}","ok:${T}","keep"]`, { r, clicks });
     }
     {
-      const { wc, adapter } = await adapterFor(win, page(true, ["虚构客服A"]));
-      const r = await adapter.transferTest("主账号", true);
-      const clicks = await wc.executeJavaScript("window.clicks.slice()");
-      check("目标缺失：不确认", r === "not_executed:target_missing" && !clicks.some((c) => c.startsWith("ok")), { r, clicks });
+      const { r, clicks } = await run(page(true, [T]), { before: "window.emptyOnOk = true" });
+      check("确认后列表临时为空：不算观察到离开", r === "unknown:not_observed", { r, clicks });
     }
     {
-      const { wc, adapter } = await adapterFor(win, page(false, ["虚构主账号"]));
-      const r = await adapter.transferTest("主账号", true);
-      const clicks = await wc.executeJavaScript("window.clicks.slice()");
-      check("无已打开对话：不执行", r === "not_executed:no_active_conversation" && clicks.length === 0, { r, clicks });
+      const { r, clicks } = await run(page(true, [["虚构客服乙", "备注：" + T + "咨询转交"]]));
+      check("备注列含目标名：不算命中", r === "not_executed:target_missing" && JSON.stringify(clicks) === '["open","close"]', { r, clicks });
     }
     {
-      const { wc, adapter } = await adapterFor(win, page(true, ["虚构主账号"]), false);
-      const r = await adapter.transferTest("主账号", true);
-      const clicks = await wc.executeJavaScript("window.clicks.slice()");
+      const { r, clicks } = await run(page(true, [T + "2", "副" + T]));
+      check("名称只是包含关系：不算命中", r === "not_executed:target_missing" && noOk(clicks), { r, clicks });
+    }
+    {
+      const { r, clicks } = await run(page(true, [T, T]));
+      check("同名两行：不点行、不确认", r.startsWith("not_executed:target_not_unique") && JSON.stringify(clicks) === '["open","close"]', { r, clicks });
+    }
+    {
+      const { r, clicks } = await run(page(true, ["虚构客服A", T]), { before: "window.reorderOnRow = true" });
+      check("点行后表格重排：不确认", r === "not_executed:target_moved" && noOk(clicks), { r, clicks });
+    }
+    {
+      const { r, clicks } = await run(page(false, [T]), { conv: "0123456789abcdef" });
+      check("无已打开对话：不执行", r === "not_executed:conversation_mismatch" && clicks.length === 0, { r, clicks });
+    }
+    {
+      const { r, clicks } = await run(page(true, [T]), { before: "switchConv()" });
+      check("取令牌后切换对话：零点击", r === "not_executed:conversation_mismatch" && clicks.length === 0, { r, clicks });
+    }
+    {
+      const { r, clicks } = await run(page(true, [T]), { before: "window.switchOnOpen = true" });
+      check("打开对话框后切换对话：不点行、不确认", r === "not_executed:conversation_mismatch" && JSON.stringify(clicks) === '["open","close"]', { r, clicks });
+    }
+    {
+      const { r, clicks } = await run(page(true, [T]), { before: "window.switchOnRow = true" });
+      check("点行后、确认前切换对话：不确认", r === "not_executed:conversation_mismatch" && noOk(clicks), { r, clicks });
+    }
+    {
+      const { r, clicks } = await run(page(true, [T]), { probe: false });
       check("非诊断模式：不执行", r === "not_executed:probe_mode_required" && clicks.length === 0, { r, clicks });
     }
     win.destroy();

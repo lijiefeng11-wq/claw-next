@@ -16,7 +16,8 @@ import { APP_WEB_PREFERENCES } from "../core/security.js";
 import { bindShopIdentity } from "../core/shopIdentity.js";
 import { shopView } from "../core/view.js";
 import { installFileLogging } from "./logger.js";
-import { PddPageAdapter, type StarColor } from "./pddAdapter.js";
+import { PddPageAdapter } from "./pddAdapter.js";
+import { parseDevAction } from "../core/devAction.js";
 import { SecretStore } from "./secrets.js";
 import { ARG_LAUNCHED_BY_AGENT, ARG_NO_HANDOVER, ARG_SUPERVISED, startupDecision, userDataFromArgv } from "../core/startup.js";
 import { StartupManager } from "./startupManager.js";
@@ -563,38 +564,37 @@ function devClickProbeWatcher() {
   }, 2000);
 }
 
-/** 诊断模式人工测试：在 diag/<店铺>/star-test.request 写入颜色（red/orange/blue/green，空文件为 red），对当前对话执行一次收藏颜色设置。 */
-function devStarTestWatcher() {
+/**
+ * 诊断模式人工测试（只在 CLAW_NEXT_PDD_PROBE=1 时启动）：
+ * - diag/<店铺>/conversation.request：取当前打开对话的令牌，写入 conversation.json，供用户确认目标对话；
+ * - diag/<店铺>/action.request：JSON 请求（一次性 id、有效期、对话令牌、动作），校验见 parseDevAction；
+ *   id 先记入 action-consumed.jsonl 再执行，同一 id 不会执行第二次。
+ */
+function devActionWatcher() {
   setInterval(() => {
     for (const [shopId, slot] of controller.slotsForDev()) {
-      const flag = path.join(userData, "diag", shopId, "star-test.request");
-      if (!fs.existsSync(flag)) continue;
-      const raw = fs.readFileSync(flag, "utf8").trim() || "red";
-      fs.rmSync(flag, { force: true });
       if (!(slot.adapter instanceof PddPageAdapter)) continue;
-      if (!["red", "orange", "blue", "green"].includes(raw)) {
-        console.log(`[${shopId}] star-test not_executed:bad_color`);
+      const adapter = slot.adapter;
+      const dir = path.join(userData, "diag", shopId);
+      const convFlag = path.join(dir, "conversation.request");
+      if (fs.existsSync(convFlag)) {
+        fs.rmSync(convFlag, { force: true });
+        void adapter.activeConversationToken().then((conv) => fs.writeFileSync(path.join(dir, "conversation.json"), JSON.stringify({ at: new Date().toISOString(), conv }) + "\n", { mode: 0o600 }));
+      }
+      const flag = path.join(dir, "action.request");
+      if (!fs.existsSync(flag)) continue;
+      const raw = fs.readFileSync(flag, "utf8");
+      fs.rmSync(flag, { force: true });
+      const consumedFile = path.join(dir, "action-consumed.jsonl");
+      const consumed = new Set(fs.existsSync(consumedFile) ? fs.readFileSync(consumedFile, "utf8").split("\n").filter(Boolean).map((l) => { try { return String(JSON.parse(l).id); } catch { return ""; } }) : []);
+      const req = parseDevAction(raw, Date.now(), consumed);
+      if (typeof req === "string") {
+        console.log(`[${shopId}] dev-action not_executed:${req}`);
         continue;
       }
-      void slot.adapter.starTest(raw as StarColor).then((r) => console.log(`[${shopId}] star-test ${r}`));
-    }
-  }, 2000);
-}
-
-/** 诊断模式人工测试：在 diag/<店铺>/transfer-test.request 写入 “inspect 客服名” 或 “execute 客服名”，对当前对话执行一次转移测试。 */
-function devTransferTestWatcher() {
-  setInterval(() => {
-    for (const [shopId, slot] of controller.slotsForDev()) {
-      const flag = path.join(userData, "diag", shopId, "transfer-test.request");
-      if (!fs.existsSync(flag)) continue;
-      const m = /^(inspect|execute)\s+(.+)$/.exec(fs.readFileSync(flag, "utf8").trim());
-      fs.rmSync(flag, { force: true });
-      if (!(slot.adapter instanceof PddPageAdapter)) continue;
-      if (!m) {
-        console.log(`[${shopId}] transfer-test not_executed:bad_request`);
-        continue;
-      }
-      void slot.adapter.transferTest(m[2], m[1] === "execute").then((r) => console.log(`[${shopId}] transfer-test ${r}`));
+      fs.appendFileSync(consumedFile, JSON.stringify({ at: new Date().toISOString(), id: req.id, action: req.action }) + "\n", { mode: 0o600 });
+      const run = req.action === "star" ? adapter.starTest(req.color, req.conv) : adapter.transferTest(req.target, req.action === "transfer", req.conv, req.allowUnfavorite);
+      void run.then((r) => console.log(`[${shopId}] dev-action ${req.action} ${r}`));
     }
   }, 2000);
 }
@@ -702,10 +702,7 @@ app.whenReady().then(async () => {
     await devAutoConnect(process.env.CLAW_NEXT_DEV_BACKEND_CONFIG);
     devClickProbeWatcher();
   }
-  if (!SMOKE && process.env.CLAW_NEXT_PDD_PROBE === "1") {
-    devStarTestWatcher();
-    devTransferTestWatcher();
-  }
+  if (!SMOKE && process.env.CLAW_NEXT_PDD_PROBE === "1") devActionWatcher();
   if (SMOKE) {
     try {
       await smoke();
