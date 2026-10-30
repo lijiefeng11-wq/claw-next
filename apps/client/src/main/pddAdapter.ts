@@ -1,4 +1,5 @@
 import { session } from "electron";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { AdapterEvent, HistoryLoad, HistoryResult, ImageFetchResult, PlatformAdapter, PlatformNav, PlatformNavAction, PlatformStatus, SendItemRequest, SendRequest, SendResult } from "../core/adapter.js";
@@ -585,6 +586,169 @@ const SCAN = `(() => {
 })()`;
 
 type Scan = { items: { key: string; unread: boolean; active: boolean }[]; freshBuyer: boolean };
+
+export type StarColor = "red" | "orange" | "blue" | "green";
+type StarOption = { color: StarColor | "other"; checked: boolean; x: number; y: number };
+type StarState = { star: { x: number; y: number; active: boolean }; options: StarOption[] };
+
+/** 对话工具栏的“收藏该用户”星标：返回中心坐标与是否已收藏（active）。 */
+const STAR_ICON = `(() => {
+  const els = [...document.querySelectorAll('[title="收藏该用户"]')].filter((e) => e.getClientRects().length > 0);
+  if (els.length !== 1) return els.length ? "star_not_unique" : "star_missing";
+  const icon = els[0].matches("i") ? els[0] : els[0].querySelector("i") ?? els[0];
+  const r = icon.getBoundingClientRect();
+  return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), active: icon.classList.contains("active") || els[0].classList.contains("active") };
+})()`;
+
+/**
+ * 星标悬停后弹出的颜色列表，按色点背景色识别颜色，带 chat-icon-check 的为当前颜色。
+ * 浮层归属只认触发控件关联：星标元素（或其 4 层内祖先/后代）的 aria-describedby 指向的 el-popover id，
+ * 且该浮层可见、唯一、含至少三种已知颜色；位置相近、颜色相同的无关菜单不算。证明不了归属就不执行。
+ * 传入 check 时改为点击前核对：该坐标处的元素须属于这个浮层中颜色为 check.color 的列表项，返回 "ok" 或原因。
+ * 不传 check 时返回同一页面快照：当前对话 key（唯一 active 项，否则 null）、星标是否已收藏、各颜色项。
+ */
+function starOptionsScript(check?: { x: number; y: number; color: StarColor }): string {
+  return `(() => {
+    const stars = [...document.querySelectorAll('[title="收藏该用户"]')].filter((e) => e.getClientRects().length > 0);
+    if (stars.length !== 1) return stars.length ? "star_not_unique" : "star_missing";
+    const linked = new Set();
+    const addIds = (e) => (e.getAttribute("aria-describedby") || "").split(/\\s+/).filter(Boolean).forEach((id) => linked.add(id));
+    [stars[0], ...stars[0].querySelectorAll("[aria-describedby]")].forEach(addIds);
+    for (let e = stars[0].parentElement, i = 0; e && i < 4; e = e.parentElement, i++) addIds(e);
+    const colorOf = (li) => {
+      for (const el of [li, ...li.querySelectorAll("*")]) {
+        const m = /rgba?\\((\\d+), (\\d+), (\\d+)(?:, ([\\d.]+))?\\)/.exec(getComputedStyle(el).backgroundColor);
+        if (!m || m[4] === "0") continue;
+        const [r, g, b] = [+m[1], +m[2], +m[3]];
+        if (r > 200 && g > 200 && b > 200) continue;
+        if (r > 200 && g < 130 && b < 130) return "red";
+        if (r > 200 && g >= 130 && b < 120) return "orange";
+        if (b > 170 && r < 160) return "blue";
+        if (g > 140 && r < 160 && b < 160) return "green";
+      }
+      return "other";
+    };
+    const known = (p) => new Set([...p.querySelectorAll("ul > li")].map(colorOf).filter((c) => c !== "other")).size;
+    const pops = [...document.querySelectorAll("div.el-popover")].filter((p) => p.id && linked.has(p.id) && p.getClientRects().length > 0 && getComputedStyle(p).visibility !== "hidden" && known(p) >= 3);
+    if (pops.length !== 1) return pops.length ? "popover_not_unique" : linked.size ? "popover_missing" : "popover_unlinked";
+    const check = ${JSON.stringify(check ?? null)};
+    if (check) {
+      const hit = document.elementFromPoint(check.x, check.y);
+      const li = hit && hit.closest("li");
+      if (!li || !pops[0].contains(li)) return "target_not_in_star_popover";
+      return colorOf(li) === check.color ? "ok" : "target_color_mismatch";
+    }
+    const acts = [...document.querySelectorAll(${JSON.stringify(ITEM)})].filter((e) => e.classList.contains("active"));
+    const icon = stars[0].matches("i") ? stars[0] : stars[0].querySelector("i") ?? stars[0];
+    const options = [...pops[0].querySelectorAll("ul > li")].map((li) => {
+      const r = li.getBoundingClientRect();
+      const check = li.querySelector("i.chat-icon-check");
+      return { color: colorOf(li), checked: !!check && check.getClientRects().length > 0 && getComputedStyle(check).visibility !== "hidden", x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    });
+    return { conv: acts.length === 1 ? acts[0].getAttribute("data-random") : null, active: icon.classList.contains("active") || stars[0].classList.contains("active"), options };
+  })()`;
+}
+
+type Point = { x: number; y: number };
+type TransferRow = { cells: string[]; button: Point | null };
+
+/** 页面内可见、文字恰为 text 的最深层元素中心坐标，排除位于 exclude 内的元素。不唯一或缺失时返回原因。 */
+function textTargetScript(text: string, exclude: string): string {
+  return `(() => {
+    const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
+    const hits = [...document.body.querySelectorAll("*")].filter((e) => vis(e) && !e.closest(${JSON.stringify(exclude)}) && (e.innerText ?? "").trim() === ${JSON.stringify(text)} && ![...e.children].some((c) => (c.innerText ?? "").trim() === ${JSON.stringify(text)}));
+    if (hits.length !== 1) return hits.length ? "not_unique" : "missing";
+    const r = hits[0].getBoundingClientRect();
+    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+  })()`;
+}
+
+/** 可见的“转移会话”对话框中的客服行：各列文字与该行“转移”按钮坐标。 */
+const TRANSFER_ROWS = `(() => {
+  const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
+  const dlg = [...document.querySelectorAll("div.el-dialog")].filter(vis).find((d) => (d.querySelector(".el-dialog__title")?.innerText ?? "").trim() === "转移会话");
+  if (!dlg) return "dialog_missing";
+  return [...dlg.querySelectorAll("tr.el-table__row")].filter(vis).map((tr) => {
+    const cells = [...tr.querySelectorAll("td")].map((td) => (td.innerText ?? "").trim().slice(0, 40));
+    const btn = [...tr.querySelectorAll("*")].filter((e) => vis(e) && (e.innerText ?? "").trim() === "转移" && ![...e.children].some((c) => (c.innerText ?? "").trim() === "转移"));
+    const r = btn.length === 1 ? btn[0].getBoundingClientRect() : null;
+    return { cells, button: r ? { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) } : null };
+  });
+})()`;
+
+/** “转移会话”对话框里名称列恰为 target 的唯一行及其唯一“转移”按钮（页面内脚本片段，供下面两个脚本共用）。 */
+function transferTargetSnippet(target: string): string {
+  return `
+    const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
+    const t = (e) => (e.innerText ?? "").trim();
+    const dlg = [...document.querySelectorAll("div.el-dialog")].filter(vis).find((d) => t(d.querySelector(".el-dialog__title") ?? d) === "转移会话");
+    if (!dlg) return "dialog_missing";
+    const trs = [...dlg.querySelectorAll("tr.el-table__row")].filter((tr) => t(tr.querySelector("td") ?? tr).slice(0, 40) === ${JSON.stringify(target)});
+    if (trs.length !== 1) return trs.length ? "target_not_unique" : "target_missing";
+    const btns = [...trs[0].querySelectorAll("*")].filter((e) => vis(e) && t(e) === "转移" && ![...e.children].some((c) => t(c) === "转移"));
+    if (btns.length !== 1) return "target_button_not_unique";
+    const btn = btns[0];`;
+}
+
+/** 目标行的“转移”按钮：滚动到可见区域后取中心坐标，并核对该点确实落在这个按钮上（行在表格滚动区外、被遮挡都不点）。 */
+function transferTargetScript(target: string): string {
+  return `(() => {${transferTargetSnippet(target)}
+    btn.scrollIntoView({ block: "nearest" });
+    const r = btn.getBoundingClientRect();
+    const x = Math.round(r.left + r.width / 2), y = Math.round(r.top + r.height / 2);
+    const hit = document.elementFromPoint(x, y);
+    if (!hit || !(btn === hit || btn.contains(hit))) return "target_button_covered";
+    return { x, y };
+  })()`;
+}
+
+/**
+ * 目标行“转移”按钮弹出的确认气泡中的可点击项（最深层的短文字元素）文字与坐标。
+ * 气泡归属只认该按钮（或其在行内的祖先/后代）aria-describedby 指向的 el-popover id；别的行的气泡、位置相近都不算。
+ * 传入 check 时改为点击前核对：该坐标命中的元素须在这个关联气泡里、且属于其中唯一一个文字为 check.text 的控件，返回 "ok" 或原因。
+ */
+function popoverButtonsScript(target: string, check?: { x: number; y: number; text: string }): string {
+  return `(() => {${transferTargetSnippet(target)}
+    const linked = new Set();
+    const addIds = (e) => (e.getAttribute("aria-describedby") || "").split(/\\s+/).filter(Boolean).forEach((id) => linked.add(id));
+    [btn, ...btn.querySelectorAll("[aria-describedby]")].forEach(addIds);
+    for (let e = btn.parentElement; e && e !== trs[0].parentElement; e = e.parentElement) addIds(e);
+    if (!linked.size) return "popover_unlinked";
+    const pops = [...document.querySelectorAll("div.el-popover")].filter((p) => p.id && linked.has(p.id) && vis(p));
+    if (pops.length !== 1) return pops.length ? "popover_not_unique" : "popover_missing";
+    const leaves = [...pops[0].querySelectorAll("*")].filter((e) => vis(e) && t(e) && t(e).length <= 8 && ![...e.children].some((c) => t(c) === t(e)));
+    const check = ${JSON.stringify(check ?? null)};
+    if (check) {
+      const own = leaves.filter((e) => t(e) === check.text);
+      if (own.length !== 1) return "confirm_not_unique";
+      const hit = document.elementFromPoint(check.x, check.y);
+      return hit && pops[0].contains(hit) && (own[0] === hit || own[0].contains(hit)) ? "ok" : "confirm_covered";
+    }
+    return leaves.map((b) => { const r = b.getBoundingClientRect(); return { text: t(b), x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; });
+  })()`;
+}
+
+/** 平台“转移失败”对话框：返回说明文字（只在本进程内判断类别，不写日志）与两个按钮坐标（唯一时）；没有该对话框返回 null。 */
+const TRANSFER_FAIL_DIALOG = `(() => {
+  const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
+  const t = (e) => (e.innerText ?? "").trim();
+  const leaf = (root, s) => [...root.querySelectorAll("*")].filter((e) => vis(e) && t(e) === s && ![...e.children].some((c) => t(c) === s));
+  const title = leaf(document.body, "转移失败");
+  if (!title.length) return null;
+  let box = title[0];
+  for (let i = 0; i < 8 && box.parentElement && !/取消收藏并转移|不可转移|失败./.test(t(box).replace("转移失败", "")); i++) box = box.parentElement;
+  const at = (s) => { const b = leaf(box, s); if (b.length !== 1) return null; const r = b[0].getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; };
+  return { text: t(box).replace(/\\s+/g, " ").slice(0, 80), unfav: at("取消收藏并转移"), keep: at("暂不转移收藏会话") };
+})()`;
+
+const TRANSFER_DIALOG_CLOSE = `(() => {
+  const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
+  const dlg = [...document.querySelectorAll("div.el-dialog")].filter(vis).find((d) => (d.querySelector(".el-dialog__title")?.innerText ?? "").trim() === "转移会话");
+  const b = dlg?.querySelector(".el-dialog__headerbtn");
+  if (!b || !vis(b)) return "missing";
+  const r = b.getBoundingClientRect();
+  return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+})()`;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** 自动清理平台引导弹窗的间隔。 */
@@ -1896,6 +2060,237 @@ export class PddPageAdapter implements PlatformAdapter {
       this.outgoing = null;
       this.sending = false;
     }
+  }
+
+  /**
+   * 诊断模式下的人工触发测试：在当前已打开的对话上把“收藏该用户”设为指定颜色（只点颜色项，不点星标本身，避免误取消）。
+   * 点击前写本地尝试记录；结果只以页面状态判定（星标 active 且该颜色带勾），无平台回执；不重试。
+   */
+  /** 诊断测试用的 SCAN：SCAN 会把最后一条消息标为已见，新买家消息标记须交回 watch()，否则会漏掉 reload。 */
+  private async scanKeepingFresh(): Promise<Scan | null> {
+    const scan = await this.run<Scan>(SCAN).catch(() => null);
+    if (scan?.freshBuyer) this.pendingFreshBuyer = true;
+    return scan;
+  }
+
+  /** 当前打开对话的绑定令牌：页面代次＋列表项键的摘要（不含可读身份）；没有唯一打开的对话返回 null。 */
+  private async activeConvToken(): Promise<string | null> {
+    const scan = await this.scanKeepingFresh();
+    const active = scan?.items.filter((i) => i.active) ?? [];
+    if (active.length !== 1) return null;
+    return this.convTokenFor(active[0].key);
+  }
+
+  private convTokenFor(key: string): string {
+    return crypto.createHash("sha256").update(`${this.watchEpoch}|${key}`).digest("hex").slice(0, 16);
+  }
+
+  /** 诊断模式：供人工测试在用户确认时取当前对话令牌，之后的动作请求须携带它。 */
+  async activeConversationToken(): Promise<string | null> {
+    return this.probeFile ? this.activeConvToken() : null;
+  }
+
+  /** 每次点击前的核对：对话须仍是 conv 指定的那个，且请求未过 exp；通过返回 null，否则返回原因。 */
+  private async actionGate(epoch: number, conv: string, exp: number): Promise<string | null> {
+    if (this.watchEpoch !== epoch || conv === null || (await this.activeConvToken()) !== conv) return "conversation_mismatch";
+    return Date.now() > exp ? "expired" : null;
+  }
+
+  async starTest(color: StarColor, conv: string, exp: number): Promise<string> {
+    if (!this.probeFile) return "not_executed:probe_mode_required";
+    if (!this.window || this.window.isDestroyed() || !this.tracker.status(true).logged_in) return "not_executed:not_ready";
+    if (this.sending || this.outgoing || this.popupSweep) return "not_executed:busy";
+    const page = this.window, epoch = this.watchEpoch;
+    const log = (rec: Record<string, unknown>) => fs.appendFileSync(path.join(path.dirname(this.probeFile!), "star-test.jsonl"), JSON.stringify({ at: new Date().toISOString(), color, ...rec }) + "\n", { mode: 0o600 });
+    const same = async () => this.watchEpoch === epoch && (await this.activeConvToken()) === conv && conv !== null;
+    const gate = () => this.actionGate(epoch, conv, exp);
+    const hover = (pt: { x: number; y: number }) => page.webContents.debugger.sendCommand("Input.dispatchMouseEvent", { type: "mouseMoved", x: pt.x, y: pt.y }).catch(() => undefined);
+    const read = async (): Promise<StarState | string> => {
+      const star = await this.run<{ x: number; y: number; active: boolean } | string>(STAR_ICON).catch(() => "script_failed");
+      if (typeof star === "string") return star;
+      await hover(star);
+      await sleep(500);
+      // 对话身份、星标状态与颜色项须来自同一次页面快照：分两次读时，中途换走又换回会把别的对话的颜色当成本对话的。
+      const snap = await this.run<{ conv: string | null; active: boolean; options: StarOption[] } | string>(starOptionsScript()).catch(() => "script_failed");
+      if (typeof snap === "string") return snap;
+      if (this.watchEpoch !== epoch || snap.conv === null || this.convTokenFor(snap.conv) !== conv) return "conversation_mismatch";
+      return { star: { x: star.x, y: star.y, active: snap.active }, options: snap.options };
+    };
+    this.sending = true;
+    try {
+      let blocked = await gate();
+      if (blocked) return `not_executed:${blocked}`;
+      const before = await read();
+      if (typeof before === "string") return `not_executed:${before}`;
+      const target = before.options.find((o) => o.color === color);
+      if (!target) return `not_executed:color_missing(${before.options.map((o) => o.color).join(",")})`;
+      if (before.star.active && target.checked) return "already";
+      const owned = await this.run<string>(starOptionsScript({ x: target.x, y: target.y, color })).catch(() => "script_failed");
+      if (owned !== "ok") return `not_executed:${owned}`;
+      blocked = await gate();
+      if (blocked) return `not_executed:${blocked}`;
+      log({ phase: "attempt", before: { active: before.star.active, checked: before.options.find((o) => o.checked)?.color ?? null } });
+      const click = await this.nativeClick({ x: target.x, y: target.y }, page, epoch);
+      if (click.status !== "dispatched") {
+        log({ phase: click.status, reason: click.reason });
+        return `${click.status}:${click.reason}`;
+      }
+      for (let i = 0; i < 6; i++) {
+        await sleep(500);
+        if (!(await same())) break;
+        const after = await read();
+        if (after === "conversation_mismatch") break;
+        if (typeof after !== "string" && after.star.active && after.options.find((o) => o.color === color)?.checked) {
+          log({ phase: "confirmed" });
+          return "confirmed";
+        }
+      }
+      log({ phase: "unknown", reason: "page_state_not_confirmed" });
+      return "unknown:page_state_not_confirmed";
+    } finally {
+      await hover({ x: 1, y: 1 });
+      this.sending = false;
+    }
+  }
+
+  /**
+   * 诊断模式下的人工触发测试：把当前对话转移给名称含 target 的唯一客服。
+   * confirm=false 只打开转移对话框和确认气泡、记录内容后关闭，不点确认；confirm=true 才点确认。
+   * 每次点击前核对当前对话仍是 conv 指定的那个，不符则不点。点确认前写本地尝试记录；结果只看页面状态，无平台回执；不重试。
+   * 平台拒绝转移已收藏会话时，只有 allowUnfavorite 才点“取消收藏并转移”，否则返回需确认。
+   */
+  async transferTest(target: string, confirm: boolean, conv: string, exp: number, allowUnfavorite = false): Promise<string> {
+    if (!this.probeFile) return "not_executed:probe_mode_required";
+    if (!this.window || this.window.isDestroyed() || !this.tracker.status(true).logged_in) return "not_executed:not_ready";
+    if (this.sending || this.outgoing || this.popupSweep) return "not_executed:busy";
+    if (!target.trim()) return "not_executed:no_target";
+    const page = this.window, epoch = this.watchEpoch;
+    const log = (rec: Record<string, unknown>) => fs.appendFileSync(path.join(path.dirname(this.probeFile!), "transfer-test.jsonl"), JSON.stringify({ at: new Date().toISOString(), confirm, ...rec }) + "\n", { mode: 0o600 });
+    const same = async () => this.watchEpoch === epoch && (await this.activeConvToken()) === conv && conv !== null;
+    const gate = () => this.actionGate(epoch, conv, exp);
+    const close = async () => {
+      const x = await this.run<Point | string>(TRANSFER_DIALOG_CLOSE).catch(() => "missing");
+      if (typeof x !== "string") await this.nativeClick(x, page, epoch);
+    };
+    this.sending = true;
+    let opened = false;
+    try {
+      let blocked = await gate();
+      if (blocked) return `not_executed:${blocked}`;
+      const active = (await this.scanKeepingFresh())?.items.find((i) => i.active);
+      const uid = active ? buyerFromListKey(active.key) : null;
+      if (!uid) return "not_executed:no_active_conversation";
+      const open = await this.run<Point | string>(textTargetScript("转移会话", ".chat-list, li.chat-item, .el-dialog")).catch(() => "script_failed");
+      if (typeof open === "string") return `not_executed:open_button_${open}`;
+      blocked = await gate();
+      if (blocked) return `not_executed:${blocked}`;
+      if ((await this.nativeClick(open, page, epoch)).status !== "dispatched") return "not_executed:open_click_failed";
+      opened = true;
+      let rows: TransferRow[] | string = "dialog_missing";
+      for (let i = 0; i < 10 && (typeof rows === "string" || !rows.length); i++) {
+        await sleep(300);
+        rows = await this.run<TransferRow[] | string>(TRANSFER_ROWS).catch(() => "script_failed");
+      }
+      if (typeof rows === "string") return `not_executed:${rows}`;
+      // 只认第一列（客服名）与用户指定名称完全相同；备注、状态等其他列命中不算。
+      const matches = rows.filter((r) => r.cells[0] === target);
+      log({ phase: "rows", rows: rows.length, matches: matches.length });
+      if (matches.length !== 1 || !matches[0].button) return `not_executed:target_${matches.length ? "not_unique_or_no_button" : "missing"}`;
+      const btn = await this.run<Point | string>(transferTargetScript(target)).catch(() => "script_failed");
+      if (typeof btn === "string") return `not_executed:${btn}`;
+      blocked = await gate();
+      if (blocked) return `not_executed:${blocked}`;
+      if ((await this.nativeClick(btn, page, epoch)).status !== "dispatched") return "not_executed:row_click_failed";
+      await sleep(500);
+      // 点行后重读：目标行须仍唯一且仍在刚才点的位置（表格重排/身份变化时可能点到了别人）。
+      const again = await this.run<Point | string>(transferTargetScript(target)).catch(() => "script_failed");
+      if (typeof again === "string" || Math.abs(again.x - btn.x) > 2 || Math.abs(again.y - btn.y) > 2) {
+        log({ phase: "not_executed", reason: "target_moved" });
+        return "not_executed:target_moved";
+      }
+      const buttons = await this.run<{ text: string; x: number; y: number }[] | string>(popoverButtonsScript(target)).catch(() => "script_failed");
+      log({ phase: "popover", buttons: typeof buttons === "string" ? buttons : buttons.length });
+      if (typeof buttons === "string") return `not_executed:${buttons}`;
+      // 气泡里另有转移原因和“发送”（可能向买家发消息），只认“无原因直接转移”。
+      const ok = buttons.filter((b) => b.text === "无原因直接转移");
+      if (!confirm) {
+        const cancel = buttons.find((b) => b.text === "取消");
+        if (cancel) await this.nativeClick(cancel, page, epoch);
+        return `inspected:rows=${rows.length},confirm_buttons=${ok.length}`;
+      }
+      if (ok.length !== 1) return `not_executed:confirm_button_${ok.length ? "not_unique" : "missing"}`;
+      // 点确认前在同一次页面核对里确认：命中点属于目标行关联的唯一气泡中那一个“无原因直接转移”控件。
+      const owned = await this.run<string>(popoverButtonsScript(target, { x: ok[0].x, y: ok[0].y, text: "无原因直接转移" })).catch(() => "script_failed");
+      if (owned !== "ok") {
+        log({ phase: "not_executed", reason: owned });
+        return `not_executed:${owned}`;
+      }
+      blocked = await gate();
+      if (blocked) {
+        log({ phase: "not_executed", reason: blocked });
+        return `not_executed:${blocked}`;
+      }
+      log({ phase: "attempt" });
+      const click = await this.nativeClick(ok[0], page, epoch);
+      if (click.status !== "dispatched") {
+        log({ phase: click.status, reason: click.reason });
+        return `${click.status}:${click.reason}`;
+      }
+      opened = false;
+      return await this.settleTransfer(uid, page, epoch, same, gate, allowUnfavorite, log);
+    } finally {
+      if (opened) {
+        await sleep(300);
+        await close();
+      }
+      this.sending = false;
+    }
+  }
+
+  /**
+   * 点了转移后观察页面：平台提示“已收藏的会话不可转移”时，allowUnfavorite 才点一次“取消收藏并转移”，
+   * 否则点“暂不转移收藏会话”（保持原状）并返回需确认。会话离开非空列表只记为观察结果，业务上仍是 unknown
+   * （没有平台回执与目标关联）；其他失败对话框记为页面失败。不重试。
+   */
+  private async settleTransfer(uid: string, page: PlatformPage, epoch: number, same: () => Promise<boolean>, gate: () => Promise<string | null>, allowUnfavorite: boolean, log: (rec: Record<string, unknown>) => void): Promise<string> {
+    let unfavorited = false;
+    for (let i = 0; i < 30; i++) {
+      await sleep(300);
+      const fail = await this.run<{ text: string; unfav: Point | null; keep: Point | null } | null>(TRANSFER_FAIL_DIALOG).catch(() => null);
+      if (fail && !unfavorited) {
+        if (!fail.text.includes("已收藏") || !fail.unfav) {
+          log({ phase: "page_failed", kind: "other" });
+          return "page_failed:other";
+        }
+        if (!allowUnfavorite) {
+          log({ phase: "needs_confirmation", kind: "favorited" });
+          if (fail.keep && (await same())) await this.nativeClick(fail.keep, page, epoch);
+          return "needs_confirmation:unfavorite";
+        }
+        // 首次转移已点过，结果仍按 unknown；过期或换了对话就不再补做取消收藏。
+        const blocked = await gate();
+        if (blocked) {
+          log({ phase: "unknown", reason: `${blocked}_before_unfavorite` });
+          return `unknown:${blocked}_before_unfavorite`;
+        }
+        log({ phase: "unfavorite_and_transfer" });
+        const click = await this.nativeClick(fail.unfav, page, epoch);
+        if (click.status !== "dispatched") {
+          log({ phase: click.status, reason: click.reason });
+          return `${click.status}:${click.reason}`;
+        }
+        unfavorited = true;
+        continue;
+      }
+      const scan = await this.scanKeepingFresh();
+      // 列表为空可能是筛选/刷新/加载中，不算观察到离开。
+      if (!fail && scan && scan.items.length > 0 && !scan.items.some((it) => buyerFromListKey(it.key) === uid)) {
+        log({ phase: "unknown", observed: "left_list", unfavorited });
+        return `unknown:left_list_observed${unfavorited ? ",unfavorited" : ""}`;
+      }
+    }
+    log({ phase: "unknown", observed: "none", unfavorited });
+    return `unknown:not_observed${unfavorited ? ",unfavorited" : ""}`;
   }
 
   private async clearInput(text: string) {
