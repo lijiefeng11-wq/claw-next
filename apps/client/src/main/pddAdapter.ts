@@ -234,7 +234,8 @@ export function actionSchemaOf(text: string | null): unknown {
  * 星标与转移按钮的浮层关联（只记个数与是否，不记 id 或文字）：与 starOptionsScript / popoverButtonsScript 的归属规则一致，
  * 用于核实真实页面上 aria-describedby 是否存在、能否对应到 el-popover、该浮层当前是否可见。
  */
-export const LINK_PROBE = `(() => {
+// 不直接 export const：CommonJS 编译会把模板里的 ${LINK_PROBE} 改写成 exports.LINK_PROBE，拼接检查的作用域里没有 exports。
+const LINK_PROBE = `(() => {
   const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
   const t = (e) => (e.innerText ?? "").trim();
   const ids = (el, stop, up) => {
@@ -267,6 +268,7 @@ export const LINK_PROBE = `(() => {
     rows_popover_visible: rowLinks.filter((r) => r && r.visible > 0).length,
   };
 })()`;
+export { LINK_PROBE };
 
 /**
  * 页面结构诊断（在隔离环境执行，页面脚本不可见）：只收集元素标签、类名、data-* 属性名、
