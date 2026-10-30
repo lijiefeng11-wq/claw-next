@@ -629,12 +629,11 @@ function starOptionsScript(star: { x: number; y: number }): string {
 type Point = { x: number; y: number };
 type TransferRow = { cells: string[]; button: Point | null };
 
-/** 页面内可见、文字恰为 text 的最深层元素中心坐标；scope 为限定范围的选择器。不唯一或缺失时返回原因。 */
-function textTargetScript(text: string, scope = "body"): string {
+/** 页面内可见、文字恰为 text 的最深层元素中心坐标，排除位于 exclude 内的元素。不唯一或缺失时返回原因。 */
+function textTargetScript(text: string, exclude: string): string {
   return `(() => {
     const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
-    const roots = [...document.querySelectorAll(${JSON.stringify(scope)})].filter(vis);
-    const hits = roots.flatMap((r) => [...r.querySelectorAll("*")]).filter((e) => vis(e) && (e.innerText ?? "").trim() === ${JSON.stringify(text)} && ![...e.children].some((c) => (c.innerText ?? "").trim() === ${JSON.stringify(text)}));
+    const hits = [...document.body.querySelectorAll("*")].filter((e) => vis(e) && !e.closest(${JSON.stringify(exclude)}) && (e.innerText ?? "").trim() === ${JSON.stringify(text)} && ![...e.children].some((c) => (c.innerText ?? "").trim() === ${JSON.stringify(text)}));
     if (hits.length !== 1) return hits.length ? "not_unique" : "missing";
     const r = hits[0].getBoundingClientRect();
     return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
@@ -2070,7 +2069,7 @@ export class PddPageAdapter implements PlatformAdapter {
     try {
       const uid = await activeUid();
       if (!uid) return "not_executed:no_active_conversation";
-      const open = await this.run<Point | string>(textTargetScript("转移会话")).catch(() => "script_failed");
+      const open = await this.run<Point | string>(textTargetScript("转移会话", ".chat-list, li.chat-item, .el-dialog")).catch(() => "script_failed");
       if (typeof open === "string") return `not_executed:open_button_${open}`;
       if ((await this.nativeClick(open, page, epoch)).status !== "dispatched") return "not_executed:open_click_failed";
       opened = true;

@@ -3,7 +3,7 @@
  * 用法：npm run build 后 `npx --no-install electron scripts/test-transfer-test.cjs`（Linux CI 加 --no-sandbox）。
  *
  * 覆盖：inspect 只打开对话框和确认气泡、点取消并关闭，不点确认；execute 只点唯一匹配行的确认，点击前写尝试记录；
- * 目标不唯一/缺失时不点确认；无已打开对话、非诊断模式不执行。
+ * 目标不唯一/缺失时不点确认；无已打开对话、非诊断模式不执行；会话列表每行自带的“转移会话”按钮不点。
  */
 const { app, BrowserWindow } = require("electron");
 const fs = require("node:fs");
@@ -15,7 +15,10 @@ app.setPath("userData", temp);
 const { PddPageAdapter } = require("../dist/src/main/pddAdapter.js");
 
 const page = (active, agents) => `<!doctype html><meta charset="utf-8"><body style="font:14px sans-serif;margin:0">
-  <ul class="chat-list"><li class="chat-item"><div class="chat-item-box ${active ? "active" : ""}" data-random="9001-x">虚构买家</div></li></ul>
+  <div class="chat-list"><ul>
+    <li class="chat-item"><div class="chat-item-box ${active ? "active" : ""}" data-random="9001-x">虚构买家</div><div class="transfer-chat-item-btn" onclick="clicks.push('list-btn')">转移会话</div></li>
+    <li class="chat-item"><div class="chat-item-box" data-random="9002-x">虚构买家2</div><div class="transfer-chat-item-btn" onclick="clicks.push('list-btn')">转移会话</div></li>
+  </ul></div>
   <div style="position:absolute;left:400px;top:20px"><span id="open" style="padding:4px">转移会话</span></div>
   <div id="dlg" class="el-dialog" style="display:none;position:absolute;left:100px;top:80px;width:600px;background:#fff">
     <div><span class="el-dialog__title">转移会话</span><button class="el-dialog__headerbtn" id="x" style="width:20px;height:20px">x</button></div>
