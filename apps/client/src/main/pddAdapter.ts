@@ -701,8 +701,9 @@ function transferTargetScript(target: string): string {
 /**
  * 目标行“转移”按钮弹出的确认气泡中的可点击项（最深层的短文字元素）文字与坐标。
  * 气泡归属只认该按钮（或其在行内的祖先/后代）aria-describedby 指向的 el-popover id；别的行的气泡、位置相近都不算。
+ * 传入 check 时改为点击前核对：该坐标命中的元素须在这个关联气泡里、且属于其中唯一一个文字为 check.text 的控件，返回 "ok" 或原因。
  */
-function popoverButtonsScript(target: string): string {
+function popoverButtonsScript(target: string, check?: { x: number; y: number; text: string }): string {
   return `(() => {${transferTargetSnippet(target)}
     const linked = new Set();
     const addIds = (e) => (e.getAttribute("aria-describedby") || "").split(/\\s+/).filter(Boolean).forEach((id) => linked.add(id));
@@ -711,7 +712,15 @@ function popoverButtonsScript(target: string): string {
     if (!linked.size) return "popover_unlinked";
     const pops = [...document.querySelectorAll("div.el-popover")].filter((p) => p.id && linked.has(p.id) && vis(p));
     if (pops.length !== 1) return pops.length ? "popover_not_unique" : "popover_missing";
-    return [...pops[0].querySelectorAll("*")].filter((e) => vis(e) && t(e) && t(e).length <= 8 && ![...e.children].some((c) => t(c) === t(e))).map((b) => { const r = b.getBoundingClientRect(); return { text: t(b), x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; });
+    const leaves = [...pops[0].querySelectorAll("*")].filter((e) => vis(e) && t(e) && t(e).length <= 8 && ![...e.children].some((c) => t(c) === t(e)));
+    const check = ${JSON.stringify(check ?? null)};
+    if (check) {
+      const own = leaves.filter((e) => t(e) === check.text);
+      if (own.length !== 1) return "confirm_not_unique";
+      const hit = document.elementFromPoint(check.x, check.y);
+      return hit && pops[0].contains(hit) && (own[0] === hit || own[0].contains(hit)) ? "ok" : "confirm_covered";
+    }
+    return leaves.map((b) => { const r = b.getBoundingClientRect(); return { text: t(b), x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; });
   })()`;
 }
 
@@ -2199,13 +2208,11 @@ export class PddPageAdapter implements PlatformAdapter {
         return `inspected:rows=${rows.length},confirm_buttons=${ok.length}`;
       }
       if (ok.length !== 1) return `not_executed:confirm_button_${ok.length ? "not_unique" : "missing"}`;
-      // 点确认前再核对：目标行关联的气泡里仍是同一位置的“无原因直接转移”，且该点没有被别的元素盖住。
-      const recheck = await this.run<{ text: string; x: number; y: number }[] | string>(popoverButtonsScript(target)).catch(() => "script_failed");
-      const okNow = typeof recheck === "string" ? [] : recheck.filter((b) => b.text === "无原因直接转移");
-      const covered = await this.run<boolean>(`(() => { let h = document.elementFromPoint(${ok[0].x}, ${ok[0].y}); while (h && !(h.innerText ?? "").trim()) h = h.parentElement; return !h || h.innerText.trim() !== "无原因直接转移"; })()`).catch(() => true);
-      if (okNow.length !== 1 || okNow[0].x !== ok[0].x || okNow[0].y !== ok[0].y || covered) {
-        log({ phase: "not_executed", reason: "confirm_moved" });
-        return "not_executed:confirm_moved";
+      // 点确认前在同一次页面核对里确认：命中点属于目标行关联的唯一气泡中那一个“无原因直接转移”控件。
+      const owned = await this.run<string>(popoverButtonsScript(target, { x: ok[0].x, y: ok[0].y, text: "无原因直接转移" })).catch(() => "script_failed");
+      if (owned !== "ok") {
+        log({ phase: "not_executed", reason: owned });
+        return `not_executed:${owned}`;
       }
       blocked = await gate();
       if (blocked) {

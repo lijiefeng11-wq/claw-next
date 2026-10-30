@@ -8,6 +8,7 @@
  * 会话离开非空列表只记观察（业务 unknown），临时空列表不算；日志不含客服名；
  * 目标行在表格滚动区外时先滚动到可见、核对点击点确实落在该按钮上；
  * 反例：备注列含目标名、包含关系、同名、点行后重排、点行后弹出别的客服的气泡、按钮未关联气泡、
+ * 别的气泡的同名按钮盖住目标确认按钮（另有页面别处同名按钮不遮挡的控制例）、
  * 取令牌/打开对话框/点行后切换对话、消费后打开对话框期间过期，均不确认。
  */
 const { app, BrowserWindow } = require("electron");
@@ -55,6 +56,14 @@ const page = (active, agents, favorited = false) => `<!doctype html><meta charse
         const r = e.target.getBoundingClientRect(), p = document.querySelector(".el-popover");
         p.id = "el-popover-r" + owner;
         p.style.left = (r.left - 60) + "px"; p.style.top = (r.bottom + 4) + "px"; p.style.display = "block";
+        if (window.overlayOnRow || window.decoyOnRow) {
+          const ok = document.getElementById("ok").getBoundingClientRect(), d = document.createElement("div");
+          d.className = "el-popover"; d.id = "el-popover-other";
+          d.style.cssText = "position:absolute;z-index:99;background:#fff;width:" + ok.width + "px;height:" + ok.height + "px;left:" + (window.overlayOnRow ? ok.left : 700) + "px;top:" + (window.overlayOnRow ? ok.top : 500) + "px";
+          d.innerHTML = "<span>无原因直接转移</span>";
+          d.addEventListener("click", () => clicks.push("ok-B"));
+          document.body.appendChild(d);
+        }
       });
       rows.appendChild(tr);
     });
@@ -166,6 +175,14 @@ app.whenReady().then(async () => {
     {
       const { r, clicks } = await run(page(true, ["虚构客服A", T]), { before: "document.querySelectorAll('[aria-describedby]').forEach((e) => e.removeAttribute('aria-describedby'))" });
       check("目标按钮未关联气泡：证明不了归属不确认", r === "not_executed:popover_unlinked" && noOk(clicks), { r, clicks });
+    }
+    {
+      const { r, clicks } = await run(page(true, ["虚构客服A", T]), { before: "window.overlayOnRow = true" });
+      check("目标气泡还在、别的气泡的同名按钮盖在确认按钮上：不确认", r === "not_executed:confirm_covered" && noOk(clicks), { r, clicks });
+    }
+    {
+      const { r, clicks } = await run(page(true, ["虚构客服A", T]), { before: "window.decoyOnRow = true" });
+      check("页面别处另有同名按钮但没有遮挡：照常只确认目标", r === "unknown:left_list_observed" && JSON.stringify(clicks) === `["open","row:${T}","ok:${T}"]`, { r, clicks });
     }
     {
       const { r, clicks } = await run(page(false, [T]), { conv: "0123456789abcdef" });
