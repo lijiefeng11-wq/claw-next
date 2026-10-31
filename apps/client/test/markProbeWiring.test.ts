@@ -147,6 +147,14 @@ test("标星请求：现场读取进行中页面重建，记为未知", async ()
   assert.deepEqual([rec.active_known, rec.target_is_active], [false, false]);
 });
 
+test("同一买家同时出现在“待回复”与“全部”列表且都打开：按买家去重，判定为当前会话", async () => {
+  const h = harness(true);
+  h.scans.push({ items: [{ key: `${A}-x`, active: true, unread: false }, { key: `${A}-y`, active: true, unread: false }, { key: `${B}-x`, active: false, unread: false }] });
+  h.send("1", MARK, markBody(A, 2), "{}");
+  const [rec] = await h.records(1);
+  assert.deepEqual([rec.active_known, rec.target_is_active, rec.color], [true, true, 2]);
+});
+
 test("现场读不到唯一打开的对话（无或多个）：记为未知，不用扫描缓存兜底", async () => {
   const h = harness(true);
   h.adapter.lastActiveUid = A;
