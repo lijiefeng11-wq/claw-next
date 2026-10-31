@@ -378,7 +378,7 @@ status 只能 sent/not_sent/unknown。sent 必须具有平台明确成功回执�
 {"action":"transfer","transfer":{"target_id":"t-1","unmark_policy":{"allow":true,"version":3}},"policy_version":3,"reason":"fallback:unhandled","expires_at":1790000060.0}
 ```
 
-- `mark.color` 四选一；若 `conv_state` 已是该颜色，后台不生成 mark。两种新动作都省略 `text`，携带正整数 `policy_version`，等于本事件冻结的店铺设置版本；`transfer.unmark_policy.version` 也等于该版本。设置变化后旧决定不得提交或首次 claim。
+- `mark.color` 四选一。**本阶段只对未收藏的会话生成 mark**（本事件 `conv_state.marked === false`）；已收藏（无论颜色是否已知）或 `marked=null` 都不生成 mark，按策略改为 `handoff` 建议或 `none`。给已收藏会话改色，以及颜色读取，须另行取证后再补入（见下文“标星执行与成功判据”）。两种新动作都省略 `text`，携带正整数 `policy_version`，等于本事件冻结的店铺设置版本；`transfer.unmark_policy.version` 也等于该版本。设置变化后旧决定不得提交或首次 claim。
 - 一事件一动作：不组合“先发文字再转人工”，也不组合“先标星再转移”。店铺兜底配置对每类情形（`unhandled` 无法处理 / `error` 报错 / `model_timeout` 模型超时）各选一种：不处理、handoff 建议、mark（选颜色）、transfer（填账号显示名）——四者互斥；规则与话术共用同一套结构化处理方式，配置带店铺策略版本，决定里携带该版本，版本变化后旧决定 claim 409。
 - **超时边界。** `fallback:model_timeout` 只指“在事件既有预算内、模型调用超时后的兜底”：它是普通决定，照常受 `expires_at`、claim 许可和契约 A 预算约束，不重置或延长任何预算。总预算已耗尽的事件按契约 A 以 `handoff` + `reply_deadline_exceeded` 终结，**不可复活、不可 claim，也不生成 mark/transfer**；若以后要求预算耗尽后仍自动转人工，须另定独立的动作时限与归属，并重新审查。
 - `transfer.unmark_policy` 是店铺**一次配置的固定策略**及其版本：`allow=true` 表示“遇平台以已收藏为由拒绝转移时，取消收藏后再转一次”；未配置视为 `allow=false`。前台只按决定里携带的策略执行，不自行放宽。策略版本变化后，旧版本的决定不能 claim（409）。
@@ -427,9 +427,45 @@ status 只能 sent/not_sent/unknown。sent 必须具有平台明确成功回执�
 - 后台按 `decision.action` 校验回执：mark/transfer 带非 null 的 `platform_message_id` 返回 400（省略或 null 允许）；`steps` 与 action 不匹配（如 mark 回执出现转移步骤）返回 400。
 - unknown 规则同主协议：永久保留、不重试、不覆盖，只锁定该事件。
 
+### 标星执行与成功判据（1.3 草案补充，待双方共同审查）
+
+本节把上文 mark 的“前台执行”和“`sent` 须同时满足……（字段语义核实后补入判据）”具体化。依据是前台报告的单次人工样本（#18 评论 6541174020、6541614026）：默认色标星与取消收藏各一次，请求目标为当时唯一打开的会话；两层 `success` 为 `true`，`result.result` 为 `"ok"`，`result.request_id` 与请求一致。目前**没有失败样本**，也没有 2–4 号颜色的响应样本。所以下列判据只是候选：不符合的一律 `unknown`，不从中推出 `not_sent`；首轮真实验收须每种颜色至少覆盖一次，再决定是否修订。
+
+**适用范围**
+- 只执行 `conv_state.marked === false` 时生成的 mark。前台在 claim 之前就核对：决定所在事件提交的 `conv_state` 必须是 `marked=false`，否则不 claim（本地记为阻止，不上传回执）。
+- 只点星标颜色浮层中的目标颜色项。不点星标本身，不点已勾选的颜色项，不做取消收藏。
+
+**点击前核对**（任一不满足都不点击；已 claim 的回执 `not_sent`，`steps` 省略，`reason` 按下列取值）
+1. 主协议与 `send_item` 第 1–3 步的重核全部通过：店铺与平台登录身份一致、租约与 `mark_conversation` 能力仍确认、同一 `context_revision`、无新买家消息、非人工接管、未过确认截止。不通过时 reason 为 `capability_withdrawn`、`deadline_exceeded` 或 `not_started`。
+2. 页面代次（页面重载、切店、清理浮层都会使它变化）从开始核对到点击都没有变化。否则 reason 为 `conv_state_changed`。
+3. 页面打开的会话按买家去重后恰好一个，且就是本事件的买家；同一买家同时出现在“待回复”和“全部”列表里算同一个。否则 reason 为 `conv_state_changed`。
+4. 工具栏星标唯一，且当前**未收藏**：已收藏时 reason 为 `conv_state_changed`；星标缺失或不唯一时 reason 为 `conv_state_unavailable`。
+5. 颜色浮层能证明属于这个星标：由星标（或其 4 层内的祖先或后代）的 `aria-describedby` 指向，可见、唯一、至少含三种已知颜色。目标坐标处的元素是浮层中颜色为目标色的列表项。证明不了时 reason 为 `conv_state_unavailable`。
+6. 以上核对与点击之间，除了等待浮层出现，不插入其他页面操作。
+
+**请求核对（点击窗口）**
+- 从点击前一刻到确认截止为“点击窗口”。窗口内，前台在请求阶段拦截页面发出的 `/plateau/chat/mark_conversation` 和 `/plateau/chat/unmark_conversation` 请求，规则如下：
+  - **放行**：窗口内第一条 mark 请求，且同时满足：页面代次与点击时相同；`data.uid` 等于本事件买家（字符串严格相等）；`data.color` 等于决定颜色对应的数值（`orange`=1、`red`=2、`green`=3、`blue`=4，整数严格相等）；`data.request_id` 为有限数字。放行时记下该请求的浏览器请求编号（CDP `requestId`）和 `data.request_id`。
+  - **拦截**：其余请求一律在发出前拦截，包括目标或颜色不符、第二条 mark、任何 unmark、页面代次已变。被拦截的请求不会到达平台。
+- 窗口之外，以及没有进行中的 mark 时，页面请求（包括店主手动点星标）照常放行，不受影响。
+
+**成功判据**（`mark` 步骤 `sent`，须全部满足）
+1. 窗口内恰好放行了一条请求（同上）。
+2. 用该请求的 CDP `requestId` 取到它自己的响应，不按到达顺序配对，并且在确认截止前取到。
+3. 响应是 JSON 对象，且：
+   - 外层 `success === true`（严格布尔）；
+   - `result` 是对象，`result.success === true`（严格布尔）；
+   - `result.result === "ok"`；
+   - `result.request_id` 是有限数字，且与放行请求的 `data.request_id` 严格相等。
+- 其余情况都是 `unknown`，不重试，也不补做取消收藏或改色。包括：点击后窗口内没有放行任何请求（例如页面没有发出请求，或只发出了被拦截的请求）；响应加载失败、超时、不是 JSON；字段缺失或类型不符；`success` 为 `false`；`request_id` 不相等。没有失败样本之前，**不根据任何响应判 `not_sent`**；点击后能判 `not_sent` 的情形本阶段为零。
+- 点击后可以读一次星标状态，作为 `page_observed`（`marked` / `unchanged` / `unknown`），只用于显示，不参与判定。
+
+**记录与隐私**
+- 判据只在内存里比较，本地日志和回执只记结论与原因分类。不记 `uid`、`request_id` 或响应原文。
+
 ### 测试要求（实现阶段）
 
-至少覆盖：能力协商四种组合 × 两个能力；未确认能力时的字段与 action；字段校验（必填、类型、上限、重复、未知字段）；接收人名称零项/多项/包含关系/备注命中不得生成；策略版本变化后 claim 409；`allow=false` 遇收藏拒绝报 not_sent 且不取消收藏；`allow=true` 时取消收藏或再次转移任一步 unknown 即停止；能力已确认但状态取不到/过期/歧义时上报 `marked=null`、不生成 mark/transfer 且正常回复照常；回执聚合表每一行（含“收藏已取消但转移失败”）与 mark 单步骤三种状态、未开始步骤省略；mark/transfer 的 sent 不带 platform_message_id 可被接受、带了返回 400；`reply_deadline_exceeded` 终结事件不生成 mark/transfer、不能 claim；模型超时兜底不重置预算；页面观察不得报 sent；点击前切换会话、浮层不属于星标、目标行重排均不点击；临时空列表不算离开。
+至少覆盖：能力协商四种组合 × 两个能力；未确认能力时的字段与 action；字段校验（必填、类型、上限、重复、未知字段）；接收人名称零项/多项/包含关系/备注命中不得生成；策略版本变化后 claim 409；`allow=false` 遇收藏拒绝报 not_sent 且不取消收藏；`allow=true` 时取消收藏或再次转移任一步 unknown 即停止；能力已确认但状态取不到/过期/歧义时上报 `marked=null`、不生成 mark/transfer 且正常回复照常；回执聚合表每一行（含“收藏已取消但转移失败”）与 mark 单步骤三种状态、未开始步骤省略；mark/transfer 的 sent 不带 platform_message_id 可被接受、带了返回 400；`reply_deadline_exceeded` 终结事件不生成 mark/transfer、不能 claim；模型超时兜底不重置预算；页面观察不得报 sent；点击前切换会话、浮层不属于星标、目标行重排均不点击；临时空列表不算离开。标星另需覆盖：已收藏或 `marked=null` 不生成、不 claim；请求核对的放行与拦截（目标不符、颜色不符、第二条 mark、unmark、页面代次变化）；成功判据各字段的缺失、类型不符、`false`、`request_id` 不等、超时、加载失败、无请求均为 unknown；响应按 CDP `requestId` 配对，乱序到达也不串；窗口外店主的手动操作不受拦截。
 
 ### 管理配置与后台准备（1.3 草案补充，待双方共同审查）
 
