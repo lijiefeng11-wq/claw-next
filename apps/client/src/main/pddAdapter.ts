@@ -670,10 +670,12 @@ export { CONV_STAR_SNAPSHOT };
  * 星标悬停后弹出的颜色列表，按色点背景色识别颜色，带 chat-icon-check 的为当前颜色。
  * 浮层归属只认触发控件关联：星标元素（或其 4 层内祖先/后代）的 aria-describedby 指向的 el-popover id，
  * 且该浮层可见、唯一、含至少三种已知颜色；位置相近、颜色相同的无关菜单不算。证明不了归属就不执行。
- * 传入 check 时改为点击前核对：该坐标处的元素须属于这个浮层中颜色为 check.color 的列表项，返回 "ok" 或原因。
+ * 传入 check 时改为点击前核对：该坐标处的元素须属于这个浮层中颜色为 check.color 的列表项，且该颜色项在浮层中唯一、未勾选，返回 "ok" 或原因。
+ * check.buyer 存在时（标星执行）还在同一次页面快照里核对：打开的会话按买家去重恰好是该买家（conversation_mismatch），
+ * 星标未收藏（already_marked）。诊断测试不传 buyer。
  * 不传 check 时返回同一页面快照：所有打开（active）的会话项 key（由调用方按买家去重）、星标是否已收藏、各颜色项。
  */
-export function starOptionsScript(check?: { x: number; y: number; color: StarColor }): string {
+export function starOptionsScript(check?: { x: number; y: number; color: StarColor; buyer?: string }): string {
   return `(() => {
     const stars = [...document.querySelectorAll('[title="收藏该用户"]')].filter((e) => e.getClientRects().length > 0);
     if (stars.length !== 1) return stars.length ? "star_not_unique" : "star_missing";
@@ -697,21 +699,31 @@ export function starOptionsScript(check?: { x: number; y: number; color: StarCol
     const known = (p) => new Set([...p.querySelectorAll("ul > li")].map(colorOf).filter((c) => c !== "other")).size;
     const pops = [...document.querySelectorAll("div.el-popover")].filter((p) => p.id && linked.has(p.id) && p.getClientRects().length > 0 && getComputedStyle(p).visibility !== "hidden" && known(p) >= 3);
     if (pops.length !== 1) return pops.length ? "popover_not_unique" : linked.size ? "popover_missing" : "popover_unlinked";
+    const acts = [...document.querySelectorAll(${JSON.stringify(ITEM)})].filter((e) => e.classList.contains("active"));
+    const icon = stars[0].matches("i") ? stars[0] : stars[0].querySelector("i") ?? stars[0];
+    const starActive = icon.classList.contains("active") || stars[0].classList.contains("active");
+    const checkedOf = (li) => { const c = li.querySelector("i.chat-icon-check"); return !!c && c.getClientRects().length > 0 && getComputedStyle(c).visibility !== "hidden"; };
     const check = ${JSON.stringify(check ?? null)};
     if (check) {
       const hit = document.elementFromPoint(check.x, check.y);
       const li = hit && hit.closest("li");
       if (!li || !pops[0].contains(li)) return "target_not_in_star_popover";
-      return colorOf(li) === check.color ? "ok" : "target_color_mismatch";
+      if (colorOf(li) !== check.color) return "target_color_mismatch";
+      if ([...pops[0].querySelectorAll("ul > li")].filter((x) => colorOf(x) === check.color).length !== 1) return "target_not_unique";
+      if (checkedOf(li)) return "target_checked";
+      if (check.buyer !== undefined) {
+        const buyers = new Set(acts.map((e) => { const m = /^([0-9]{1,32})-/.exec(e.getAttribute("data-random") || ""); return m ? m[1] : null; }));
+        if (buyers.size !== 1 || !buyers.has(check.buyer)) return "conversation_mismatch";
+        if (starActive) return "already_marked";
+      }
+      return "ok";
     }
-    const acts = [...document.querySelectorAll(${JSON.stringify(ITEM)})].filter((e) => e.classList.contains("active"));
-    const icon = stars[0].matches("i") ? stars[0] : stars[0].querySelector("i") ?? stars[0];
     const options = [...pops[0].querySelectorAll("ul > li")].map((li) => {
       const r = li.getBoundingClientRect();
       const check = li.querySelector("i.chat-icon-check");
       return { color: colorOf(li), checked: !!check && check.getClientRects().length > 0 && getComputedStyle(check).visibility !== "hidden", x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
     });
-    return { keys: acts.map((e) => e.getAttribute("data-random")), active: icon.classList.contains("active") || stars[0].classList.contains("active"), options };
+    return { keys: acts.map((e) => e.getAttribute("data-random")), active: starActive, options };
   })()`;
 }
 
@@ -877,6 +889,8 @@ export class PddPageAdapter implements PlatformAdapter {
   private markWatch: MarkWatch | null = null;
   /** 标星进行中：页面与登录归属是否仍是开始时那一个；失效返回原因。 */
   private markCheck: (() => string | null) | null = null;
+  /** 标星进行中的页面：只认这个页面监听到的标星请求。 */
+  private markPage: PlatformPage | null = null;
   /** 页面最近一次发出标星 / 取消收藏请求的本机时间（毫秒），用于点击前静默。 */
   private lastMarkRequestAt = 0;
   /** 附加发送进行中：收集该买家的新消息与页面发送请求结果（仅内存）。 */
@@ -1038,7 +1052,7 @@ export class PddPageAdapter implements PlatformAdapter {
       } else if (method === "Fetch.requestPaused") {
         const paused = probePath(params.request?.url);
         if (paused === LIBRARY_SEND_PATH || paused === GOODS_CARD_SEND_PATH || paused === INSTRUCT_SEND_PATH) this.onItemSendPaused(dbg, params, paused);
-        else if (paused === MARK_REQUEST_PATH || paused === UNMARK_REQUEST_PATH) this.onMarkPaused(dbg, params, paused === MARK_REQUEST_PATH ? "mark" : "unmark");
+        else if (paused === MARK_REQUEST_PATH || paused === UNMARK_REQUEST_PATH) this.onMarkPaused(dbg, params, paused === MARK_REQUEST_PATH ? "mark" : "unmark", win);
         else this.onSendPaused(dbg, params);
       }
     });
@@ -1101,7 +1115,7 @@ export class PddPageAdapter implements PlatformAdapter {
    * 页面发出的标星 / 取消收藏请求（契约“请求核对”）。没有进行中的标星、或不在点击窗口内时照常放行
    * （店主手动操作不受影响）；窗口内只放行与本次一致的第一条 mark 请求，其余在发出前拦截，不会到达平台。
    */
-  private onMarkPaused(dbg: Electron.Debugger, params: any, kind: "mark" | "unmark") {
+  private onMarkPaused(dbg: Electron.Debugger, params: any, kind: "mark" | "unmark", source: PlatformPage) {
     this.lastMarkRequestAt = Date.now();
     const w = this.markWatch;
     if (!w || !w.open || w.closed) {
@@ -1110,7 +1124,10 @@ export class PddPageAdapter implements PlatformAdapter {
       void dbg.sendCommand("Fetch.continueRequest", { requestId: params.requestId }).catch(() => undefined);
       return;
     }
-    const verdict = markRequestVerdict(w, kind, this.watchEpoch, params.networkId, params.request?.postData);
+    // 实际放行前先复核原操作的页面与登录店铺归属（来源页面须是本次标星的页面）；失效即锁存并拦截，结论保持 unknown。
+    const lost = source !== this.markPage ? "page_changed_during_mark" : (this.markCheck?.() ?? null);
+    if (lost) w.invalid ??= lost;
+    const verdict = w.invalid ? ({ allow: false } as const) : markRequestVerdict(w, kind, this.watchEpoch, params.networkId, params.request?.postData);
     console.log(`[${this.shopId}] platform ${kind}_conversation ${verdict.allow ? "match" : "block"}`);
     if (!verdict.allow) {
       w.blocked += 1;
@@ -2274,6 +2291,7 @@ export class PddPageAdapter implements PlatformAdapter {
     // 从占用页面起守护：外来输入、页面发出的标星 / 取消收藏请求、页面或登录变化都记在这里。
     const watch = newMarkWatch(uid, color, epoch);
     this.markWatch = watch;
+    this.markPage = page;
     this.markCheck = () => {
       if (this.window !== page || page.isDestroyed() || this.watchEpoch !== epoch) return "page_changed_during_mark";
       const now = this.tracker.status(true);
@@ -2330,8 +2348,10 @@ export class PddPageAdapter implements PlatformAdapter {
       const target = { x: hits[0].x, y: hits[0].y };
       // 鼠标移到目标颜色项（浮层保持展开）后，在该点核对命中元素属于星标浮层中目标颜色的列表项。
       await hover(target);
-      const owned = await this.run<string>(starOptionsScript({ ...target, color: request.color })).catch(() => "script_failed");
+      // 最终核对在同一次页面快照里完成：命中目标颜色项（唯一、未勾选）、唯一打开的会话仍是本事件买家、星标仍未收藏。
+      const owned = await this.run<string>(starOptionsScript({ ...target, color: request.color, buyer: uid })).catch(() => "script_failed");
       if ((stop = guard())) return notSent(stop);
+      if (owned === "conversation_mismatch" || owned === "already_marked") return notSent("conv_state_changed", owned);
       if (owned !== "ok") return notSent("conv_state_unavailable", owned);
       // 按下前一刻：最后一次守护核对与运行时再核验，随即打开点击窗口；按下与松开两条命令各对应一条输入事件。
       const click = await dispatchPageClick(page.webContents, target, () => {
@@ -2356,6 +2376,7 @@ export class PddPageAdapter implements PlatformAdapter {
       watch.closed = true;
       this.markWatch = null;
       this.markCheck = null;
+      this.markPage = null;
       if (hovered) await hover({ x: 1, y: 1 });
       this.sending = false;
     }

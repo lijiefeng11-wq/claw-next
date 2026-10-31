@@ -76,7 +76,7 @@ function harness(opts: Opts = {}) {
   const CDP_INPUT: Record<string, string> = { mouseMoved: "mouseMove", mousePressed: "mouseDown", mouseReleased: "mouseUp" };
   let attached = false;
   const bodies = new Map<string, string>();
-  const log = { clicks: [] as { x: number; y: number }[], hovers: [] as { x: number; y: number }[], continued: [] as string[], failed: [] as string[], fetchPatterns: [] as string[], scripts: [] as string[] };
+  const log = { clicks: [] as { x: number; y: number }[], hovers: [] as { x: number; y: number }[], continued: [] as string[], failed: [] as string[], fetchPatterns: [] as string[], scripts: [] as string[], ownedCode: "" };
   let pops = 0;
   const net: Net = {
     request(id, path, data, networkId) {
@@ -138,6 +138,7 @@ function harness(opts: Opts = {}) {
     executeJavaScriptInIsolatedWorld: async (_world: number, [{ code }]: { code: string }[]) => {
       const name = code === CONV_STAR_SNAPSHOT ? (log.clicks.length ? "after" : "snap") : code.includes("aria-describedby") ? (code.includes("const check = null") ? "pop" : "owned") : code.includes("收藏该用户") ? "star" : "other";
       log.scripts.push(name);
+      if (name === "owned") log.ownedCode = code;
       opts.onScript?.(name, adapter, hooks);
       return script(code);
     },
@@ -180,6 +181,7 @@ describe("标星：点击与成功判据（Electron 替身）", () => {
     assert.deepEqual(h.log.hovers, [{ x: 50, y: 20 }, { x: 100, y: 230 }, { x: 1, y: 1 }]);
     assert.equal(h.adapter.markWatch, null);
     assert.equal(h.adapter.sending, false);
+    assert.ok(h.log.ownedCode.includes(`"buyer":"${BUYER}"`), "最终核对带本事件买家");
   });
 
   test("默认色（黄色）用数值 1 核对", async () => {
@@ -220,6 +222,9 @@ describe("标星：点击前核对不通过一律不点击", () => {
     ["目标颜色已勾选", { pop: { keys: [`${BUYER}-0`], active: false, options: OPTIONS.map((o) => (o.color === "red" ? { ...o, checked: true } : o)) } }, "conv_state_unavailable"],
     ["目标点不在星标浮层内", { owned: "target_not_in_star_popover" }, "conv_state_unavailable"],
     ["目标点颜色不符", { owned: "target_color_mismatch" }, "conv_state_unavailable"],
+    ["最终核对时会话已换走（页面代次不变）", { owned: "conversation_mismatch" }, "conv_state_changed"],
+    ["最终核对时同买家已被收藏（页面代次不变）", { owned: "already_marked" }, "conv_state_changed"],
+    ["最终核对时目标颜色已勾选", { owned: "target_checked" }, "conv_state_unavailable"],
   ] as const) {
     test(`${name}：not_sent（${reason}），不点击`, async () => {
       const h = harness({ page: page as Partial<Page> });
@@ -495,6 +500,30 @@ describe("标星：来源绑定（操作独占、无外来输入、点击前静�
     });
   }
 
+  for (const [name, change] of [
+    ["平台登录失效", (k: Hooks) => void (k.identity.logged_in = false)],
+    ["登录店铺变化", (k: Hooks) => void (k.identity.shop = "pdd-other")],
+    ["页面重建", (_k: Hooks, a: any) => void a.watchEpoch++],
+  ] as const) {
+    test(`点击后、请求放行前${name}：首条同 uid/颜色请求在本机拦截，不到达平台；unknown`, async () => {
+      const h = harness({ onClick: (net, a, k) => (change(k, a), net.request("n-1", MARK, { uid: BUYER, color: 2, request_id: REQ_ID })) });
+      const r = await h.mark("red", 2);
+      assert.equal(r.status, "unknown");
+      assert.deepEqual([h.log.continued, h.log.failed], [[], ["f-n-1"]]);
+    });
+  }
+
+  test("不是本次标星页面监听到的请求：在窗口内拦截", async () => {
+    const failed: string[] = [];
+    const other = { sendCommand: async (m: string, p: any) => void (m === "Fetch.failRequest" && failed.push(p.requestId)) };
+    const h = harness({
+      onClick: (_net, a) => a.onMarkPaused(other, { requestId: "x-1", networkId: "x-1", request: { postData: JSON.stringify({ data: { uid: BUYER, color: 2, request_id: REQ_ID } }) } }, "mark", { isDestroyed: () => false }),
+    });
+    const r = await h.mark("red", 2);
+    assert.equal(r.status, "unknown");
+    assert.deepEqual(failed, ["x-1"]);
+  });
+
   test("资格失效后才到的成功响应不改写结论", async () => {
     let later: (() => void) | null = null;
     const h = harness({
@@ -511,22 +540,25 @@ describe("标星：来源绑定（操作独占、无外来输入、点击前静�
 });
 
 // 极简虚构 DOM：只实现 starOptionsScript 用到的接口。
-function fakeDom(opts: { linked?: boolean; activeKeys: string[]; hit?: "red" | "other" | "outside" }) {
+function fakeDom(opts: { linked?: boolean; activeKeys: string[]; hit?: "red" | "other" | "outside"; starActive?: boolean; redChecked?: boolean; dupRed?: boolean }) {
   const colors: Record<string, string> = { orange: "rgb(250, 170, 40)", red: "rgb(240, 60, 60)", green: "rgb(60, 180, 90)", blue: "rgb(50, 120, 230)" };
-  const lis = Object.entries(colors).map(([name, bg], i) => {
+  const entries = Object.entries(colors);
+  if (opts.dupRed) entries.push(["red", colors.red]);
+  const tick = { getClientRects: () => [{}], style: "rgba(0, 0, 0, 0)" };
+  const lis = entries.map(([name, bg], i) => {
     const dot = { style: bg, querySelectorAll: () => [] };
     const li: any = {
       name,
       style: "rgba(0, 0, 0, 0)",
       querySelectorAll: () => [dot],
-      querySelector: () => null,
+      querySelector: () => (opts.redChecked && name === "red" ? tick : null),
       getBoundingClientRect: () => ({ left: 90, top: 190 + i * 30, width: 20, height: 20 }),
       closest: () => li,
     };
     return li;
   });
   const pop: any = { id: "el-popover-1", getClientRects: () => [{}], querySelectorAll: () => lis, contains: (e: unknown) => lis.includes(e), style: "rgba(0, 0, 0, 0)" };
-  const star: any = { getClientRects: () => [{}], getAttribute: (n: string) => (n === "aria-describedby" && opts.linked !== false ? "el-popover-1" : null), querySelectorAll: () => [], parentElement: null, matches: () => true, classList: { contains: () => false }, querySelector: () => null };
+  const star: any = { getClientRects: () => [{}], getAttribute: (n: string) => (n === "aria-describedby" && opts.linked !== false ? "el-popover-1" : null), querySelectorAll: () => [], parentElement: null, matches: () => true, classList: { contains: (c: string) => c === "active" && !!opts.starActive }, querySelector: () => null };
   const items = opts.activeKeys.map((k) => ({ classList: { contains: (c: string) => c === "active" }, getAttribute: () => k }));
   const outside = { closest: () => null };
   const document = {
@@ -536,7 +568,7 @@ function fakeDom(opts: { linked?: boolean; activeKeys: string[]; hit?: "red" | "
   const getComputedStyle = (e: any) => ({ backgroundColor: e.style, visibility: "visible" });
   return { document, getComputedStyle };
 }
-const runStar = (dom: ReturnType<typeof fakeDom>, check?: { x: number; y: number; color: "red" }) =>
+const runStar = (dom: ReturnType<typeof fakeDom>, check?: { x: number; y: number; color: "red"; buyer?: string }) =>
   new Function("document", "getComputedStyle", `return ${starOptionsScript(check)};`)(dom.document, dom.getComputedStyle);
 
 describe("真实浮层脚本（虚构 DOM）", () => {
@@ -556,5 +588,17 @@ describe("真实浮层脚本（虚构 DOM）", () => {
     assert.equal(runStar(fakeDom({ activeKeys: [] }), { x: 100, y: 230, color: "red" }), "ok");
     assert.equal(runStar(fakeDom({ activeKeys: [], hit: "other" }), { x: 100, y: 230, color: "red" }), "target_color_mismatch");
     assert.equal(runStar(fakeDom({ activeKeys: [], hit: "outside" }), { x: 100, y: 230, color: "red" }), "target_not_in_star_popover");
+    assert.equal(runStar(fakeDom({ activeKeys: [], redChecked: true }), { x: 100, y: 230, color: "red" }), "target_checked");
+    assert.equal(runStar(fakeDom({ activeKeys: [], dupRed: true }), { x: 100, y: 230, color: "red" }), "target_not_unique");
+  });
+
+  test("标星执行的最终核对（同一次快照）：唯一打开的会话仍是本事件买家、星标仍未收藏", () => {
+    const at = { x: 100, y: 230, color: "red" as const, buyer: BUYER };
+    assert.equal(runStar(fakeDom({ activeKeys: [`${BUYER}-0`, `${BUYER}-1`] }), at), "ok");
+    // 同页异步变化（页面代次不变）：会话换走、没有打开的会话、两个买家、同买家已被收藏，都不放过。
+    assert.equal(runStar(fakeDom({ activeKeys: [`${OTHER}-0`] }), at), "conversation_mismatch");
+    assert.equal(runStar(fakeDom({ activeKeys: [] }), at), "conversation_mismatch");
+    assert.equal(runStar(fakeDom({ activeKeys: [`${BUYER}-0`, `${OTHER}-0`] }), at), "conversation_mismatch");
+    assert.equal(runStar(fakeDom({ activeKeys: [`${BUYER}-0`], starActive: true }), at), "already_marked");
   });
 });
