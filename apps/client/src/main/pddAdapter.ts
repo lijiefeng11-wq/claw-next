@@ -14,6 +14,7 @@ import type { PlatformPage } from "./platformWorkspace.js";
 import { dispatchPageClick, type PageClickResult } from "./pddClick.js";
 import { PddMessageWatcher } from "./pddMessageWatcher.js";
 import { popupSweepScript, type PopupSweepMode, type PopupSweepResult } from "./pddPopups.js";
+import { markedListProbe, markRequestProbe, type MarkProbeRecord } from "./markProbe.js";
 
 const LOGIN_URL = "https://mms.pinduoduo.com/chat-merchant/index.html";
 
@@ -900,9 +901,13 @@ export class PddPageAdapter implements PlatformAdapter {
     const write = (rec: Record<string, unknown>) => {
       if (schemaFile) fs.appendFile(schemaFile, JSON.stringify({ at: new Date().toISOString(), ...rec }) + "\n", { mode: 0o600 }, () => undefined);
     };
+    const markedFile = this.probeFile?.replace(/requests\.jsonl$/, "marked.jsonl") ?? null;
+    const writeMarked = (rec: MarkProbeRecord | null) => {
+      if (markedFile && rec) fs.appendFile(markedFile, JSON.stringify({ at: new Date().toISOString(), ...rec }) + "\n", { mode: 0o600 }, () => undefined);
+    };
     const dbg = win.webContents.debugger;
     // 监听只装一次；渲染进程崩溃会使调试通道断开，恢复时由 enableNetwork 重新附加并开启拦截。
-    const pending = new Map<string, { path: string; postData: string | null; buyer: string | null; epoch: number; optionsEpoch: number }>();
+    const pending = new Map<string, { path: string; postData: string | null; buyer: string | null; epoch: number; optionsEpoch: number; active: string | null }>();
     const discovered = new Map<string, string>();
     const seen = new Set<string>();
     const writeOnce = (kind: string, p: string, schema: unknown) => {
@@ -926,8 +931,15 @@ export class PddPageAdapter implements PlatformAdapter {
         }
         if (!p) return;
         const postData = typeof params.request.postData === "string" ? params.request.postData : null;
-        pending.set(params.requestId, { path: p, postData, buyer: this.orders.started(p, jsonOrNull(postData)), epoch: this.orders.epoch, optionsEpoch: this.sendOptions.epoch });
+        pending.set(params.requestId, { path: p, postData, buyer: this.orders.started(p, jsonOrNull(postData)), epoch: this.orders.epoch, optionsEpoch: this.sendOptions.epoch, active: this.lastActiveUid });
         if (postData && schemaFile) write({ kind: "request", path: p, schema: schemaOf(postData) });
+        if (schemaFile) {
+          try {
+            writeMarked(markRequestProbe(p, postData, this.lastActiveUid));
+          } catch {
+            // 诊断记录失败不得影响消息回调。
+          }
+        }
       } else if (method === "Network.loadingFinished") {
         const action = discovered.get(params.requestId);
         if (action) {
@@ -959,6 +971,11 @@ export class PddPageAdapter implements PlatformAdapter {
             }
             if (PddSendOptionBook.watches(req.path) && req.optionsEpoch === this.sendOptions.epoch) this.sendOptions.response(req.path, jsonOrNull(req.postData), jsonOrNull(body), Math.floor(Date.now() / 1000));
             if (!schemaFile) return;
+            try {
+              writeMarked(markedListProbe(req.path, body, this.lastActiveUid, req.active));
+            } catch {
+              // 诊断记录失败不得影响消息回调。
+            }
             const schema = schemaOf(body);
             const key = req.path + JSON.stringify(schema);
             if (seen.has(key)) return;
