@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { AdapterEvent, HistoryResult, PlatformAdapter, PlatformMessage, PlatformSendOption, SendResult } from "./adapter.js";
+import type { AdapterEvent, HistoryResult, MarkResult, PlatformAdapter, PlatformMessage, PlatformSendOption, SendResult } from "./adapter.js";
 import type { OrderGoods, PlatformOrder } from "./pddOrders.js";
 import { buildGoodsSnapshot } from "./goodsSnapshot.js";
 import { BackendClient, BackendError, FetchLike, TransportError } from "./backend.js";
@@ -12,6 +12,7 @@ import {
   CAP_SEND_ITEM,
   ContextMessage,
   ContextOrder,
+  ConvState,
   IMAGE_MISSING,
   MAX_EVENT_BYTES,
   MAX_IMAGE_BYTES,
@@ -21,11 +22,15 @@ import {
   MAX_CONTENT_CHARS,
   MAX_CONTEXT_MESSAGES,
   MAX_REMAINING_BUDGET_MS,
+  MARK_COLORS,
   Me,
+  PageObserved,
+  ReceiptExtra,
   ReceiptStatus,
   SEND_OPTION_KIND,
   SEND_OPTION_LIMITS,
   SendOptions,
+  convActionReason,
   isDeadlineTerminal,
   isFiniteNumber,
   isIdentifier,
@@ -114,6 +119,11 @@ export type RuntimeOptions = {
   onChange?: () => void;
   /** 只记录状态码，不记录口令和消息正文。 */
   log?: (line: string) => void;
+  /**
+   * 契约 1.3：在心跳中声明 mark_conversation 并允许执行标星（还要求适配器能读状态、能执行标星）。
+   * 默认关闭：实现合并不等于启用，正式启用须另行明确安排并经审查。
+   */
+  declareMark?: boolean;
 };
 
 type BackendState = { state: "idle" | "connecting" | "ok" | "error"; detail: string; me: Me | null };
@@ -183,6 +193,9 @@ export class ShopRuntime {
   private readonly sendOptions = new Map<string, { json: string; list: PlatformSendOption[] }>();
   /** 事件提交时的候选映射 option_id → 平台对象，只在内存；重启后该事件的 send_item 不执行。 */
   private readonly eventOptions = new Map<string, Map<string, PlatformSendOption>>();
+  /** 事件提交时的 conv_state，只在内存；重启后该事件的 mark 不执行。 */
+  private readonly eventConvState = new Map<string, ConvState>();
+  private readonly declareMark: boolean;
   /** 最近一次成功心跳确认的能力，随租约（instance+session+generation）变化重置。 */
   private capabilities = new Set<string>();
   /** 正在发出取消请求的事件（契约 A.5），避免并发重复发起。 */
@@ -201,6 +214,7 @@ export class ShopRuntime {
     this.replyTiming = new ReplyTiming(options.monotonicNow ?? (() => performance.now()), () => this.now() * 1000);
     this.log = options.log ?? (() => undefined);
     this.onChange = options.onChange ?? (() => undefined);
+    this.declareMark = options.declareMark === true;
     this.backend = new BackendClient(options.config.backend_url, options.token, options.fetchImpl, this.timing.requestTimeoutMs);
     this.journal = new Journal(options.dataDir);
     this.journal.onRecord = (rec, previous) => {
@@ -244,14 +258,14 @@ export class ShopRuntime {
     for (const ev of this.journal.events.values()) {
       const a = ev.attempt;
       if (a?.phase === "sending") {
-        this.journal.finishAttempt(ev.event_id, a.attempt_id, "unknown", "interrupted_during_send", null, pendingReceipt("unknown"));
+        this.journal.finishAttempt(ev.event_id, a.attempt_id, "unknown", "interrupted_during_send", null, pendingReceipt("unknown", null, receiptExtra(ev, "unknown", "interrupted_during_send")));
       } else if (a && (a.phase === "claim_requested" || a.phase === "claimed")) {
-        this.journal.finishAttempt(ev.event_id, a.attempt_id, "aborted_before_send", "restarted_before_send", null, pendingReceipt("not_sent"));
+        this.journal.finishAttempt(ev.event_id, a.attempt_id, "aborted_before_send", "restarted_before_send", null, pendingReceipt("not_sent", null, receiptExtra(ev, "not_sent", "restarted_before_send")));
       } else if (a && !a.receipt) {
         // 旧版日志可能只有结果、没有回执：按结果补出待上传回执。
         const status: ReceiptStatus | null =
           a.phase === "sent" ? "sent" : a.phase === "unknown" ? "unknown" : a.phase === "not_sent" || a.phase === "aborted_before_send" ? "not_sent" : a.phase === "claim_failed" && a.detail === "claim_response_lost" ? "not_sent" : null;
-        if (status) this.journal.setReceipt(ev.event_id, a.attempt_id, pendingReceipt(status, status === "sent" ? a.platform_message_id : null));
+        if (status) this.journal.setReceipt(ev.event_id, a.attempt_id, pendingReceipt(status, status === "sent" ? a.platform_message_id : null, receiptExtra(ev, status, a.detail)));
       }
       if (ev.stage === "prepared" || ev.stage === "submit_failed" || (ev.stage === "submitted" && ev.snapshot?.state !== "ready")) this.resume.push(ev);
       if (ev.cancel?.phase === "intent") this.cancelChecks.push(ev);
@@ -316,7 +330,7 @@ export class ShopRuntime {
     if (!session || this.stopped) return;
     const started = this.now();
     try {
-      const lease = await this.backend.heartbeat(this.instanceId, session, [...(this.adapter.sendItem ? [CAP_SEND_ITEM] : []), CAP_REPLY_DEADLINE, CAP_GOODS_SNAPSHOT]);
+      const lease = await this.backend.heartbeat(this.instanceId, session, [...(this.adapter.sendItem ? [CAP_SEND_ITEM] : []), CAP_REPLY_DEADLINE, CAP_GOODS_SNAPSHOT, ...(this.markDeclared() ? [CAP_MARK_CONVERSATION] : [])]);
       if (lease.instance_id !== this.instanceId || lease.session_id !== session || lease.shop_id !== this.config.shop_id) {
         this.lease = { state: "error", generation: 0, valid_until: 0, detail: "lease_response_mismatch" };
         return;
@@ -329,6 +343,7 @@ export class ShopRuntime {
       if (caps.has(CAP_SEND_ITEM) !== this.capabilities.has(CAP_SEND_ITEM)) this.log(`capability send_item=${caps.has(CAP_SEND_ITEM)}`);
       if (caps.has(CAP_REPLY_DEADLINE) !== this.capabilities.has(CAP_REPLY_DEADLINE)) this.log(`capability reply_deadline=${caps.has(CAP_REPLY_DEADLINE)}`);
       if (caps.has(CAP_GOODS_SNAPSHOT) !== this.capabilities.has(CAP_GOODS_SNAPSHOT)) this.log(`capability goods_snapshot=${caps.has(CAP_GOODS_SNAPSHOT)}`);
+      if (caps.has(CAP_MARK_CONVERSATION) !== this.capabilities.has(CAP_MARK_CONVERSATION)) this.log(`capability mark_conversation=${caps.has(CAP_MARK_CONVERSATION)}`);
       this.capabilities = caps;
       if (this.config.mode === "auto" && this.sendItemConfirmed()) void this.adapter.prepareSendOptions?.().catch(() => undefined);
     } catch (err) {
@@ -368,6 +383,16 @@ export class ShopRuntime {
   /** 契约“会话操作（1.3 草案）”：本租约确认了 mark_conversation，事件须带 conv_state。 */
   markConfirmed() {
     return this.lease.state === "held" && this.capabilities.has(CAP_MARK_CONVERSATION);
+  }
+
+  /** 本客户端声明 mark_conversation：已明确开启，且适配器能读收藏状态、能执行标星。 */
+  private markDeclared() {
+    return this.declareMark && !!this.adapter.readConvState && !!this.adapter.markConversation;
+  }
+
+  /** 可以执行标星：本客户端声明了能力，且本租约确认了它。 */
+  markExecutable() {
+    return this.markDeclared() && this.markConfirmed();
   }
 
   /** 契约 A.2：最近一次成功心跳为这一租约（instance+session+generation）确认了 reply_deadline。 */
@@ -707,6 +732,7 @@ export class ShopRuntime {
     if (Buffer.byteLength(stored, "utf8") > MAX_BODY_BYTES || Buffer.byteLength(body, "utf8") > MAX_EVENT_BYTES) return this.journal.note(conversationId, messageId, "body_too_large");
     if (memoryOnly) this.fullBodies.set(request.event_id, body);
     if (candidates) this.eventOptions.set(request.event_id, candidates.map);
+    if (request.context.conv_state) this.eventConvState.set(request.event_id, request.context.conv_state);
     this.journal.addEvent({
       event_id: request.event_id,
       conversation_id: conversationId,
@@ -875,7 +901,7 @@ export class ShopRuntime {
     if (this.stopped || this.config.mode !== "auto" || ev.cancel || ev.attempt || ev.stage !== "submitted" || this.cancelling.has(ev.event_id)) return;
     const s = ev.snapshot;
     if (!s || s.delivery.status !== "unclaimed" || s.delivery.attempt_id !== null) return;
-    if (s.state === "ready" && s.decision?.action !== "reply" && s.decision?.action !== "send_item") return;
+    if (s.state === "ready" && s.decision?.action !== "reply" && s.decision?.action !== "send_item" && s.decision?.action !== "mark") return;
     if (ev.instance_id !== this.instanceId || ev.session_id !== this.sessionId || !this.deadlineConfirmed(ev.generation) || !this.leaseValid(ev.generation)) return;
     this.cancelling.add(ev.event_id);
     this.journal.setCancel(ev.event_id, { phase: "intent", detail: null, at: this.now() });
@@ -946,6 +972,9 @@ export class ShopRuntime {
     if (decision.action === "send_item") {
       const blocked = this.itemBlocker(ev);
       if (blocked) return blocked;
+    } else if (decision.action === "mark") {
+      const blocked = this.markBlocker(ev);
+      if (blocked) return blocked;
     } else if (decision.action !== "reply" || !decision.text.trim()) return "not_reply";
     if (decision.expires_at - this.now() < this.timing.decisionSafety) return "decision_expired";
     if (!afterClaim && ev.attempt) return "already_attempted";
@@ -966,6 +995,20 @@ export class ShopRuntime {
     return null;
   }
 
+  /**
+   * 契约“标星执行与成功判据·适用范围”：颜色合法；本客户端声明且本租约确认能力；本事件提交的 conv_state 为未收藏
+   * （只在内存；已收藏、marked=null 或重启后都不执行）。不满足就不 claim，只在本地记为阻止。
+   */
+  private markBlocker(ev: EventRecord): string | null {
+    const color = ev.snapshot?.decision?.mark?.color;
+    if (!color || !MARK_COLORS.includes(color)) return "mark_invalid";
+    if (!this.markExecutable()) return "capability_not_confirmed";
+    const state = this.eventConvState.get(ev.event_id);
+    if (!state) return "conv_state_not_retained";
+    if (state.marked !== false) return "conv_state_not_unmarked";
+    return null;
+  }
+
   /** 界面展示用：send_item 决定对应的候选名称（只在内存，重启后只显示类型）。 */
   itemLabel(ev: EventRecord): string | null {
     const item = ev.snapshot?.decision?.action === "send_item" ? ev.snapshot.decision.item : undefined;
@@ -978,7 +1021,7 @@ export class ShopRuntime {
 
   private async considerSend(ev: EventRecord) {
     const action = ev.snapshot?.decision?.action;
-    if (action !== "reply" && action !== "send_item") return;
+    if (action !== "reply" && action !== "send_item" && action !== "mark") return;
     const blocked = this.sendingConversations.has(ev.conversation_id) ? "conversation_busy" : this.sendBlocker(ev);
     if (blocked) {
       this.journal.setBlocked(ev.event_id, blocked);
@@ -1034,7 +1077,9 @@ export class ShopRuntime {
     this.journal.setAttempt(ev.event_id, attemptId, "claimed");
     // 平台发送与回执上传都要在许可有效期内完成；附加发送的确认截止为许可到期前 2 秒。
     const isItem = snap.decision?.action === "send_item";
-    const sendWindow = (d.claim_expires_at ?? 0) - this.now() - (isItem ? this.timing.itemReceiptReserve : this.timing.receiptReserve);
+    // 标星的确认截止同附加发送：许可到期前 2 秒（契约 1.3“前台执行”第 5 条）。
+    const isMark = snap.decision?.action === "mark";
+    const sendWindow = (d.claim_expires_at ?? 0) - this.now() - (isItem || isMark ? this.timing.itemReceiptReserve : this.timing.receiptReserve);
     const blocked = this.sendBlocker(ev, true) ?? (sendWindow < Math.max(this.timing.minSendWindow, this.timing.claimSafety) ? "claim_expiring" : null);
     if (blocked) {
       this.journal.setBlocked(ev.event_id, blocked);
@@ -1044,6 +1089,7 @@ export class ShopRuntime {
     const text = snap.decision?.text ?? "";
     // 平台请求开始前落盘；此后任何中断都只能是 unknown。
     this.journal.setAttempt(ev.event_id, attemptId, "sending");
+    if (isMark) return this.deliverMark(ev, attemptId, d.claim_expires_at ?? 0, sendWindow);
     const sendStartedMs = Date.now();
     const knownAgentIds = new Set(this.journal.conversation(ev.conversation_id).messages.filter((m) => m.role === "agent").map((m) => m.id));
     this.changed();
@@ -1068,11 +1114,41 @@ export class ShopRuntime {
 
   // ---------- unknown 自动核对（只提示人工，不重发） ----------
 
-  private onUnknown(ev: EventRecord, attemptId: string, reason: string, isItem: boolean, startedMs: number, returnedMs: number, knownAgentIds: Set<string>) {
-    const key = `${isItem ? "item" : "text"}:${reason}`;
+  /**
+   * 标星（契约 1.3）：点击、请求核对与成功判据由适配器执行；运行时只给出确认截止与点击前再核验。
+   * 回执为 mark 单步骤（未开始点击的 not_sent 不列步骤、只带原因），不带平台消息编号；
+   * unknown 不核对聊天记录、不重试、不补做。
+   */
+  private async deliverMark(ev: EventRecord, attemptId: string, claimExpiresAt: number, sendWindow: number) {
+    const color = ev.snapshot?.decision?.mark?.color;
+    let result: MarkResult;
+    try {
+      const deadline = Date.now() / 1000 + Math.min(this.timing.sendTimeoutMs / 1000, sendWindow);
+      const recheck = () => this.sendBlocker(ev, true) ?? (Date.now() / 1000 >= deadline ? "claim_expiring" : null);
+      const call: Promise<MarkResult> =
+        this.adapter.markConversation && color ? this.adapter.markConversation({ conversation_id: ev.conversation_id, color, attempt_id: attemptId, deadline, recheck }) : Promise.resolve({ status: "not_sent", reason: "capability_not_confirmed" });
+      // 适配器在截止时自己放弃点击（not_sent）；外层多等 1 秒，避免把“未点击”误判为超时 unknown。
+      const limitMs = Math.min(this.timing.sendTimeoutMs, sendWindow * 1000) + 1000;
+      result = await this.timed(ev.event_id, "platform_mark", () => withTimeout(call, limitMs));
+    } catch (err) {
+      result = { status: "unknown", reason: (err as Error)?.message === "send_timeout" ? "send_timeout" : "send_exception" };
+    }
+    if (result.status === "confirmed" && claimExpiresAt - this.now() < this.timing.itemReceiptReserve) result = { status: "unknown", reason: "confirmed_after_deadline", page_observed: result.page_observed };
+    const observed = result.status === "not_sent" ? undefined : result.page_observed;
+    if (result.status === "confirmed") this.finish(ev, attemptId, "sent", null, "sent", null, observed);
+    else this.finish(ev, attemptId, result.status, result.reason, result.status, null, observed);
+    if (result.status === "unknown") this.countUnknown("mark", result.reason);
+  }
+
+  private countUnknown(kind: string, reason: string) {
+    const key = `${kind}:${reason}`;
     this.unknownCounts.set(key, (this.unknownCounts.get(key) ?? 0) + 1);
     const total = [...this.unknownCounts.values()].reduce((a, b) => a + b, 0);
     this.log(`unknown_stats ${JSON.stringify({ total, by_reason: Object.fromEntries(this.unknownCounts) })}`);
+  }
+
+  private onUnknown(ev: EventRecord, attemptId: string, reason: string, isItem: boolean, startedMs: number, returnedMs: number, knownAgentIds: Set<string>) {
+    this.countUnknown(isItem ? "item" : "text", reason);
     const item = isItem ? ev.snapshot?.decision?.item : undefined;
     const option = item ? this.eventOptions.get(ev.event_id)?.get(item.option_id) : undefined;
     const target = isItem ? (option ? { kind: "item" as const, option } : null) : { kind: "text" as const, text: ev.snapshot?.decision?.text ?? "" };
@@ -1137,8 +1213,8 @@ export class ShopRuntime {
   }
 
   /** 结果与待上传回执同一条记录落盘，随后立即上传。 */
-  private finish(ev: EventRecord, attemptId: string, phase: AttemptPhase, detail: string | null, status: ReceiptStatus, platformMessageId: string | null = null) {
-    this.journal.finishAttempt(ev.event_id, attemptId, phase, detail, platformMessageId, pendingReceipt(status, platformMessageId));
+  private finish(ev: EventRecord, attemptId: string, phase: AttemptPhase, detail: string | null, status: ReceiptStatus, platformMessageId: string | null = null, observed?: PageObserved) {
+    this.journal.finishAttempt(ev.event_id, attemptId, phase, detail, platformMessageId, pendingReceipt(status, platformMessageId, receiptExtra(ev, status, detail, observed)));
     this.track(this.uploadReceipt(ev));
   }
 
@@ -1155,7 +1231,7 @@ export class ShopRuntime {
         const r = a?.receipt;
         if (!a || !r || r.upload !== "pending" || this.stopped) return;
         try {
-          const snap = await this.timed(ev.event_id, "receipt", () => this.backend.receipt(ev.event_id, a.attempt_id, r.status, r.platform_message_id ?? undefined));
+          const snap = await this.timed(ev.event_id, "receipt", () => this.backend.receipt(ev.event_id, a.attempt_id, r.status, r.platform_message_id ?? undefined, r.extra));
           this.saveSnapshot(ev, snap);
           this.journal.setReceipt(ev.event_id, a.attempt_id, { ...r, upload: "uploaded", error: null });
           return;
@@ -1205,8 +1281,19 @@ export class ShopRuntime {
   }
 }
 
-function pendingReceipt(status: ReceiptStatus, platformMessageId: string | null = null): ReceiptRecord {
-  return { status, platform_message_id: platformMessageId, upload: "pending", error: null };
+function pendingReceipt(status: ReceiptStatus, platformMessageId: string | null = null, extra?: ReceiptExtra): ReceiptRecord {
+  return { status, platform_message_id: platformMessageId, upload: "pending", error: null, ...(extra ? { extra } : {}) };
+}
+
+/**
+ * 契约 1.3 mark 回执：已开始点击（sent / unknown）列出唯一步骤 mark（带决定颜色）；
+ * 确定未点击（not_sent）不列步骤，只带归类后的原因。其他动作不带这些字段。
+ */
+export function receiptExtra(ev: EventRecord, status: ReceiptStatus, detail: string | null, observed?: PageObserved): ReceiptExtra | undefined {
+  const d = ev.snapshot?.decision;
+  if (d?.action !== "mark" || !d.mark) return undefined;
+  if (status === "not_sent") return { reason: convActionReason(detail) };
+  return { steps: [{ step: "mark", status, color: d.mark.color }], ...(observed ? { page_observed: observed } : {}) };
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {

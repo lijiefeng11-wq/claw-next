@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AdapterEvent, HistoryLoad, HistoryResult, ImageFetchResult, PlatformAdapter, PlatformMessage, PlatformSendOption, PlatformStatus, SendItemRequest, SendRequest, SendResult } from "./adapter.js";
+import type { AdapterEvent, HistoryLoad, HistoryResult, ImageFetchResult, MarkRequest, MarkResult, PlatformAdapter, PlatformMessage, PlatformSendOption, PlatformStatus, SendItemRequest, SendRequest, SendResult } from "./adapter.js";
 import type { Card, Kind } from "./protocol.js";
 import type { PlatformOrder } from "./pddOrders.js";
 
@@ -245,6 +245,29 @@ export class MockPlatformAdapter implements PlatformAdapter {
     }
     if (sent.length !== 1) return { status: "unknown", reason: "receipt_ambiguous" };
     return { status: "confirmed", platform_message_id: sent[0].platform_message_id as string };
+  }
+
+  /**
+   * 标星的模拟结果：confirm 平台确认；unknown 点击后不能确认；timeout_after_click 点击后无结果；
+   * page_changed 点击前发现会话状态变化（不点击）。
+   */
+  markBehavior: "confirm" | "unknown" | "timeout_after_click" | "page_changed" = "confirm";
+  /** 实际“点击颜色项”的标星记录。 */
+  readonly platformMarks: MarkRequest[] = [];
+  /** 测试用：模拟打开会话与浮层期间发生的事（如来新消息）。 */
+  beforeMarkClick: (() => void | Promise<void>) | null = null;
+
+  async markConversation(request: MarkRequest): Promise<MarkResult> {
+    if (!this.loggedIn) return { status: "not_sent", reason: "platform_logged_out" };
+    if (this.beforeMarkClick) await this.beforeMarkClick();
+    if (this.markBehavior === "page_changed") return { status: "not_sent", reason: "conv_state_changed" };
+    const blocked = request.recheck();
+    if (blocked) return { status: "not_sent", reason: blocked };
+    if (request.deadline - Date.now() / 1000 < 0.1) return { status: "not_sent", reason: "claim_expiring" };
+    this.platformMarks.push(request);
+    if (this.markBehavior === "timeout_after_click") return new Promise<MarkResult>(() => undefined);
+    if (this.markBehavior === "unknown") return { status: "unknown", reason: "mark_response_not_ok", page_observed: "unknown" };
+    return { status: "confirmed", page_observed: "marked" };
   }
 
   dispose() {
