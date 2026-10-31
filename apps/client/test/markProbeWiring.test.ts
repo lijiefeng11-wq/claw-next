@@ -41,7 +41,7 @@ function harness(probe: boolean) {
     attach: () => undefined,
     sendCommand: async (_m: string, p?: { requestId?: string }) => ({ body: bodies.get(p?.requestId ?? "") ?? "", base64Encoded: false }),
   });
-  const page = { isDestroyed: () => false, webContents: { debugger: dbg } };
+  const page = { isDestroyed: () => false, webContents: { debugger: dbg, on: () => undefined } };
   const adapter = new PddPageAdapter("fixture", "虚构店铺", probe ? path.join(dir, "requests.jsonl") : null) as unknown as {
     attachNetwork(w: unknown): void;
     lastActiveUid: string | null;

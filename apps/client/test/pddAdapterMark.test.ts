@@ -55,10 +55,25 @@ type Net = {
   fail(id: string): void;
 };
 
-function harness(opts: { page?: Partial<Page>; onClick?: (net: Net, a: any) => void; onScript?: (name: string, a: any) => void } = {}) {
+type Opts = {
+  page?: Partial<Page>;
+  onClick?: (net: Net, a: any, h: Hooks) => void;
+  onScript?: (name: string, a: any, h: Hooks) => void;
+  /** 读取响应体期间发生的事（如页面重建）。 */
+  onBody?: (a: any) => void;
+  /** 前台每条鼠标命令产生几条页面输入事件（真实 Electron 实测为 1）。 */
+  inputsPerCommand?: number;
+};
+type Hooks = { human(type: string): void; identity: { shop: string; logged_in: boolean } };
+
+function harness(opts: Opts = {}) {
   const page = { ...PAGE, ...opts.page };
   const adapter = new PddPageAdapter("shop-x", "虚构店铺") as any;
   let listener: (e: unknown, method: string, params: any) => void = () => undefined;
+  let onInput: (e: unknown, input: { type: string }) => void = () => undefined;
+  const identity = { shop: "pdd-shop-x", logged_in: true };
+  const hooks: Hooks = { human: (type) => onInput(null, { type }), identity };
+  const CDP_INPUT: Record<string, string> = { mouseMoved: "mouseMove", mousePressed: "mouseDown", mouseReleased: "mouseUp" };
   let attached = false;
   const bodies = new Map<string, string>();
   const log = { clicks: [] as { x: number; y: number }[], hovers: [] as { x: number; y: number }[], continued: [] as string[], failed: [] as string[], fetchPatterns: [] as string[], scripts: [] as string[] };
@@ -91,13 +106,16 @@ function harness(opts: { page?: Partial<Page>; onClick?: (net: Net, a: any) => v
       if (method === "Fetch.failRequest") log.failed.push(params.requestId);
       if (method === "Network.getResponseBody") {
         const body = bodies.get(params.requestId);
+        opts.onBody?.(adapter);
         if (body === undefined) throw new Error("no body");
         return { body, base64Encoded: false };
       }
+      // 与真实 Electron 一致：调试通道的鼠标命令在返回前产生对应类型的页面输入事件。
+      if (method === "Input.dispatchMouseEvent") for (let i = 0; i < (opts.inputsPerCommand ?? 1); i++) onInput(null, { type: CDP_INPUT[params.type] });
       if (method === "Input.dispatchMouseEvent" && params.type === "mouseMoved") log.hovers.push({ x: params.x, y: params.y });
       if (method === "Input.dispatchMouseEvent" && params.type === "mouseReleased") {
         log.clicks.push({ x: params.x, y: params.y });
-        opts.onClick?.(net, adapter);
+        opts.onClick?.(net, adapter, hooks);
       }
       return {};
     },
@@ -120,17 +138,20 @@ function harness(opts: { page?: Partial<Page>; onClick?: (net: Net, a: any) => v
     executeJavaScriptInIsolatedWorld: async (_world: number, [{ code }]: { code: string }[]) => {
       const name = code === CONV_STAR_SNAPSHOT ? (log.clicks.length ? "after" : "snap") : code.includes("aria-describedby") ? (code.includes("const check = null") ? "pop" : "owned") : code.includes("收藏该用户") ? "star" : "other";
       log.scripts.push(name);
-      opts.onScript?.(name, adapter);
+      opts.onScript?.(name, adapter, hooks);
       return script(code);
+    },
+    on: (event: string, fn: typeof onInput) => {
+      if (event === "input-event") onInput = fn;
     },
   };
   const win = { isDestroyed: () => false, webContents };
   adapter.window = win;
-  adapter.tracker = { status: () => ({ logged_in: true }), history: () => ({ messages: [] }) };
+  adapter.tracker = { status: () => ({ logged_in: identity.logged_in, identity: identity.logged_in ? { platform_shop_id: identity.shop, display_name: "虚构店铺" } : null }), history: () => ({ messages: [] }) };
   adapter.attachNetwork(win);
   const mark = (color: MarkColor = "red", seconds = 3, recheck: () => string | null = () => null): Promise<MarkResult> =>
     adapter.markConversation({ conversation_id: BUYER, color, attempt_id: "att-1", deadline: Date.now() / 1000 + seconds, recheck });
-  return { adapter, log, net, mark };
+  return { adapter, log, net, mark, hooks };
 }
 
 /** 页面对点击的正常反应：发出一条与本次一致的标星请求，稍后得到响应。 */
@@ -247,7 +268,7 @@ describe("标星：点击窗口内的请求核对", () => {
     });
   }
 
-  test("第二条 mark 与任何 unmark 都拦截；放行的第一条照常按自己的响应确认", async () => {
+  test("第二条 mark 与任何 unmark 都拦截；窗口内不止一条请求就不能证明来源：即使放行的那条成功也是 unknown", async () => {
     const h = harness({
       onClick: (net) => {
         net.request("n-1", MARK, { uid: BUYER, color: 2, request_id: REQ_ID });
@@ -256,9 +277,24 @@ describe("标星：点击窗口内的请求核对", () => {
         setTimeout(() => net.respond("n-1", okBody()), 30);
       },
     });
-    assert.equal((await h.mark()).status, "confirmed");
+    const r = await h.mark("red", 2);
+    assert.deepEqual(r.status === "unknown" && r.reason, "mark_request_ambiguous");
     assert.deepEqual(h.log.continued, ["f-n-1"]);
     assert.deepEqual(h.log.failed, ["f-n-2", "f-n-3"]);
+  });
+
+  test("同买家同颜色的人工或旧请求先于本次点击的请求到达：先到的放行、本次的被拦截，结论 unknown（不认领成功）", async () => {
+    const h = harness({
+      onClick: (net) => {
+        net.request("r-old", MARK, { uid: BUYER, color: 2, request_id: REQ_ID - 5 });
+        net.request("n-1", MARK, { uid: BUYER, color: 2, request_id: REQ_ID });
+        setTimeout(() => net.respond("r-old", okBody(REQ_ID - 5)), 20);
+      },
+    });
+    const r = await h.mark("red", 2);
+    assert.deepEqual(r.status === "unknown" && r.reason, "mark_request_ambiguous");
+    assert.deepEqual(h.log.continued, ["f-r-old"]);
+    assert.deepEqual(h.log.failed, ["f-n-1"]);
   });
 
   test("点击后页面代次变化：随后的请求拦截；unknown", async () => {
@@ -269,7 +305,7 @@ describe("标星：点击窗口内的请求核对", () => {
       },
     });
     const r = await h.mark("red", 2);
-    assert.deepEqual(r.status === "unknown" && r.reason, "mark_request_blocked");
+    assert.deepEqual(r.status === "unknown" && r.reason, "page_changed_during_mark");
     assert.deepEqual(h.log.failed, ["f-n-1"]);
   });
 
@@ -286,16 +322,11 @@ describe("标星：点击窗口内的请求核对", () => {
     assert.equal(h.log.clicks.length, 1);
   });
 
-  test("窗口外不受影响：没有进行中的标星，或已进入标星但尚未点击时，页面的标星 / 取消收藏请求照常放行", async () => {
-    const h = harness({
-      onScript: (name, a) => {
-        // 核对期间（窗口尚未打开）店主手动操作。
-        if (name === "owned") h.net.request("m-2", UNMARK, { uid: OTHER, request_id: 2 });
-        void a;
-      },
-      onClick: pageSends(),
-    });
+  test("没有进行中的标星、或标星结束之后：页面的标星 / 取消收藏请求照常放行（店主手动操作不受影响）", async () => {
+    const h = harness({ onClick: pageSends() });
     h.net.request("m-1", MARK, { uid: OTHER, color: 4, request_id: 1 });
+    h.net.request("m-2", UNMARK, { uid: OTHER, request_id: 2 });
+    h.adapter.lastMarkRequestAt = Date.now() - 3100;
     assert.equal((await h.mark()).status, "confirmed");
     h.net.request("m-3", MARK, { uid: OTHER, color: 3, request_id: 3 });
     assert.deepEqual(h.log.continued, ["f-m-1", "f-m-2", "f-n-1", "f-m-3"]);
@@ -340,29 +371,131 @@ describe("标星：响应判定一律按放行请求自己的编号", () => {
     assert.equal(h.adapter.markWatch, null);
   });
 
-  test("乱序到达也不串：先到的是另一条（被拦截请求）的成功响应，不算；放行请求自己的失败响应决定结论", async () => {
+  // 乱序：3 秒多以前店主手动发出的请求（窗口外、已放行），其响应恰好在本次窗口内到达。
+  const earlier = (h: ReturnType<typeof harness>) => {
+    h.net.request("m-0", MARK, { uid: BUYER, color: 2, request_id: REQ_ID });
+    h.adapter.lastMarkRequestAt = Date.now() - 3100;
+  };
+
+  test("乱序到达也不串：先到的是窗口外另一条请求的成功响应，不算；放行请求自己的失败响应决定结论", async () => {
     const h = harness({
       onClick: (net) => {
         net.request("n-1", MARK, { uid: BUYER, color: 2, request_id: REQ_ID });
-        net.request("n-2", MARK, { uid: BUYER, color: 2, request_id: REQ_ID });
-        setTimeout(() => net.respond("n-2", okBody()), 10);
+        setTimeout(() => net.respond("m-0", okBody()), 10);
         setTimeout(() => net.respond("n-1", JSON.stringify({ success: false })), 60);
       },
     });
+    earlier(h);
     const r = await h.mark();
     assert.deepEqual(r.status === "unknown" && r.reason, "mark_response_not_ok");
   });
 
-  test("乱序到达也不串：放行请求的成功响应晚于其他请求的失败响应，仍按自己的响应确认", async () => {
+  test("乱序到达也不串：放行请求的成功响应晚于窗口外另一条请求的失败，仍按自己的响应确认", async () => {
     const h = harness({
       onClick: (net) => {
         net.request("n-1", MARK, { uid: BUYER, color: 2, request_id: REQ_ID });
-        net.request("n-2", UNMARK, { uid: BUYER, request_id: REQ_ID });
-        setTimeout(() => net.fail("n-2"), 10);
+        setTimeout(() => net.fail("m-0"), 10);
         setTimeout(() => net.respond("n-1", okBody()), 60);
       },
     });
+    earlier(h);
     assert.equal((await h.mark()).status, "confirmed");
+    assert.deepEqual(h.log.continued, ["f-m-0", "f-n-1"]);
+  });
+});
+
+describe("标星：来源绑定（操作独占、无外来输入、点击前静默、窗口内唯一）", () => {
+  test("前台自己的悬停与点击各产生一条输入事件：配对后不算外来", async () => {
+    const h = harness({ onClick: pageSends() });
+    assert.equal((await h.mark()).status, "confirmed");
+  });
+
+  test("一条命令产生了多条输入事件：多出的算外来，不点击", async () => {
+    const h = harness({ inputsPerCommand: 2 });
+    assert.deepEqual(await h.mark(), { status: "not_sent", reason: "conv_state_changed" });
+    assert.equal(h.log.clicks.length, 0);
+  });
+
+  for (const at of ["snap", "star", "pop", "owned"]) {
+    test(`核对期间（${at}）平台页面有人工输入：不点击（conv_state_changed）`, async () => {
+      const h = harness({ onScript: (name, _a, k) => void (name === at && k.human("mouseMove")) });
+      assert.deepEqual(await h.mark(), { status: "not_sent", reason: "conv_state_changed" });
+      assert.equal(h.log.clicks.length, 0);
+    });
+  }
+
+  test("点击后窗口内有人工输入：即使请求与响应全部满足也是 unknown", async () => {
+    const h = harness({ onClick: (net, a, k) => (k.human("mouseDown"), pageSends()(net)) });
+    const r = await h.mark();
+    assert.deepEqual(r.status === "unknown" && r.reason, "manual_input_during_mark");
+  });
+
+  test("核对期间页面发出标星 / 取消收藏请求：照常放行，但本次不点击", async () => {
+    const h = harness({ onScript: (name) => void (name === "owned" && h.net.request("m-1", MARK, { uid: BUYER, color: 2, request_id: 9 })) });
+    assert.deepEqual(await h.mark(), { status: "not_sent", reason: "conv_state_changed" });
+    assert.deepEqual(h.log.continued, ["f-m-1"]);
+    assert.equal(h.log.clicks.length, 0);
+  });
+
+  test("点击前 3 秒内页面发出过此类请求（含前台自己上一次）：不点击；静默满 3 秒后可以", async () => {
+    const h = harness({ onClick: pageSends() });
+    h.net.request("m-1", UNMARK, { uid: OTHER, request_id: 1 });
+    assert.deepEqual(await h.mark(), { status: "not_sent", reason: "conv_state_changed" });
+    assert.equal(h.log.clicks.length, 0);
+    h.adapter.lastMarkRequestAt = Date.now() - 3100;
+    assert.equal((await h.mark()).status, "confirmed");
+    // 刚完成的这次标星本身也计入静默：紧接着再来一次不点击。
+    assert.deepEqual(await h.mark(), { status: "not_sent", reason: "conv_state_changed" });
+    assert.equal(h.log.clicks.length, 1);
+  });
+
+  test("点击前平台登录店铺变化：不点击（由运行时归为 not_started）", async () => {
+    const h = harness({ onScript: (name, _a, k) => void (name === "pop" && (k.identity.shop = "pdd-other")) });
+    assert.deepEqual(await h.mark(), { status: "not_sent", reason: "platform_changed_during_mark" });
+    assert.equal(h.log.clicks.length, 0);
+  });
+
+  test("放行后页面重建：旧响应满足判据也是 unknown", async () => {
+    const h = harness({
+      onClick: (net, a) => {
+        net.request("n-1", MARK, { uid: BUYER, color: 2, request_id: REQ_ID });
+        a.watchEpoch++;
+        setTimeout(() => net.respond("n-1", okBody()), 30);
+      },
+    });
+    const r = await h.mark();
+    assert.deepEqual(r.status === "unknown" && r.reason, "page_changed_during_mark");
+  });
+
+  test("读取响应期间页面重建：unknown", async () => {
+    const h = harness({ onClick: pageSends(), onBody: (a) => void a.watchEpoch++ });
+    const r = await h.mark();
+    assert.deepEqual(r.status === "unknown" && r.reason, "page_changed_during_mark");
+  });
+
+  for (const [name, change] of [
+    ["平台登录失效", (k: Hooks) => void (k.identity.logged_in = false)],
+    ["登录店铺变化", (k: Hooks) => void (k.identity.shop = "pdd-other")],
+  ] as const) {
+    test(`放行后${name}：unknown`, async () => {
+      const h = harness({ onClick: (net, _a, k) => (pageSends()(net), change(k)) });
+      const r = await h.mark();
+      assert.deepEqual(r.status === "unknown" && r.reason, "platform_changed_during_mark");
+    });
+  }
+
+  test("资格失效后才到的成功响应不改写结论", async () => {
+    let later: (() => void) | null = null;
+    const h = harness({
+      onClick: (net, a) => {
+        net.request("n-1", MARK, { uid: BUYER, color: 2, request_id: REQ_ID });
+        a.watchEpoch++;
+        later = () => net.respond("n-1", okBody());
+      },
+    });
+    const r = await h.mark("red", 2);
+    later!();
+    assert.deepEqual(r.status === "unknown" && r.reason, "page_changed_during_mark");
   });
 });
 

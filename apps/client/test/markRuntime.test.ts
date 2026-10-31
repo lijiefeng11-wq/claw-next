@@ -217,6 +217,16 @@ describe("标星：执行与回执", () => {
     assert.deepEqual([fake.state.receipts[0].status, fake.state.receipts[0].reason], ["not_sent", "capability_withdrawn"]);
   });
 
+  test("确认之后发现平台登录店铺已变化：成功不能归于本次，回执 unknown（步骤 unknown）", async () => {
+    const fake = fakeBackend();
+    const h = await shop(fake);
+    h.mock.afterMarkClick = () => void (h.mock.loginAs = "pdd-other-shop");
+    await decided(fake, h);
+    await waitFor(() => fake.state.receipts.length > 0, "receipt");
+    assert.deepEqual(fake.state.receipts.map((r) => [r.status, r.steps]), [["unknown", [{ step: "mark", status: "unknown", color: "red" }]]]);
+    assert.equal(eventsOf(h.rt)[0].attempt?.detail, "platform_changed_during_mark");
+  });
+
   test("点击中途客户端退出：重启后按 unknown 上报（带 mark 步骤），不重新点击", async () => {
     const fake = fakeBackend();
     const dir = tempDir("claw-next-mark-");

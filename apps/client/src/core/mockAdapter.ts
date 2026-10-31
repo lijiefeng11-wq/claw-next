@@ -256,6 +256,8 @@ export class MockPlatformAdapter implements PlatformAdapter {
   readonly platformMarks: MarkRequest[] = [];
   /** 测试用：模拟打开会话与浮层期间发生的事（如来新消息）。 */
   beforeMarkClick: (() => void | Promise<void>) | null = null;
+  /** 测试用：模拟点击之后、返回结果之前发生的事（如登录店铺变化）。 */
+  afterMarkClick: (() => void) | null = null;
 
   async markConversation(request: MarkRequest): Promise<MarkResult> {
     if (!this.loggedIn) return { status: "not_sent", reason: "platform_logged_out" };
@@ -265,6 +267,7 @@ export class MockPlatformAdapter implements PlatformAdapter {
     if (blocked) return { status: "not_sent", reason: blocked };
     if (request.deadline - Date.now() / 1000 < 0.1) return { status: "not_sent", reason: "claim_expiring" };
     this.platformMarks.push(request);
+    this.afterMarkClick?.();
     if (this.markBehavior === "timeout_after_click") return new Promise<MarkResult>(() => undefined);
     if (this.markBehavior === "unknown") return { status: "unknown", reason: "mark_response_not_ok", page_observed: "unknown" };
     return { status: "confirmed", page_observed: "marked" };

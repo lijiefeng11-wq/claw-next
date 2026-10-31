@@ -94,6 +94,11 @@ export const REASONS: Record<string, string> = {
   mark_response_not_ok: "平台响应不满足成功判据",
   mark_request_failed: "标星请求加载失败",
   mark_response_timeout: "确认截止前没有取到平台响应",
+  mark_request_ambiguous: "点击期间页面发出了不止一条标星/取消收藏请求，无法确认哪条来自本次",
+  mark_request_before_click: "点击前页面已发出标星/取消收藏请求",
+  manual_input_during_mark: "标星期间平台页面有人工操作",
+  page_changed_during_mark: "标星期间平台页面已变化",
+  platform_changed_during_mark: "标星期间平台登录或店铺已变化",
 };
 
 export function reasonText(code: string | null | undefined): string {

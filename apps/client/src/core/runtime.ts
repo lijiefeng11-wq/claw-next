@@ -1134,6 +1134,8 @@ export class ShopRuntime {
       result = { status: "unknown", reason: (err as Error)?.message === "send_timeout" ? "send_timeout" : "send_exception" };
     }
     if (result.status === "confirmed" && claimExpiresAt - this.now() < this.timing.itemReceiptReserve) result = { status: "unknown", reason: "confirmed_after_deadline", page_observed: result.page_observed };
+    // 确认后再核对平台登录店铺与会话：归属已变化时成功不能归于本次（契约“来源绑定”页面或登录变化）。
+    if (result.status === "confirmed" && (this.platformCheck() || ev.session_id !== this.sessionId)) result = { status: "unknown", reason: "platform_changed_during_mark", page_observed: result.page_observed };
     const observed = result.status === "not_sent" ? undefined : result.page_observed;
     if (result.status === "confirmed") this.finish(ev, attemptId, "sent", null, "sent", null, observed);
     else this.finish(ev, attemptId, result.status, result.reason, result.status, null, observed);

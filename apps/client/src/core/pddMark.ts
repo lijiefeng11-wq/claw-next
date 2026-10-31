@@ -8,9 +8,12 @@ import type { MarkColor } from "./protocol.js";
 /** 颜色与平台 mark_conversation 请求 color 数值（店主在场逐个点选并确认，2026-10-31）。0 与大于 4 未观察，不用。 */
 export const MARK_COLOR_VALUE: Readonly<Record<MarkColor, number>> = { orange: 1, red: 2, green: 3, blue: 4 };
 
+/** 点击前静默：点击前这么久之内页面发出过标星 / 取消收藏请求（含前台自己上一次），就不点击。 */
+export const MARK_QUIET_MS = 3000;
+
 /**
- * 一次标星的点击窗口。open：点击前一刻打开；closed：确认截止（或结束）后关闭。
- * 窗口外（未打开或已关闭）页面请求一律放行，不受影响。
+ * 一次标星从占用页面开始的守护记录。open：点击前一刻打开点击窗口；closed：确认截止（或结束）后关闭。
+ * 点击窗口外（未打开或已关闭）页面请求一律放行，不受影响；守护期间的外来输入与请求只用于判定本次能否成立。
  */
 export type MarkWatch = {
   buyer: string;
@@ -20,13 +23,32 @@ export type MarkWatch = {
   closed: boolean;
   /** 窗口内放行的唯一一条请求：浏览器请求编号（CDP Network requestId）与请求体 data.request_id。 */
   allowed: { networkId: string; requestId: number } | null;
+  /** 窗口内被拦截的标星 / 取消收藏请求条数。 */
   blocked: number;
+  /** 点击前（守护开始到按下）页面发出的标星 / 取消收藏请求条数（照常放行，但本次放弃点击）。 */
+  before: number;
+  /** 前台自己正在执行的输入命令所对应、尚未到达的页面输入事件类型（按顺序）。 */
+  expected: string[];
+  /** 不能与前台自己的输入命令配对的页面输入事件条数（视为人工介入）。 */
+  foreign: number;
+  /** 页面或登录归属失效的原因；一旦置上不再清除。 */
+  invalid: string | null;
   /** 放行请求自己的响应结论：ok 满足成功判据；bad 不满足；failed 加载失败。先到的结论为准。 */
   outcome: "ok" | "bad" | "failed" | null;
 };
 
 export function newMarkWatch(buyer: string, color: number, epoch: number): MarkWatch {
-  return { buyer, color, epoch, open: false, closed: false, allowed: null, blocked: 0, outcome: null };
+  return { buyer, color, epoch, open: false, closed: false, allowed: null, blocked: 0, before: 0, expected: [], foreign: 0, invalid: null, outcome: null };
+}
+
+/**
+ * 守护期间页面收到一条输入事件：与前台正在执行的命令按顺序、按类型配对，配上即消耗；其余一律计为外来输入。
+ * 坐标随页面缩放与屏幕倍率换算，不作为配对依据；每条命令恰好对应一条事件，多出的也算外来。
+ */
+export function observeInput(w: MarkWatch, type: unknown): void {
+  if (w.closed) return;
+  if (w.expected.length && w.expected[0] === type) w.expected.shift();
+  else w.foreign += 1;
 }
 
 const plain = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -70,8 +92,15 @@ export function markResponseOk(requestId: number, body: string | null): boolean 
   return finite(result.request_id) && result.request_id === requestId;
 }
 
-/** 窗口关闭时的结论：只有放行的那条请求按自己的编号取到满足判据的响应才成功；其余都是 unknown 并给出原因分类。 */
+/**
+ * 窗口关闭时的结论。成功须同时满足：来源绑定（无外来输入、点击前静默、窗口内只有放行的这一条请求）、
+ * 页面与登录归属始终有效、放行请求按自己的编号取到满足判据的响应。其余都是 unknown 并给出原因分类。
+ */
 export function judgeMark(w: MarkWatch): { ok: true } | { ok: false; reason: string } {
+  if (w.invalid) return { ok: false, reason: w.invalid };
+  if (w.foreign) return { ok: false, reason: "manual_input_during_mark" };
+  if (w.before) return { ok: false, reason: "mark_request_before_click" };
+  if (w.allowed && w.blocked) return { ok: false, reason: "mark_request_ambiguous" };
   if (w.allowed && w.outcome === "ok") return { ok: true };
   if (!w.allowed) return { ok: false, reason: w.blocked ? "mark_request_blocked" : "mark_request_not_observed" };
   if (w.outcome === "bad") return { ok: false, reason: "mark_response_not_ok" };

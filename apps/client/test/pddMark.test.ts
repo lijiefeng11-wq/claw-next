@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { judgeMark, MARK_COLOR_VALUE, markRequestVerdict, markResponseOk, newMarkWatch } from "../src/core/pddMark.js";
+import { judgeMark, MARK_COLOR_VALUE, markRequestVerdict, markResponseOk, newMarkWatch, observeInput } from "../src/core/pddMark.js";
 import { convActionReason, parseSnapshot } from "../src/core/protocol.js";
 
 // 契约“标星执行与成功判据”的纯判定：全部为虚构编号与虚构响应。
@@ -109,13 +109,50 @@ describe("窗口结论", () => {
   });
 });
 
+describe("来源绑定：输入配对与窗口结论", () => {
+  const ready = () => {
+    const x = newMarkWatch(BUYER, 2, 1);
+    x.allowed = { networkId: "n", requestId: REQ_ID };
+    x.outcome = "ok";
+    return x;
+  };
+  test("命令期间按顺序到达的对应类型事件算自己的；其余（多出、类型不对、命令之外）都算外来", () => {
+    const w = newMarkWatch(BUYER, 2, 1);
+    w.expected = ["mouseDown", "mouseUp"];
+    observeInput(w, "mouseDown");
+    observeInput(w, "mouseUp");
+    assert.deepEqual([w.foreign, w.expected], [0, []]);
+    observeInput(w, "mouseMove");
+    w.expected = ["mouseDown", "mouseUp"];
+    observeInput(w, "mouseUp");
+    assert.equal(w.foreign, 2);
+    w.closed = true;
+    observeInput(w, "keyDown");
+    assert.equal(w.foreign, 2, "窗口关闭后不再计数");
+  });
+  test("响应满足判据时，外来输入、点击前请求、窗口内第二条请求、页面或登录失效都使结论为 unknown", () => {
+    assert.deepEqual(judgeMark(ready()), { ok: true });
+    for (const [set, reason] of [
+      [(x: ReturnType<typeof ready>) => (x.foreign = 1), "manual_input_during_mark"],
+      [(x: ReturnType<typeof ready>) => (x.before = 1), "mark_request_before_click"],
+      [(x: ReturnType<typeof ready>) => (x.blocked = 1), "mark_request_ambiguous"],
+      [(x: ReturnType<typeof ready>) => (x.invalid = "page_changed_during_mark"), "page_changed_during_mark"],
+      [(x: ReturnType<typeof ready>) => (x.invalid = "platform_changed_during_mark"), "platform_changed_during_mark"],
+    ] as const) {
+      const x = ready();
+      set(x);
+      assert.deepEqual(judgeMark(x), { ok: false, reason });
+    }
+  });
+});
+
 describe("回执原因归类", () => {
   test("页面状态原样；能力撤回与截止归类；其余 not_started", () => {
     assert.equal(convActionReason("conv_state_changed"), "conv_state_changed");
     assert.equal(convActionReason("conv_state_unavailable"), "conv_state_unavailable");
     assert.equal(convActionReason("capability_not_confirmed"), "capability_withdrawn");
     for (const d of ["claim_expiring", "decision_expired", "reply_deadline_exceeded"]) assert.equal(convActionReason(d), "deadline_exceeded");
-    for (const d of ["superseded", "session_changed", "manual_takeover", "pdd_send_busy", "restarted_before_send", null, undefined]) assert.equal(convActionReason(d), "not_started");
+    for (const d of ["superseded", "session_changed", "manual_takeover", "pdd_send_busy", "restarted_before_send", "platform_changed_during_mark", null, undefined]) assert.equal(convActionReason(d), "not_started");
   });
 });
 
