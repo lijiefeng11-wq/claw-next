@@ -2152,6 +2152,21 @@ export class PddPageAdapter implements PlatformAdapter {
     return this.watchEpoch === sentEpoch && buyers.size === 1 && only ? only : null;
   }
 
+  /**
+   * 只读收藏状态：不点击、不悬停，只看工具栏星标是否带 active。读取前后都须该买家正是唯一打开的会话
+   * （按买家去重）且页面代次未变，否则 marked=null。颜色要悬停才能读，本步不读，color 一律 null。
+   */
+  async readConvState(conversationId: string, _timeoutMs: number): Promise<{ marked: boolean | null; color: null }> {
+    const unknown = { marked: null, color: null };
+    if (!this.window || this.window.isDestroyed() || this.sending || this.outgoing) return unknown;
+    const epoch = this.watchEpoch;
+    if ((await this.freshActive(epoch)) !== conversationId) return unknown;
+    const star = await this.run<{ x: number; y: number; active: boolean } | string>(STAR_ICON).catch(() => "script_failed");
+    if (typeof star === "string" || typeof star?.active !== "boolean") return unknown;
+    if ((await this.freshActive(epoch)) !== conversationId) return unknown;
+    return { marked: star.active, color: null };
+  }
+
   /** 当前打开对话的绑定令牌：页面代次＋列表项键的摘要（不含可读身份）；没有唯一打开的对话返回 null。 */
   private async activeConvToken(): Promise<string | null> {
     const scan = await this.scanKeepingFresh();

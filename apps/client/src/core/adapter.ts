@@ -1,4 +1,4 @@
-import type { Card, ImageMime, Kind, Role } from "./protocol.js";
+import type { Card, ImageMime, Kind, MarkColor, Role } from "./protocol.js";
 import type { PlatformOrder } from "./pddOrders.js";
 import type { PageHealthView } from "./pageHealth.js";
 
@@ -102,6 +102,11 @@ export interface PlatformAdapter {
   fetchImage?(ref: string): Promise<ImageFetchResult>;
   /** 等该买家进行中的订单读取结束（最多 timeoutMs），避免订单晚到使刚生成的决定作废。 */
   ordersSettled?(conversationId: string, timeoutMs: number): Promise<void>;
+  /**
+   * 只读当前页面上该买家会话的收藏状态（不点击、不悬停）。读数须来自该买家正是唯一打开的会话、
+   * 且读取前后页面代次未变；否则 marked 为 null。颜色未可靠读到时为 null。
+   */
+  readConvState?(conversationId: string, timeoutMs: number): Promise<{ marked: boolean | null; color: MarkColor | null }>;
   /**
    * 通过平台页面自身按钮发送一项已有内容。只有平台明确成功且聊天记录相对点击前恰好新增一条
    * 对应对象的客服消息时才返回 confirmed（附该消息编号）；点击前放弃返回 not_sent；其余 unknown。
