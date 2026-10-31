@@ -44,6 +44,7 @@
     formDirty: false,
     formDisabled: true,
     rules: [],
+    fallback: {},
     rulesPage: 0,
     ruleUid: 0,
     ruleSeq: 0,
@@ -98,7 +99,7 @@
     "prompt-brief", "generate-prompt", "prompt-draft-status", "prompt-draft", "apply-prompt-draft",
     "rules-list", "rules-empty", "rules-count", "add-rule-btn", "rules-error",
     "rules-prev", "rules-next", "rules-page",
-    "settings-remote-note", "save-btn", "reset-btn", "save-status",
+    "settings-remote-note", "save-btn", "reset-btn", "save-status", "fallback-controls",
     "limit-select", "refresh-btn", "auto-refresh", "events-meta", "events-body", "events-empty",
     "model-form", "model-version", "model-note", "model-error",
     "model-save-btn", "model-reload-btn", "model-status",
@@ -354,14 +355,18 @@
         typeof r.reply === "string" ? r.reply : "",
         typeof r.description === "string" ? r.description : "",
         sendType,
-        sendMatch
+        sendMatch,
+        r.handling ? policySignature(r.handling) : null
       ];
     });
     return JSON.stringify([
       s.enabled === true,
       ["model", "hybrid"].includes(s.mode) ? s.mode : "rules",
       typeof s.system_prompt === "string" ? s.system_prompt : "",
-      rules
+      rules,
+      ["unhandled", "error", "model_timeout"].map(function (key) {
+        return policySignature(s.fallback && s.fallback[key]);
+      })
     ]);
   }
 
@@ -770,23 +775,28 @@
     sendLabel.className = "field rule-field rule-send-type-field";
     const sendTitle = document.createElement("span");
     sendTitle.className = "field-label";
-    setText(sendTitle, "发送方式");
+    setText(sendTitle, "处理方式");
     const sendSelect = document.createElement("select");
     sendSelect.className = "rule-send-type";
     [{ value: "", label: "文字回复" }].concat(SEND_TYPES.map(function (type) {
       return { value: type, label: SEND_TYPE_LABELS[type] };
-    })).forEach(function (entry) {
+    }), [
+      { value: "handling:mark", label: "收藏标星（尚未启用）" },
+      { value: "handling:transfer", label: "转人工（尚未启用）" },
+      { value: "handling:handoff", label: "建议人工处理" },
+      { value: "handling:none", label: "不处理" }
+    ]).forEach(function (entry) {
       const option = document.createElement("option");
       option.value = entry.value;
       setText(option, entry.label);
       sendSelect.appendChild(option);
     });
-    sendSelect.value = ruleSendType(rule);
+    sendSelect.value = rule.handling ? "handling:" + rule.handling.action : ruleSendType(rule);
     sendSelect.setAttribute("aria-label", "第 " + (index + 1) + " 条规则的发送方式");
     sendSelect.disabled = state.formDisabled;
     sendLabel.appendChild(sendTitle);
     sendLabel.appendChild(sendSelect);
-    help(sendLabel, "选择回复文字，或发送本店已有的说明书、商品卡片、视频。这里只规定回复内容；实际发送还需要前台已获授权，保存本项不会开启自动回复。");
+    help(sendLabel, "每条规则只执行一种处理。收藏与转人工可先保存配置，目前尚未启用；保存本项不会开启自动回复或平台动作。");
     replyGroup.appendChild(sendLabel);
 
     const matchLabel = document.createElement("label");
@@ -834,10 +844,16 @@
     replyLabel.appendChild(replyInput);
     help(replyLabel, "文字回复时必填，最多 2000 字；选商品卡等方式时可留空。示例写法：“请告知具体款式，我先核对材质。”请填写店铺已确认的事实，模型选中这条规则后也会使用原文。");
     replyGroup.appendChild(replyLabel);
+    const handlingGroup = document.createElement("div");
+    replyGroup.appendChild(handlingGroup);
     row.appendChild(replyGroup);
 
     function syncSendUi() {
-      const active = ruleSendType(rule) !== "";
+      const active = !rule.handling && ruleSendType(rule) !== "";
+      replyLabel.hidden = !!rule.handling;
+      replyInput.disabled = state.formDisabled || !!rule.handling;
+      handlingGroup.replaceChildren();
+      if (rule.handling) handlingGroup.appendChild(policyDetails(rule.handling));
       matchLabel.hidden = !active;
       sendHint.hidden = !active;
       matchInput.disabled = state.formDisabled || !active;
@@ -853,6 +869,12 @@
     syncSendUi();
 
     sendSelect.addEventListener("change", function () {
+      if (sendSelect.value.startsWith("handling:")) {
+        rule.handling = newPolicy(sendSelect.value.slice(9));
+        rule.send = null;
+        syncSendUi();onFormEdit();return;
+      }
+      rule.handling = null;
       const type = SEND_TYPES.includes(sendSelect.value) ? sendSelect.value : "";
       if (type) {
         rule.send = {
@@ -891,6 +913,81 @@
     return row;
   }
 
+  function policySignature(policy) {
+    const p = policy || { action: "handoff" };
+    return [p.action, p.color || "", p.account || "", p.allow_unmark === true];
+  }
+
+  function policyError(policy) {
+    if (!["none", "handoff", "mark", "transfer"].includes(policy.action)) return "请选择处理方式。";
+    if (policy.action === "mark" && !["red", "orange", "blue", "green"].includes(policy.color)) return "请选择星标颜色。";
+    if (policy.action === "transfer" && (typeof policy.account !== "string" || !policy.account.trim() || policy.account.trim().length > 40)) return "请填写 1–40 字的客服账号显示名。";
+    return "";
+  }
+
+  function policyDetails(policy) {
+    const group = document.createElement("div");
+    group.className = "policy-details";
+    function field(title, input) {
+      const label = document.createElement("label");
+      label.className = "field";
+      const text = document.createElement("span");
+      setText(text, title);
+      label.appendChild(text);
+      input.disabled = state.formDisabled;
+      label.appendChild(input);
+      group.appendChild(label);
+    }
+    if (policy.action === "mark") {
+      const color = document.createElement("select");
+      [["red", "红色"], ["orange", "黄色"], ["blue", "蓝色"], ["green", "绿色"]].forEach(function (entry) {
+        const option = document.createElement("option");option.value = entry[0];setText(option, entry[1]);color.appendChild(option);
+      });
+      color.value = policy.color;
+      color.addEventListener("change", function () { policy.color = color.value;onFormEdit(); });
+      field("星标颜色", color);
+    } else if (policy.action === "transfer") {
+      const account = document.createElement("input");
+      account.type = "text";account.maxLength = 40;account.value = policy.account || "";
+      account.placeholder = "例如：主账号（须与平台显示名完全一致）";
+      account.addEventListener("input", function () { policy.account = account.value;onFormEdit(); });
+      field("接收客服账号", account);
+      const allow = document.createElement("input");allow.type = "checkbox";allow.checked = policy.allow_unmark === true;
+      allow.addEventListener("change", function () { policy.allow_unmark = allow.checked;onFormEdit(); });
+      field("遇到已收藏的会话时，允许取消收藏后再转一次", allow);
+    }
+    return group;
+  }
+
+  function newPolicy(action) {
+    if (action === "mark") return { action: action, color: "red" };
+    if (action === "transfer") return { action: action, account: "", allow_unmark: true };
+    return { action: action };
+  }
+
+  function renderFallback(saved) {
+    state.fallback = JSON.parse(JSON.stringify(saved || {}));
+    const root = el["fallback-controls"];root.replaceChildren();
+    [["unhandled", "无法处理"], ["error", "判断报错"], ["model_timeout", "模型超时（回复总时限内）"]].forEach(function (entry) {
+      const key = entry[0];
+      if (!state.fallback[key]) state.fallback[key] = { action: "handoff" };
+      const group = document.createElement("div");group.className = "fallback-policy";
+      const label = document.createElement("label");label.className = "field";
+      const title = document.createElement("span");setText(title, entry[1]);label.appendChild(title);
+      const select = document.createElement("select");
+      [["handoff", "建议人工处理"], ["none", "不处理"], ["mark", "收藏标星（尚未启用）"], ["transfer", "转人工（尚未启用）"]].forEach(function (item) {
+        const option = document.createElement("option");option.value = item[0];setText(option, item[1]);select.appendChild(option);
+      });
+      select.value = state.fallback[key].action;select.disabled = state.formDisabled;label.appendChild(select);group.appendChild(label);
+      let details = policyDetails(state.fallback[key]);group.appendChild(details);
+      select.addEventListener("change", function () {
+        state.fallback[key] = newPolicy(select.value);
+        const next = policyDetails(state.fallback[key]);details.replaceWith(next);details = next;onFormEdit();
+      });
+      root.appendChild(group);
+    });
+  }
+
   function loadRules(rules) {
     state.rules = (Array.isArray(rules) ? rules : []).map(function (rule) {
       const source = rule && typeof rule === "object" ? rule : {};
@@ -900,7 +997,8 @@
         contains: typeof source.contains === "string" ? source.contains : "",
         reply: typeof source.reply === "string" ? source.reply : "",
         description: typeof source.description === "string" ? source.description : "",
-        send: normalizeRuleSend(source.send)
+        send: normalizeRuleSend(source.send),
+        handling: source.handling ? JSON.parse(JSON.stringify(source.handling)) : null
       };
     });
     const seen = new Set();
@@ -991,10 +1089,13 @@
       if (send && send.match.length > LIMITS.sendMatch) {
         return { ok: false, message: label + "“候选名称关键词”最多 " + LIMITS.sendMatch + " 个字。", uid: rule.uid, field: "send_match" };
       }
-      if (!send && !reply.trim()) {
+      if (rule.handling && policyError(rule.handling)) {
+        return { ok: false, message: label + policyError(rule.handling), uid: rule.uid, field: "send_type" };
+      }
+      if (!rule.handling && !send && !reply.trim()) {
         return { ok: false, message: label + "请填写“回复内容”，或选择发送说明书 / 商品卡片 / 视频。", uid: rule.uid, field: "reply" };
       }
-      if (reply.trim().length > LIMITS.reply) {
+      if (!rule.handling && reply.trim().length > LIMITS.reply) {
         return { ok: false, message: label + "“回复内容”最多 " + LIMITS.reply + " 个字。", uid: rule.uid, field: "reply" };
       }
       if (!rule.id) {
@@ -1005,10 +1106,13 @@
         return { ok: false, message: label + "适用问题说明最多 500 字。", uid: rule.uid, field: "description" };
       }
       const item = { id: rule.id, contains: contains, description: description };
-      if (reply.trim()) {
+      if (rule.handling) {
+        item.handling = JSON.parse(JSON.stringify(rule.handling));
+        if (item.handling.action === "transfer") item.handling.account = item.handling.account.trim();
+      } else if (reply.trim()) {
         item.reply = reply;
       }
-      if (send) {
+      if (send && !rule.handling) {
         item.send = send.match ? { type: send.type, match: send.match } : { type: send.type };
       }
       value.push(item);
@@ -1133,6 +1237,7 @@
       setText(el["prompt-draft-status"], "草稿内容已保存到当前店铺。只有模型或混合方式会使用；启用状态仍以服务器返回值为准。");
     }
     loadRules(Array.isArray(s.rules) ? s.rules : []);
+    renderFallback(s.fallback);
     hideRulesError();
     showRemoteNote("");
     renderVersion(state.formVersion);
@@ -1179,6 +1284,7 @@
     el["mode-input"].value = "rules";
     el["prompt-input"].value = "";
     loadRules([]);
+    renderFallback({});
     hideRulesError();
     showRemoteNote("");
     renderVersion(null);
@@ -1195,6 +1301,7 @@
       byId(id).disabled = disabled;
     });
     el["add-rule-btn"].disabled = disabled || state.rules.length >= LIMITS.maxRules;
+    el["fallback-controls"].querySelectorAll("input, select").forEach(function (node) { node.disabled = disabled; });
     el["rules-list"].querySelectorAll("input, select, textarea, button").forEach(function (node) {
       node.disabled = disabled;
     });
@@ -2459,8 +2566,14 @@
       enabled: el["enabled-input"].checked === true,
       mode: ["model", "hybrid"].includes(el["mode-input"].value) ? el["mode-input"].value : "rules",
       system_prompt: prompt,
-      rules: checked.value
+      rules: checked.value,
+      fallback: JSON.parse(JSON.stringify(state.fallback))
     };
+    for (const policy of Object.values(payload.fallback)) {
+      const error = policyError(policy);
+      if (error) { showAlert("保存失败：" + error, "error");return; }
+      if (policy.action === "transfer") policy.account = policy.account.trim();
+    }
 
     const epoch = state.epoch;
     const token = state.token;
@@ -2602,6 +2715,8 @@
     const map = {
       reply: { label: "回复", cls: "badge-reply" },
       handoff: { label: "建议转人工", cls: "badge-handoff" },
+      mark: { label: "收藏标星", cls: "badge-reply" },
+      transfer: { label: "转人工", cls: "badge-handoff" },
       none: { label: "不回复", cls: "badge-muted" }
     };
     if (action === "send_item") {
@@ -2614,7 +2729,7 @@
     return span;
   }
 
-  function deliveryBadge(status) {
+  function deliveryBadge(status, action) {
     const span = document.createElement("span");
     const map = {
       unclaimed: { label: "未认领", cls: "badge-muted" },
@@ -2623,6 +2738,11 @@
       not_sent: { label: "未发送（明确）", cls: "badge-muted" },
       unknown: { label: "结果不确定 unknown", cls: "badge-unknown" }
     };
+    if (action === "mark" || action === "transfer") {
+      map.claimed.label = "操作已领取";
+      map.sent.label = "操作已确认（客户端回执）";
+      map.not_sent.label = "操作未完成";
+    }
     const info = map[status] || { label: status ? String(status) : "无回执数据", cls: "badge-muted" };
     span.className = "badge " + info.cls;
     setText(span, info.label);
@@ -3020,6 +3140,10 @@
           decisionCell.appendChild(smallLine("内容类型：" + itemType, "small"));
           decisionCell.appendChild(smallLine("候选编号 " + optionId, "small muted mono"));
         }
+        if (decision.action === "mark" && decision.mark) {
+          const color = { red: "红色", orange: "黄色", blue: "蓝色", green: "绿色" }[decision.mark.color];
+          decisionCell.appendChild(smallLine("星标颜色：" + (color || "未知"), "small"));
+        }
         if (decision.reason !== undefined && decision.reason !== null) {
           decisionCell.appendChild(smallLine("原因：" + String(decision.reason), "small"));
         }
@@ -3041,7 +3165,12 @@
       if (!delivery) {
         deliveryCell.appendChild(smallLine("无回执数据", "muted"));
       } else {
-        deliveryCell.appendChild(deliveryBadge(delivery.status));
+        deliveryCell.appendChild(deliveryBadge(delivery.status, decision && decision.action));
+        if (Array.isArray(delivery.steps) && delivery.steps.some(function (step) {
+          return step && step.step === "unmark_and_transfer" && step.unmarked === true;
+        }) && delivery.status !== "sent") {
+          deliveryCell.appendChild(smallLine("收藏已取消，转移未确认完成；不会自动恢复收藏或重试。", "small warn-text"));
+        }
         if (delivery.attempt_id) {
           deliveryCell.appendChild(smallLine("尝试 " + delivery.attempt_id, "small muted mono"));
         }
