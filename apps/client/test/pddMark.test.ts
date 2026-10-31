@@ -84,11 +84,11 @@ describe("成功判据：响应", () => {
 
 describe("窗口结论", () => {
   const w = () => newMarkWatch(BUYER, 2, 1);
-  test("只有放行请求的响应满足判据才成功", () => {
+  test("只有放行请求的响应满足判据才算判据满足（本阶段仍记 unknown）", () => {
     const x = w();
     x.allowed = { networkId: "n", requestId: REQ_ID };
     x.outcome = "ok";
-    assert.deepEqual(judgeMark(x), { ok: true });
+    assert.deepEqual(judgeMark(x), { ok: false, reason: "mark_binding_unproven" });
   });
   test("其余都是 unknown，并区分原因", () => {
     const none = w();
@@ -131,7 +131,7 @@ describe("来源绑定：输入配对与窗口结论", () => {
     assert.equal(w.foreign, 2, "窗口关闭后不再计数");
   });
   test("响应满足判据时，外来输入、点击前请求、窗口内第二条请求、页面或登录失效都使结论为 unknown", () => {
-    assert.deepEqual(judgeMark(ready()), { ok: true });
+    assert.deepEqual(judgeMark(ready()), { ok: false, reason: "mark_binding_unproven" }, "本阶段全部满足也不报成功");
     for (const [set, reason] of [
       [(x: ReturnType<typeof ready>) => (x.foreign = 1), "manual_input_during_mark"],
       [(x: ReturnType<typeof ready>) => (x.before = 1), "mark_request_before_click"],

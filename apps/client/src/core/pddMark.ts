@@ -8,6 +8,9 @@ import type { MarkColor } from "./protocol.js";
 /** 颜色与平台 mark_conversation 请求 color 数值（店主在场逐个点选并确认，2026-10-31）。0 与大于 4 未观察，不用。 */
 export const MARK_COLOR_VALUE: Readonly<Record<MarkColor, number>> = { orange: 1, red: 2, green: 3, blue: 4 };
 
+/** 本阶段没有“本次点击 → 该请求”的正向绑定依据：点击后一律 unknown（契约“来源绑定”）。 */
+export const MARK_SENT_PROVABLE = false;
+
 /** 点击前静默：点击前这么久之内页面发出过标星 / 取消收藏请求（含前台自己上一次），就不点击。 */
 export const MARK_QUIET_MS = 3000;
 
@@ -101,7 +104,9 @@ export function judgeMark(w: MarkWatch): { ok: true } | { ok: false; reason: str
   if (w.foreign) return { ok: false, reason: "manual_input_during_mark" };
   if (w.before) return { ok: false, reason: "mark_request_before_click" };
   if (w.allowed && w.blocked) return { ok: false, reason: "mark_request_ambiguous" };
-  if (w.allowed && w.outcome === "ok") return { ok: true };
+  // 契约“来源绑定”：上面几项只是必要条件，排除不了静默期之前已排队的异步写入；本阶段没有正向绑定依据，
+  // 全部满足也只记 unknown（mark_binding_unproven），不报成功。补入可核验的绑定依据并经审查后才改这里。
+  if (w.allowed && w.outcome === "ok") return MARK_SENT_PROVABLE ? { ok: true } : { ok: false, reason: "mark_binding_unproven" };
   if (!w.allowed) return { ok: false, reason: w.blocked ? "mark_request_blocked" : "mark_request_not_observed" };
   if (w.outcome === "bad") return { ok: false, reason: "mark_response_not_ok" };
   if (w.outcome === "failed") return { ok: false, reason: "mark_request_failed" };

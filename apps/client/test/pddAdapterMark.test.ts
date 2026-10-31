@@ -154,6 +154,9 @@ function harness(opts: Opts = {}) {
   return { adapter, log, net, mark, hooks };
 }
 
+/** 本阶段的“全部满足”：没有正向绑定依据，结论仍是 unknown（mark_binding_unproven），不报成功。 */
+const criteriaMet = (r: MarkResult) => r.status === "unknown" && r.reason === "mark_binding_unproven";
+
 /** 页面对点击的正常反应：发出一条与本次一致的标星请求，稍后得到响应。 */
 const pageSends = (color = 2, body = okBody(), uid = BUYER) => (net: Net) => {
   net.request("n-1", MARK, { uid, color, request_id: REQ_ID });
@@ -169,7 +172,7 @@ describe("标星：点击与成功判据（Electron 替身）", () => {
   test("全部满足：只点目标颜色项一次，放行一条请求，按它自己的响应确认；不点星标本身", async () => {
     const h = harness({ onClick: pageSends() });
     const r = await h.mark("red");
-    assert.deepEqual(r, { status: "confirmed", page_observed: "marked" });
+    assert.deepEqual(r, { status: "unknown", reason: "mark_binding_unproven", page_observed: "marked" });
     assert.deepEqual(h.log.clicks, [{ x: 100, y: 230 }]);
     assert.deepEqual(h.log.continued, ["f-n-1"]);
     assert.deepEqual(h.log.failed, []);
@@ -181,19 +184,19 @@ describe("标星：点击与成功判据（Electron 替身）", () => {
 
   test("默认色（黄色）用数值 1 核对", async () => {
     const h = harness({ onClick: pageSends(1) });
-    assert.equal((await h.mark("orange")).status, "confirmed");
+    assert.ok(criteriaMet(await h.mark("orange")));
     assert.deepEqual(h.log.clicks, [{ x: 100, y: 200 }]);
   });
 
   test("同一买家同时出现在两个列表：按买家去重后视为唯一", async () => {
     const keys = [`${BUYER}-0`, `${BUYER}-1`];
     const h = harness({ page: { snap: { keys, active: false }, pop: { keys, active: false, options: OPTIONS } }, onClick: pageSends() });
-    assert.equal((await h.mark()).status, "confirmed");
+    assert.ok(criteriaMet(await h.mark()));
   });
 
   test("页面观察只供显示：确认成功但星标读不到时观察为 unknown，仍按响应确认", async () => {
     const h = harness({ page: { after: "star_missing" }, onClick: pageSends() });
-    assert.deepEqual(await h.mark(), { status: "confirmed", page_observed: "unknown" });
+    assert.deepEqual(await h.mark(), { status: "unknown", reason: "mark_binding_unproven", page_observed: "unknown" });
   });
 });
 
@@ -327,7 +330,7 @@ describe("标星：点击窗口内的请求核对", () => {
     h.net.request("m-1", MARK, { uid: OTHER, color: 4, request_id: 1 });
     h.net.request("m-2", UNMARK, { uid: OTHER, request_id: 2 });
     h.adapter.lastMarkRequestAt = Date.now() - 3100;
-    assert.equal((await h.mark()).status, "confirmed");
+    assert.ok(criteriaMet(await h.mark()));
     h.net.request("m-3", MARK, { uid: OTHER, color: 3, request_id: 3 });
     assert.deepEqual(h.log.continued, ["f-m-1", "f-m-2", "f-n-1", "f-m-3"]);
     assert.deepEqual(h.log.failed, []);
@@ -399,15 +402,23 @@ describe("标星：响应判定一律按放行请求自己的编号", () => {
       },
     });
     earlier(h);
-    assert.equal((await h.mark()).status, "confirmed");
+    assert.ok(criteriaMet(await h.mark()));
     assert.deepEqual(h.log.continued, ["f-m-0", "f-n-1"]);
   });
 });
 
 describe("标星：来源绑定（操作独占、无外来输入、点击前静默、窗口内唯一）", () => {
+  test("旧请求是窗口内唯一请求、本次点击没有产生请求：四项条件与响应判据都满足，仍不报成功（unknown）", async () => {
+    // 本次点击零请求；静默期之前已排队的旧写入恰在窗口内发出唯一一条同买家同颜色请求并成功。
+    const h = harness({ onClick: (net) => (net.request("old-1", MARK, { uid: BUYER, color: 2, request_id: REQ_ID }), setTimeout(() => net.respond("old-1", okBody()), 20)) });
+    const r = await h.mark();
+    assert.notEqual(r.status, "confirmed");
+    assert.ok(criteriaMet(r));
+  });
+
   test("前台自己的悬停与点击各产生一条输入事件：配对后不算外来", async () => {
     const h = harness({ onClick: pageSends() });
-    assert.equal((await h.mark()).status, "confirmed");
+    assert.ok(criteriaMet(await h.mark()));
   });
 
   test("一条命令产生了多条输入事件：多出的算外来，不点击", async () => {
@@ -443,7 +454,7 @@ describe("标星：来源绑定（操作独占、无外来输入、点击前静�
     assert.deepEqual(await h.mark(), { status: "not_sent", reason: "conv_state_changed" });
     assert.equal(h.log.clicks.length, 0);
     h.adapter.lastMarkRequestAt = Date.now() - 3100;
-    assert.equal((await h.mark()).status, "confirmed");
+    assert.ok(criteriaMet(await h.mark()));
     // 刚完成的这次标星本身也计入静默：紧接着再来一次不点击。
     assert.deepEqual(await h.mark(), { status: "not_sent", reason: "conv_state_changed" });
     assert.equal(h.log.clicks.length, 1);
