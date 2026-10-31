@@ -7,6 +7,7 @@ import { AttemptPhase, ConversationState, EventRecord, Journal, LogRefs, Receipt
 import {
   Attachment,
   CAP_GOODS_SNAPSHOT,
+  CAP_MARK_CONVERSATION,
   CAP_REPLY_DEADLINE,
   CAP_SEND_ITEM,
   ContextMessage,
@@ -364,6 +365,11 @@ export class ShopRuntime {
     return this.lease.state === "held" && this.capabilities.has(CAP_GOODS_SNAPSHOT);
   }
 
+  /** 契约“会话操作（1.3 草案）”：本租约确认了 mark_conversation，事件须带 conv_state。 */
+  markConfirmed() {
+    return this.lease.state === "held" && this.capabilities.has(CAP_MARK_CONVERSATION);
+  }
+
   /** 契约 A.2：最近一次成功心跳为这一租约（instance+session+generation）确认了 reply_deadline。 */
   deadlineConfirmed(generation: number) {
     return this.lease.state === "held" && this.lease.generation === generation && this.capabilities.has(CAP_REPLY_DEADLINE);
@@ -661,6 +667,15 @@ export class ShopRuntime {
     if (this.goodsSnapshotConfirmed()) this.attachGoods(conversationId, request);
     const candidates = this.buildSendOptions(conversationId, conv.revision);
     if (candidates) request.context.send_options = candidates.options;
+    // 契约“会话操作（1.3 草案）”：能力确认后必带 conv_state；读不到如实报 marked=null，不捏造 false、不丢弃事件。
+    if (this.markConfirmed()) {
+      const read = await measured("conv_state", () =>
+        withTimeout(this.adapter.readConvState?.(conversationId, prepLeft()) ?? Promise.resolve(null), prepLeft()).catch(() => null),
+      );
+      if (this.expired(conversationId, messageId)) return;
+      const marked = read?.marked ?? null;
+      request.context.conv_state = { marked, color: marked === true ? (read?.color ?? null) : null, observed_at: this.now() };
+    }
     const images = await measured("images", () => this.latestImages(last));
     if (this.expired(conversationId, messageId)) return;
     if (this.sessionId !== session) return this.journal.note(conversationId, messageId, "session_changed");

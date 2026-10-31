@@ -644,6 +644,16 @@ const STAR_ICON = `(() => {
   return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2), active: icon.classList.contains("active") || els[0].classList.contains("active") };
 })()`;
 
+/** 同一次页面快照：所有带 active 的会话项 key 与工具栏星标是否已收藏；星标缺失或不唯一返回原因。 */
+const CONV_STAR_SNAPSHOT = `(() => {
+  const keys = [...document.querySelectorAll(${JSON.stringify(ITEM)})].filter((e) => e.classList.contains("active")).map((e) => e.getAttribute("data-random"));
+  const els = [...document.querySelectorAll('[title="收藏该用户"]')].filter((e) => e.getClientRects().length > 0);
+  if (els.length !== 1) return els.length ? "star_not_unique" : "star_missing";
+  const icon = els[0].matches("i") ? els[0] : els[0].querySelector("i") ?? els[0];
+  return { keys, active: icon.classList.contains("active") || els[0].classList.contains("active") };
+})()`;
+export { CONV_STAR_SNAPSHOT };
+
 /**
  * 星标悬停后弹出的颜色列表，按色点背景色识别颜色，带 chat-icon-check 的为当前颜色。
  * 浮层归属只认触发控件关联：星标元素（或其 4 层内祖先/后代）的 aria-describedby 指向的 el-popover id，
@@ -2150,6 +2160,22 @@ export class PddPageAdapter implements PlatformAdapter {
     const buyers = new Set((scan?.items ?? []).filter((i) => i.active).map((i) => buyerFromListKey(i.key)));
     const [only] = buyers;
     return this.watchEpoch === sentEpoch && buyers.size === 1 && only ? only : null;
+  }
+
+  /**
+   * 只读收藏状态：不点击、不悬停。打开的会话与星标状态须来自同一次页面快照（分开读时中途换走又换回，
+   * 会把别的会话的星标记给本会话）；快照里打开项按买家去重后须恰好是该买家，且读取前后页面代次未变，
+   * 否则 marked=null。颜色要悬停才能读，本步不读，color 一律 null。
+   */
+  async readConvState(conversationId: string, _timeoutMs: number): Promise<{ marked: boolean | null; color: null }> {
+    const unknown = { marked: null, color: null };
+    if (!this.window || this.window.isDestroyed() || this.sending || this.outgoing) return unknown;
+    const epoch = this.watchEpoch;
+    const snap = await this.run<{ keys: unknown[]; active: boolean } | string>(CONV_STAR_SNAPSHOT).catch(() => "script_failed");
+    if (this.watchEpoch !== epoch || typeof snap === "string" || !Array.isArray(snap?.keys) || typeof snap.active !== "boolean") return unknown;
+    const buyers = new Set(snap.keys.map((k) => buyerFromListKey(k)));
+    const [only] = buyers;
+    return buyers.size === 1 && only === conversationId ? { marked: snap.active, color: null } : unknown;
   }
 
   /** 当前打开对话的绑定令牌：页面代次＋列表项键的摘要（不含可读身份）；没有唯一打开的对话返回 null。 */
