@@ -55,8 +55,11 @@ export function markRequestProbe(path: string, postData: string | null, active: 
   return rec;
 }
 
-/** 收藏列表响应：只看 result.color_map 与 result.marked_conversations[].from/to.uid 是否与当前会话相等。 */
-export function markedListProbe(path: string, text: string | null, active: string | null, activeAtRequest: string | null): MarkProbeRecord | null {
+/**
+ * 收藏列表响应：只看 result.color_map 与 result.marked_conversations[].from/to.uid 是否与当前会话相等。
+ * active 为响应到达后现场读取、且仍属请求所在页面的唯一打开对话（否则 null）；sameAsRequest 由调用方按编号＋页面代次＋对话变化代次判定。
+ */
+export function markedListProbe(path: string, text: string | null, active: string | null, sameAsRequest: boolean): MarkProbeRecord | null {
   if (path !== MARKED_LIST_PATH) return null;
   const body = parse(text);
   const result = plain(body) && plain(body.result) ? body.result : null;
@@ -69,7 +72,7 @@ export function markedListProbe(path: string, text: string | null, active: strin
     kind: "marked_list",
     parsed: result !== null,
     active_known: active !== null,
-    active_same_as_request: active !== null && active === activeAtRequest,
+    active_same_as_request: active !== null && sameAsRequest,
     map_present: map !== null,
     map_entries: map ? Object.keys(map).length : 0,
     active_in_map: inMap,
