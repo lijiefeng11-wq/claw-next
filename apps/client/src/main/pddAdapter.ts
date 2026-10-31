@@ -14,7 +14,7 @@ import type { PlatformPage } from "./platformWorkspace.js";
 import { dispatchPageClick, type PageClickResult } from "./pddClick.js";
 import { PddMessageWatcher } from "./pddMessageWatcher.js";
 import { popupSweepScript, type PopupSweepMode, type PopupSweepResult } from "./pddPopups.js";
-import { MARKED_LIST_PATH, MARK_REQUEST_PATH, markedListProbe, markRequestProbe, type MarkProbeRecord, UNMARK_REQUEST_PATH } from "./markProbe.js";
+import { MARKED_LIST_PATH, MARK_REQUEST_PATH, markedListProbe, markRequestProbe, markResponseProbe, type MarkProbeRecord, UNMARK_REQUEST_PATH } from "./markProbe.js";
 
 const LOGIN_URL = "https://mms.pinduoduo.com/chat-merchant/index.html";
 
@@ -983,6 +983,7 @@ export class PddPageAdapter implements PlatformAdapter {
             }
             if (PddSendOptionBook.watches(req.path) && req.optionsEpoch === this.sendOptions.epoch) this.sendOptions.response(req.path, jsonOrNull(req.postData), jsonOrNull(body), Math.floor(Date.now() / 1000));
             if (!schemaFile) return;
+            if (req.markEpoch !== null && req.path !== MARKED_LIST_PATH) writeMarked(markResponseProbe(req.path, req.postData, body));
             if (req.markEpoch !== null && req.path === MARKED_LIST_PATH) {
               void this.freshActive(req.markEpoch)
                 .catch(() => null)

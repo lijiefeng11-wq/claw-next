@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { colorValue, MARKED_LIST_PATH, markedListProbe, markRequestProbe, MARK_REQUEST_PATH, UNMARK_REQUEST_PATH } from "../src/main/markProbe.js";
+import { colorValue, MARKED_LIST_PATH, markedListProbe, markRequestProbe, markResponseProbe, MARK_REQUEST_PATH, UNMARK_REQUEST_PATH } from "../src/main/markProbe.js";
 
 const ACTIVE = "880011223344";
 const OTHER = "880099887766";
@@ -108,5 +108,36 @@ describe("收藏列表：只看 result.color_map 与 result.marked_conversations
   });
   test("无关路径不记", () => {
     assert.equal(markedListProbe("/plateau/chat/latest_conversations", list({ color_map: { [ACTIVE]: 2 } }), ACTIVE), null);
+  });
+});
+
+describe("标星/取消收藏响应：只记取值分类与请求编号是否对应", () => {
+  const resp = (v: Record<string, unknown>) => JSON.stringify(v);
+  const ok = (rid: unknown, extra: Record<string, unknown> = {}) => resp({ success: true, result: { response: "mark_conversation", request_id: rid, result: "ok", success: true, ...extra } });
+  test("成功形状：两层 success、编号对应、候选集内结果原样，其他文字只记长度", () => {
+    const rec = markResponseProbe(MARK_REQUEST_PATH, markReq(1), ok(1));
+    assert.deepEqual(rec, {
+      kind: "mark_response", parsed: true, top_success: true, inner_present: true, inner_success: true,
+      request_id_match: true, result_value: "ok", result_len: 2, response_value: "other", response_len: 17,
+    });
+    assert.deepEqual(leaks(rec), []);
+  });
+  test("取消收藏同样记录；编号不同或不是数字时不对应", () => {
+    const unmark = JSON.stringify({ data: { cmd: "unmark_conversation", request_id: 5, uid: ACTIVE } });
+    assert.equal(markResponseProbe(UNMARK_REQUEST_PATH, unmark, ok(5))?.kind, "unmark_response");
+    assert.equal(markResponseProbe(UNMARK_REQUEST_PATH, unmark, ok(6))?.request_id_match, false);
+    assert.equal(markResponseProbe(UNMARK_REQUEST_PATH, unmark, ok("5"))?.request_id_match, false);
+    assert.equal(markResponseProbe(MARK_REQUEST_PATH, JSON.stringify({ data: { request_id: "1" } }), ok("1"))?.request_id_match, false);
+  });
+  test("失败与异常形状只记类别：false、缺失、类型不对、无法解析", () => {
+    const fail = markResponseProbe(MARK_REQUEST_PATH, markReq(1), resp({ success: false, result: { request_id: 1, result: ACTIVE, success: "no" } }));
+    assert.deepEqual([fail?.top_success, fail?.inner_success, fail?.result_value, fail?.result_len, fail?.response_value], [false, "string", "other", ACTIVE.length, "missing"]);
+    assert.deepEqual(leaks(fail), []);
+    const bad = markResponseProbe(MARK_REQUEST_PATH, markReq(1), "not json");
+    assert.deepEqual([bad?.parsed, bad?.top_success, bad?.inner_present, bad?.inner_success, bad?.request_id_match], [false, "missing", false, "missing", false]);
+    assert.equal(markResponseProbe(MARK_REQUEST_PATH, markReq(1), resp({ success: true, result: [1] }))?.inner_present, false);
+  });
+  test("无关路径不记", () => {
+    assert.equal(markResponseProbe(MARKED_LIST_PATH, markReq(1), ok(1)), null);
   });
 });

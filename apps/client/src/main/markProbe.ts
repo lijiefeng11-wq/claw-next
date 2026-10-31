@@ -55,6 +55,45 @@ export function markRequestProbe(path: string, postData: string | null, active: 
   return rec;
 }
 
+/** 结果文字的封闭候选集：只有完全相等时原样记录，其余只记“其他”与长度。不代表已核实的成功语义。 */
+const RESULT_CANDIDATES = new Set(["", "ok", "OK", "success", "SUCCESS", "succeed", "0", "true", "false", "fail", "failed", "error"]);
+
+function textValue(v: unknown): { value: string; len: number | null } {
+  if (typeof v !== "string") return { value: v === undefined ? "missing" : v === null ? "null" : typeof v, len: null };
+  return { value: RESULT_CANDIDATES.has(v) ? v : "other", len: v.length };
+}
+
+const boolOrKind = (v: unknown): boolean | string => (typeof v === "boolean" ? v : v === undefined ? "missing" : v === null ? "null" : typeof v);
+
+/**
+ * 标星/取消收藏的响应：只看外层 success、result.success、result.result、result.response 的取值分类，
+ * 以及 result.request_id 是否等于请求 data.request_id（两边都须为有限数字）。不输出任何原文或编号。
+ */
+export function markResponseProbe(path: string, postData: string | null, text: string | null): MarkProbeRecord | null {
+  if (path !== MARK_REQUEST_PATH && path !== UNMARK_REQUEST_PATH) return null;
+  const reqBody = parse(postData);
+  const reqData = plain(reqBody) && plain(reqBody.data) ? reqBody.data : null;
+  const body = parse(text);
+  const top = plain(body) ? body : null;
+  const result = top && plain(top.result) ? top.result : null;
+  const sent = reqData?.request_id;
+  const got = result?.request_id;
+  const res = textValue(result?.result);
+  const resp = textValue(result?.response);
+  return {
+    kind: path === MARK_REQUEST_PATH ? "mark_response" : "unmark_response",
+    parsed: top !== null,
+    top_success: top ? boolOrKind(top.success) : "missing",
+    inner_present: result !== null,
+    inner_success: result ? boolOrKind(result.success) : "missing",
+    request_id_match: typeof sent === "number" && Number.isFinite(sent) && typeof got === "number" && got === sent,
+    result_value: res.value,
+    result_len: res.len,
+    response_value: resp.value,
+    response_len: resp.len,
+  };
+}
+
 /**
  * 收藏列表响应：只看 result.color_map 与 result.marked_conversations[].from/to.uid 是否与当前会话相等。
  * active 为响应到达后现场读取、且仍属请求发出时页面代次的唯一打开对话（否则 null）。列表是全店范围，
