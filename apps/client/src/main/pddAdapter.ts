@@ -2,14 +2,15 @@ import { session } from "electron";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import type { AdapterEvent, HistoryLoad, HistoryResult, ImageFetchResult, PlatformAdapter, PlatformNav, PlatformNavAction, PlatformStatus, SendItemRequest, SendRequest, SendResult } from "../core/adapter.js";
+import type { AdapterEvent, HistoryLoad, HistoryResult, ImageFetchResult, MarkRequest, MarkResult, PlatformAdapter, PlatformNav, PlatformNavAction, PlatformStatus, SendItemRequest, SendRequest, SendResult } from "../core/adapter.js";
 import { buyerFromListKey, decideOutgoing, parseChatList, parseCustomServiceInfo, parseRealtimeUserInfo, parseSendRequest, parseSendResponse } from "../core/pddParse.js";
 import { PddOrderBook } from "../core/pddOrders.js";
 import { PddSessionTracker } from "../core/pddSession.js";
 import { PageHealth } from "../core/pageHealth.js";
 import { GOODS_CARD_SEND_PATH, INSTRUCT_PATH, INSTRUCT_SEND_PATH, instructMatches, instructRequestAllowed, instructResponseOk, instructTarget, PddSendOptionBook, RECOMMEND_GOODS_PATH, goodsRequestAllowed, goodsResponseOk, parseRecommendGoods, planGoodsClick, verifyGoodsTarget, type GoodsRow, VIDEO_LIST_PATH, libraryResponseOk, verifyVideoTarget, judgeItemReceipt, libraryRequestAllowed, parseSyncMessages, parseVideoRows, planVideoClick, type SeenMessage, type VideoRow } from "../core/pddSendItems.js";
 import { isAllowedImageUrl, isAllowedPlatformUrl, partitionFor, sniffImage } from "../core/security.js";
-import { MAX_IMAGE_BYTES } from "../core/protocol.js";
+import { MAX_IMAGE_BYTES, type PageObserved } from "../core/protocol.js";
+import { judgeMark, MARK_COLOR_VALUE, MARK_QUIET_MS, markRequestVerdict, markResponseOk, newMarkWatch, observeInput, type MarkWatch } from "../core/pddMark.js";
 import type { PlatformPage } from "./platformWorkspace.js";
 import { dispatchPageClick, type PageClickResult } from "./pddClick.js";
 import { PddMessageWatcher } from "./pddMessageWatcher.js";
@@ -634,6 +635,17 @@ type Scan = { items: { key: string; unread: boolean; active: boolean }[]; freshB
 export type StarColor = "red" | "orange" | "blue" | "green";
 type StarOption = { color: StarColor | "other"; checked: boolean; x: number; y: number };
 type StarState = { star: { x: number; y: number; active: boolean }; options: StarOption[] };
+type StarSnapshot = { keys: unknown[]; active: boolean; options: StarOption[] };
+
+/**
+ * 打开的会话项 key 按买家去重后恰好一个买家时返回它，否则 null。
+ * 同一买家可同时出现在“待回复”和“全部”列表并都带 active，算同一个；混入缺失或坏 key 不算唯一。
+ */
+export function onlyBuyer(keys: unknown[]): string | null {
+  const buyers = new Set(keys.map((k) => buyerFromListKey(k)));
+  const [only] = buyers;
+  return buyers.size === 1 && only ? only : null;
+}
 
 /** 对话工具栏的“收藏该用户”星标：返回中心坐标与是否已收藏（active）。 */
 const STAR_ICON = `(() => {
@@ -658,10 +670,12 @@ export { CONV_STAR_SNAPSHOT };
  * 星标悬停后弹出的颜色列表，按色点背景色识别颜色，带 chat-icon-check 的为当前颜色。
  * 浮层归属只认触发控件关联：星标元素（或其 4 层内祖先/后代）的 aria-describedby 指向的 el-popover id，
  * 且该浮层可见、唯一、含至少三种已知颜色；位置相近、颜色相同的无关菜单不算。证明不了归属就不执行。
- * 传入 check 时改为点击前核对：该坐标处的元素须属于这个浮层中颜色为 check.color 的列表项，返回 "ok" 或原因。
- * 不传 check 时返回同一页面快照：当前对话 key（唯一 active 项，否则 null）、星标是否已收藏、各颜色项。
+ * 传入 check 时改为点击前核对：该坐标处的元素须属于这个浮层中颜色为 check.color 的列表项，且该颜色项在浮层中唯一、未勾选，返回 "ok" 或原因。
+ * check.buyer 存在时（标星执行）还在同一次页面快照里核对：打开的会话按买家去重恰好是该买家（conversation_mismatch），
+ * 星标未收藏（already_marked）。诊断测试不传 buyer。
+ * 不传 check 时返回同一页面快照：所有打开（active）的会话项 key（由调用方按买家去重）、星标是否已收藏、各颜色项。
  */
-function starOptionsScript(check?: { x: number; y: number; color: StarColor }): string {
+export function starOptionsScript(check?: { x: number; y: number; color: StarColor; buyer?: string }): string {
   return `(() => {
     const stars = [...document.querySelectorAll('[title="收藏该用户"]')].filter((e) => e.getClientRects().length > 0);
     if (stars.length !== 1) return stars.length ? "star_not_unique" : "star_missing";
@@ -685,21 +699,31 @@ function starOptionsScript(check?: { x: number; y: number; color: StarColor }): 
     const known = (p) => new Set([...p.querySelectorAll("ul > li")].map(colorOf).filter((c) => c !== "other")).size;
     const pops = [...document.querySelectorAll("div.el-popover")].filter((p) => p.id && linked.has(p.id) && p.getClientRects().length > 0 && getComputedStyle(p).visibility !== "hidden" && known(p) >= 3);
     if (pops.length !== 1) return pops.length ? "popover_not_unique" : linked.size ? "popover_missing" : "popover_unlinked";
+    const acts = [...document.querySelectorAll(${JSON.stringify(ITEM)})].filter((e) => e.classList.contains("active"));
+    const icon = stars[0].matches("i") ? stars[0] : stars[0].querySelector("i") ?? stars[0];
+    const starActive = icon.classList.contains("active") || stars[0].classList.contains("active");
+    const checkedOf = (li) => { const c = li.querySelector("i.chat-icon-check"); return !!c && c.getClientRects().length > 0 && getComputedStyle(c).visibility !== "hidden"; };
     const check = ${JSON.stringify(check ?? null)};
     if (check) {
       const hit = document.elementFromPoint(check.x, check.y);
       const li = hit && hit.closest("li");
       if (!li || !pops[0].contains(li)) return "target_not_in_star_popover";
-      return colorOf(li) === check.color ? "ok" : "target_color_mismatch";
+      if (colorOf(li) !== check.color) return "target_color_mismatch";
+      if ([...pops[0].querySelectorAll("ul > li")].filter((x) => colorOf(x) === check.color).length !== 1) return "target_not_unique";
+      if (checkedOf(li)) return "target_checked";
+      if (check.buyer !== undefined) {
+        const buyers = new Set(acts.map((e) => { const m = /^([0-9]{1,32})-/.exec(e.getAttribute("data-random") || ""); return m ? m[1] : null; }));
+        if (buyers.size !== 1 || !buyers.has(check.buyer)) return "conversation_mismatch";
+        if (starActive) return "already_marked";
+      }
+      return "ok";
     }
-    const acts = [...document.querySelectorAll(${JSON.stringify(ITEM)})].filter((e) => e.classList.contains("active"));
-    const icon = stars[0].matches("i") ? stars[0] : stars[0].querySelector("i") ?? stars[0];
     const options = [...pops[0].querySelectorAll("ul > li")].map((li) => {
       const r = li.getBoundingClientRect();
       const check = li.querySelector("i.chat-icon-check");
       return { color: colorOf(li), checked: !!check && check.getClientRects().length > 0 && getComputedStyle(check).visibility !== "hidden", x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
     });
-    return { conv: acts.length === 1 ? acts[0].getAttribute("data-random") : null, active: icon.classList.contains("active") || stars[0].classList.contains("active"), options };
+    return { keys: acts.map((e) => e.getAttribute("data-random")), active: starActive, options };
   })()`;
 }
 
@@ -861,6 +885,14 @@ export class PddPageAdapter implements PlatformAdapter {
     console.log(`[${this.shopId}] platform send options instructions=${options.filter((o) => o.type === "instruction").length} goods=${options.filter((o) => o.type === "goods_card").length} videos=${options.filter((o) => o.type === "video").length}`);
     this.emit({ type: "send_options", conversation_id: buyer, options: options.filter((o) => SENDABLE_ITEMS.has(o.type)) });
   });
+  /** 标星进行中的守护记录与点击窗口（仅内存，见 pddMark.ts）。 */
+  private markWatch: MarkWatch | null = null;
+  /** 标星进行中：页面与登录归属是否仍是开始时那一个；失效返回原因。 */
+  private markCheck: (() => string | null) | null = null;
+  /** 标星进行中的页面：只认这个页面监听到的标星请求。 */
+  private markPage: PlatformPage | null = null;
+  /** 页面最近一次发出标星 / 取消收藏请求的本机时间（毫秒），用于点击前静默。 */
+  private lastMarkRequestAt = 0;
   /** 附加发送进行中：收集该买家的新消息与页面发送请求结果（仅内存）。 */
   private itemWatch: { buyer: string; path: string; url: string | null; goodsId: string | null; bookId: string | null; seen: SeenMessage[]; clicked: boolean; requests: number; blocked: number; apiOk: boolean | null } | null = null;
   /** 各买家最近一次“商品推荐”列表（页面自己的请求），按接口分组顺序展开。 */
@@ -917,6 +949,11 @@ export class PddPageAdapter implements PlatformAdapter {
       if (markedFile && rec) fs.appendFile(markedFile, JSON.stringify({ at: new Date().toISOString(), ...rec }) + "\n", { mode: 0o600 }, () => undefined);
     };
     const dbg = win.webContents.debugger;
+    // 标星守护期间，页面收到的每条输入事件都须与前台自己的输入命令配对，否则视为人工介入（契约“来源绑定”）。
+    win.webContents.on("input-event", (_e, input) => {
+      const w = this.markWatch;
+      if (w) observeInput(w, input?.type);
+    });
     // 监听只装一次；渲染进程崩溃会使调试通道断开，恢复时由 enableNetwork 重新附加并开启拦截。
     const pending = new Map<string, { path: string; postData: string | null; buyer: string | null; epoch: number; optionsEpoch: number; markEpoch: number | null }>();
     const markWatched = (p: string) => p === MARK_REQUEST_PATH || p === UNMARK_REQUEST_PATH || p === MARKED_LIST_PATH;
@@ -965,11 +1002,14 @@ export class PddPageAdapter implements PlatformAdapter {
         const req = pending.get(params.requestId);
         if (!req) return;
         pending.delete(params.requestId);
+        // 标星响应：读取前先核对一次页面与登录归属（读取后在 onMarkResponse 里再核对）。
+        const markLost = req.path === MARK_REQUEST_PATH ? (this.markCheck?.() ?? null) : null;
         dbg
           .sendCommand("Network.getResponseBody", { requestId: params.requestId })
           .finally(() => this.orders.finished(req.buyer))
           .then((r: any) => {
             const body = r.base64Encoded ? null : (r.body as string);
+            if (req.path === MARK_REQUEST_PATH) this.onMarkResponse(params.requestId, body, false, markLost);
             if (req.path === SEND_PATH) this.onSendResponse(params.requestId, body);
             if (req.path === LIBRARY_SEND_PATH || req.path === GOODS_CARD_SEND_PATH || req.path === INSTRUCT_SEND_PATH || req.path === SYNC_PATH) this.onItemResponse(req.path, body);
             if (!PddOrderBook.watches(req.path) || req.epoch === this.orders.epoch) this.handleResponse(req.path, req.postData, body);
@@ -996,18 +1036,23 @@ export class PddPageAdapter implements PlatformAdapter {
             seen.add(key);
             write({ kind: "response", path: req.path, schema });
           })
-          .catch(() => undefined);
+          .catch(() => {
+            // 取不到响应体：放行的标星请求按加载失败处理（已有结论时不覆盖）。
+            if (req.path === MARK_REQUEST_PATH) this.onMarkResponse(params.requestId, null, true, markLost);
+          });
       } else if (method === "Network.loadingFailed") {
         discovered.delete(params.requestId);
         const failed = pending.get(params.requestId);
         this.orders.finished(failed?.buyer ?? null);
         pending.delete(params.requestId);
         if ((failed?.path === LIBRARY_SEND_PATH || failed?.path === GOODS_CARD_SEND_PATH || failed?.path === INSTRUCT_SEND_PATH) && this.itemWatch?.clicked) this.itemWatch.apiOk = false;
+        this.onMarkResponse(params.requestId, null, true);
         const out = this.outgoing;
         if (out && out.matched === params.requestId) out.resolve({ status: "unknown", reason: "platform_request_failed" });
       } else if (method === "Fetch.requestPaused") {
         const paused = probePath(params.request?.url);
         if (paused === LIBRARY_SEND_PATH || paused === GOODS_CARD_SEND_PATH || paused === INSTRUCT_SEND_PATH) this.onItemSendPaused(dbg, params, paused);
+        else if (paused === MARK_REQUEST_PATH || paused === UNMARK_REQUEST_PATH) this.onMarkPaused(dbg, params, paused === MARK_REQUEST_PATH ? "mark" : "unmark", win);
         else this.onSendPaused(dbg, params);
       }
     });
@@ -1027,7 +1072,7 @@ export class PddPageAdapter implements PlatformAdapter {
     void dbg.sendCommand("Network.enable").catch(() => undefined);
     void dbg
       .sendCommand("Fetch.enable", {
-        patterns: [SEND_PATH, LIBRARY_SEND_PATH, GOODS_CARD_SEND_PATH, INSTRUCT_SEND_PATH].map((p) => ({ urlPattern: "*://mms.pinduoduo.com" + p + "*", requestStage: "Request" })),
+        patterns: [SEND_PATH, LIBRARY_SEND_PATH, GOODS_CARD_SEND_PATH, INSTRUCT_SEND_PATH, MARK_REQUEST_PATH, UNMARK_REQUEST_PATH].map((p) => ({ urlPattern: "*://mms.pinduoduo.com" + p + "*", requestStage: "Request" })),
       })
       .catch(() => undefined);
     return true;
@@ -1064,6 +1109,46 @@ export class PddPageAdapter implements PlatformAdapter {
     }
     watch.requests += 1;
     void dbg.sendCommand("Fetch.continueRequest", { requestId: params.requestId }).catch(() => undefined);
+  }
+
+  /**
+   * 页面发出的标星 / 取消收藏请求（契约“请求核对”）。没有进行中的标星、或不在点击窗口内时照常放行
+   * （店主手动操作不受影响）；窗口内只放行与本次一致的第一条 mark 请求，其余在发出前拦截，不会到达平台。
+   */
+  private onMarkPaused(dbg: Electron.Debugger, params: any, kind: "mark" | "unmark", source: PlatformPage) {
+    this.lastMarkRequestAt = Date.now();
+    const w = this.markWatch;
+    if (!w || !w.open || w.closed) {
+      // 点击前（守护期间）出现的请求照常放行，但本次放弃点击（契约“来源绑定·点击前静默”）。
+      if (w && !w.closed) w.before += 1;
+      void dbg.sendCommand("Fetch.continueRequest", { requestId: params.requestId }).catch(() => undefined);
+      return;
+    }
+    // 实际放行前先复核原操作的页面与登录店铺归属（来源页面须是本次标星的页面）；失效即锁存并拦截，结论保持 unknown。
+    const lost = source !== this.markPage ? "page_changed_during_mark" : (this.markCheck?.() ?? null);
+    if (lost) w.invalid ??= lost;
+    const verdict = w.invalid ? ({ allow: false } as const) : markRequestVerdict(w, kind, this.watchEpoch, params.networkId, params.request?.postData);
+    console.log(`[${this.shopId}] platform ${kind}_conversation ${verdict.allow ? "match" : "block"}`);
+    if (!verdict.allow) {
+      w.blocked += 1;
+      void dbg.sendCommand("Fetch.failRequest", { requestId: params.requestId, errorReason: "BlockedByClient" }).catch(() => undefined);
+      return;
+    }
+    w.allowed = { networkId: verdict.networkId, requestId: verdict.requestId };
+    void dbg.sendCommand("Fetch.continueRequest", { requestId: params.requestId }).catch(() => undefined);
+  }
+
+  /**
+   * 放行的那条标星请求自己的响应（按浏览器请求编号配对，不按到达顺序）；窗口关闭后到达的不算，先到的结论为准。
+   * 读取前（lostBefore）与读取后各核对一次页面与登录归属，任一失效即记为失效，结论只能是 unknown。
+   */
+  private onMarkResponse(networkId: string, body: string | null, failed = false, lostBefore: string | null = null) {
+    const w = this.markWatch;
+    if (!w || w.closed || !w.allowed || w.allowed.networkId !== networkId || w.outcome) return;
+    const lost = lostBefore ?? this.markCheck?.() ?? null;
+    if (lost) w.invalid ??= lost;
+    w.outcome = failed ? "failed" : markResponseOk(w.allowed.requestId, body) ? "ok" : "bad";
+    console.log(`[${this.shopId}] platform mark_conversation response outcome=${w.outcome}`);
   }
 
   private onItemResponse(p: string, body: string | null) {
@@ -2169,26 +2254,149 @@ export class PddPageAdapter implements PlatformAdapter {
    * 否则 marked=null。颜色要悬停才能读，本步不读，color 一律 null。
    */
   async readConvState(conversationId: string, _timeoutMs: number): Promise<{ marked: boolean | null; color: null }> {
-    const unknown = { marked: null, color: null };
-    if (!this.window || this.window.isDestroyed() || this.sending || this.outgoing) return unknown;
-    const epoch = this.watchEpoch;
-    const snap = await this.run<{ keys: unknown[]; active: boolean } | string>(CONV_STAR_SNAPSHOT).catch(() => "script_failed");
-    if (this.watchEpoch !== epoch || typeof snap === "string" || !Array.isArray(snap?.keys) || typeof snap.active !== "boolean") return unknown;
-    const buyers = new Set(snap.keys.map((k) => buyerFromListKey(k)));
-    const [only] = buyers;
-    return buyers.size === 1 && only === conversationId ? { marked: snap.active, color: null } : unknown;
+    if (!this.window || this.window.isDestroyed() || this.sending || this.outgoing) return { marked: null, color: null };
+    return { marked: await this.starMarked(conversationId, this.window, this.watchEpoch), color: null };
   }
 
-  /** 当前打开对话的绑定令牌：页面代次＋列表项键的摘要（不含可读身份）；没有唯一打开的对话返回 null。 */
+  /** 同一次页面快照里打开的会话按买家去重恰好是该买家、且读取前后页面未变时，返回星标是否已收藏；否则 null。 */
+  private async starMarked(uid: string, page: PlatformPage, epoch: number): Promise<boolean | null> {
+    const snap = await this.run<{ keys: unknown[]; active: boolean } | string>(CONV_STAR_SNAPSHOT).catch(() => "script_failed");
+    if (this.window !== page || this.watchEpoch !== epoch || typeof snap === "string" || !Array.isArray(snap?.keys) || typeof snap.active !== "boolean") return null;
+    return onlyBuyer(snap.keys) === uid ? snap.active : null;
+  }
+
+  /**
+   * 契约“标星执行与成功判据”：只点星标颜色浮层中的目标颜色项。点击前核对（任一不满足都不点击）：
+   * 页面代次与登录归属不变；同一次快照里打开的会话按买家去重恰好是该买家；星标唯一且未收藏；浮层由星标关联、目标点是目标颜色项；
+   * 来源绑定（从占用页面起没有外来输入、没有标星/取消收藏请求，点击前 3 秒内页面也没有发出过）；运行时再核验通过、离确认截止不少于 1.5 秒。
+   * 核对与点击之间只有等浮层出现、把鼠标移到目标项，不做其他页面操作。点击窗口内只放行一条与本次一致的 mark 请求，
+   * 按它自己的响应判定；窗口内出现第二条请求、外来输入、页面或登录变化都是 unknown。不重试、不取消收藏、不改色。
+   */
+  async markConversation(request: MarkRequest): Promise<MarkResult> {
+    const notSent = (reason: string, detail = reason): MarkResult => {
+      console.log(`[${this.shopId}] platform mark not_sent reason=${reason} detail=${detail}`);
+      return { status: "not_sent", reason };
+    };
+    // 占用页面：等清理与预热结束后，在 await 返回的同一同步段里复核并置 sending（见 popupSweep 说明）。
+    do await this.yieldWarm(); while (this.popupSweep || this.warmRun);
+    if (!this.window || this.window.isDestroyed()) return notSent("platform_window_closed");
+    const status = this.tracker.status(true);
+    if (!status.logged_in) return notSent("platform_logged_out");
+    if (this.sending || this.outgoing || this.markWatch) return notSent("pdd_send_busy");
+    const color = MARK_COLOR_VALUE[request.color];
+    if (!/^[0-9]{1,32}$/.test(request.conversation_id) || !color) return notSent("pdd_mark_invalid_request");
+    const uid = request.conversation_id;
+    const page = this.window, epoch = this.watchEpoch;
+    const shop = status.identity?.platform_shop_id ?? null;
+    // 从占用页面起守护：外来输入、页面发出的标星 / 取消收藏请求、页面或登录变化都记在这里。
+    const watch = newMarkWatch(uid, color, epoch);
+    this.markWatch = watch;
+    this.markPage = page;
+    this.markCheck = () => {
+      if (this.window !== page || page.isDestroyed() || this.watchEpoch !== epoch) return "page_changed_during_mark";
+      const now = this.tracker.status(true);
+      return now.logged_in && (now.identity?.platform_shop_id ?? null) === shop ? null : "platform_changed_during_mark";
+    };
+    /** 点击前的守护核对：返回放弃原因（页面变化、外来输入或请求为 conv_state_changed；登录变化为原样，由运行时归为 not_started）。 */
+    const guard = (): string | null => {
+      const lost = this.markCheck?.() ?? null;
+      const detail = lost ?? (watch.foreign ? "manual_input" : watch.before ? "mark_request_before_click" : Date.now() - this.lastMarkRequestAt < MARK_QUIET_MS ? "mark_request_recent" : null);
+      if (!detail) return null;
+      console.log(`[${this.shopId}] platform mark guard detail=${detail}`);
+      return detail === "platform_changed_during_mark" ? detail : "conv_state_changed";
+    };
+    /** 前台自己的输入命令：执行期间到达的对应类型事件算自己的，命令结束后清掉未到的期望。 */
+    const own = async (types: string[], run: () => Promise<unknown>) => {
+      watch.expected = [...types];
+      try {
+        return await run();
+      } finally {
+        watch.expected = [];
+      }
+    };
+    const hover = (pt: Point) => own(["mouseMove"], () => page.webContents.debugger.sendCommand("Input.dispatchMouseEvent", { type: "mouseMoved", x: pt.x, y: pt.y }).catch(() => undefined));
+    let hovered = false;
+    this.sending = true;
+    try {
+      const notOpened = await this.openConversation(uid);
+      if (notOpened) return notSent(notOpened);
+      let stop = guard();
+      if (stop) return notSent(stop);
+      // 核对 2–4：同一次快照里的打开会话与星标状态。
+      const snap = await this.run<{ keys: unknown[]; active: boolean } | string>(CONV_STAR_SNAPSHOT).catch(() => "script_failed");
+      if ((stop = guard())) return notSent(stop);
+      if (typeof snap === "string" || !Array.isArray(snap?.keys) || typeof snap.active !== "boolean") return notSent("conv_state_unavailable", typeof snap === "string" ? snap : "snapshot_invalid");
+      if (onlyBuyer(snap.keys) !== uid) return notSent("conv_state_changed", "conversation_mismatch");
+      if (snap.active) return notSent("conv_state_changed", "already_marked");
+      // 核对 5：悬停星标等浮层出现；浮层须由星标关联、可见、唯一、至少三种已知颜色。
+      const star = await this.run<{ x: number; y: number; active: boolean } | string>(STAR_ICON).catch(() => "script_failed");
+      if ((stop = guard())) return notSent(stop);
+      if (typeof star === "string") return notSent("conv_state_unavailable", star);
+      hovered = true;
+      await hover(star);
+      let pop: StarSnapshot | string = "popover_missing";
+      for (let i = 0; i < 8 && typeof pop === "string" && !guard(); i++) {
+        await sleep(200);
+        pop = await this.run<StarSnapshot | string>(starOptionsScript()).catch(() => "script_failed");
+      }
+      if ((stop = guard())) return notSent(stop);
+      if (typeof pop === "string" || !Array.isArray(pop?.keys) || typeof pop.active !== "boolean" || !Array.isArray(pop.options)) return notSent("conv_state_unavailable", typeof pop === "string" ? pop : "popover_invalid");
+      if (onlyBuyer(pop.keys) !== uid) return notSent("conv_state_changed", "conversation_mismatch");
+      if (pop.active) return notSent("conv_state_changed", "already_marked");
+      const hits = pop.options.filter((o) => o.color === request.color);
+      if (hits.length !== 1 || hits[0].checked || !Number.isFinite(hits[0].x) || !Number.isFinite(hits[0].y)) return notSent("conv_state_unavailable", hits.length === 1 ? "target_checked_or_invalid" : "target_not_unique");
+      const target = { x: hits[0].x, y: hits[0].y };
+      // 鼠标移到目标颜色项（浮层保持展开）后，在该点核对命中元素属于星标浮层中目标颜色的列表项。
+      await hover(target);
+      // 最终核对在同一次页面快照里完成：命中目标颜色项（唯一、未勾选）、唯一打开的会话仍是本事件买家、星标仍未收藏。
+      const owned = await this.run<string>(starOptionsScript({ ...target, color: request.color, buyer: uid })).catch(() => "script_failed");
+      if ((stop = guard())) return notSent(stop);
+      if (owned === "conversation_mismatch" || owned === "already_marked") return notSent("conv_state_changed", owned);
+      if (owned !== "ok") return notSent("conv_state_unavailable", owned);
+      // 按下前一刻：最后一次守护核对与运行时再核验，随即打开点击窗口；按下与松开两条命令各对应一条输入事件。
+      const click = await dispatchPageClick(page.webContents, target, () => {
+        return guard() ?? request.recheck() ?? (request.deadline - Date.now() / 1000 < 1.5 ? "claim_expiring" : null);
+      }, () => {
+        watch.open = true;
+        watch.expected = ["mouseDown", "mouseUp"];
+      });
+      watch.expected = [];
+      if (click.status === "not_sent") return notSent(click.reason);
+      // 已开始点击（按下命令一旦尝试就不能证明未点击）：等放行请求的响应直到确认截止，此后只能是 confirmed 或 unknown。
+      while (!watch.outcome && Date.now() / 1000 < request.deadline) await sleep(100);
+      const late = this.markCheck?.() ?? null;
+      if (late) watch.invalid ??= late;
+      watch.closed = true;
+      const verdict = judgeMark(watch);
+      const observed = await this.observeMark(uid, page, epoch);
+      console.log(`[${this.shopId}] platform mark result=${verdict.ok ? "confirmed" : "unknown"} reason=${verdict.ok ? "-" : verdict.reason} click=${click.status} allowed=${watch.allowed ? 1 : 0} blocked=${watch.blocked} foreign=${watch.foreign} observed=${observed}`);
+      if (verdict.ok) return { status: "confirmed", page_observed: observed };
+      return { status: "unknown", reason: click.status === "unknown" && !watch.allowed ? click.reason : verdict.reason, page_observed: observed };
+    } finally {
+      watch.closed = true;
+      this.markWatch = null;
+      this.markCheck = null;
+      this.markPage = null;
+      if (hovered) await hover({ x: 1, y: 1 });
+      this.sending = false;
+    }
+  }
+
+  /** 点击后读一次星标（最多 300 毫秒），只供显示：marked / unchanged；读不到或不能归属该买家为 unknown。 */
+  private async observeMark(uid: string, page: PlatformPage, epoch: number): Promise<PageObserved> {
+    const marked = await Promise.race([this.starMarked(uid, page, epoch), sleep(300).then(() => null)]);
+    return marked === true ? "marked" : marked === false ? "unchanged" : "unknown";
+  }
+
+  /** 当前打开对话的绑定令牌：页面代次＋买家编号的摘要（不含可读身份）；按买家去重后没有唯一打开的对话返回 null。 */
   private async activeConvToken(): Promise<string | null> {
     const scan = await this.scanKeepingFresh();
-    const active = scan?.items.filter((i) => i.active) ?? [];
-    if (active.length !== 1) return null;
-    return this.convTokenFor(active[0].key);
+    const buyer = onlyBuyer((scan?.items ?? []).filter((i) => i.active).map((i) => i.key));
+    return buyer === null ? null : this.convTokenFor(buyer);
   }
 
-  private convTokenFor(key: string): string {
-    return crypto.createHash("sha256").update(`${this.watchEpoch}|${key}`).digest("hex").slice(0, 16);
+  private convTokenFor(buyer: string): string {
+    return crypto.createHash("sha256").update(`${this.watchEpoch}|${buyer}`).digest("hex").slice(0, 16);
   }
 
   /** 诊断模式：供人工测试在用户确认时取当前对话令牌，之后的动作请求须携带它。 */
@@ -2217,9 +2425,10 @@ export class PddPageAdapter implements PlatformAdapter {
       await hover(star);
       await sleep(500);
       // 对话身份、星标状态与颜色项须来自同一次页面快照：分两次读时，中途换走又换回会把别的对话的颜色当成本对话的。
-      const snap = await this.run<{ conv: string | null; active: boolean; options: StarOption[] } | string>(starOptionsScript()).catch(() => "script_failed");
+      const snap = await this.run<StarSnapshot | string>(starOptionsScript()).catch(() => "script_failed");
       if (typeof snap === "string") return snap;
-      if (this.watchEpoch !== epoch || snap.conv === null || this.convTokenFor(snap.conv) !== conv) return "conversation_mismatch";
+      const buyer = Array.isArray(snap.keys) ? onlyBuyer(snap.keys) : null;
+      if (this.watchEpoch !== epoch || buyer === null || this.convTokenFor(buyer) !== conv) return "conversation_mismatch";
       return { star: { x: star.x, y: star.y, active: snap.active }, options: snap.options };
     };
     this.sending = true;

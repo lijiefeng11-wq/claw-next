@@ -11,7 +11,7 @@ export const IMAGE_MISSING = "[图片，前台未取到]";
 
 export type Role = "buyer" | "agent" | "system";
 export type Kind = "text" | "image" | "card" | "unsupported";
-export type Action = "reply" | "handoff" | "none" | "send_item";
+export type Action = "reply" | "handoff" | "none" | "send_item" | "mark";
 export type DeliveryStatus = "unclaimed" | "claimed" | "sent" | "not_sent" | "unknown";
 export type ReceiptStatus = "sent" | "not_sent" | "unknown";
 
@@ -58,6 +58,35 @@ export type OrderItem = { goods_ref?: string; goods_title: string; sku?: string;
 export const CAP_MARK_CONVERSATION = "mark_conversation";
 export type MarkColor = "red" | "orange" | "blue" | "green";
 export type ConvState = { marked: boolean | null; color: MarkColor | null; observed_at: number };
+export const MARK_COLORS: readonly MarkColor[] = ["red", "orange", "blue", "green"];
+/** 会话操作回执的原因（契约 1.3 封闭枚举），不携带平台原文。 */
+export type ConvActionReason = "blocked_by_mark" | "platform_rejected" | "conv_state_unavailable" | "conv_state_changed" | "capability_withdrawn" | "deadline_exceeded" | "not_started";
+/** 点击后的页面观察：只供显示，不参与回执聚合。 */
+export type PageObserved = "marked" | "left_list" | "unchanged" | "unknown";
+/** mark 只有一个步骤；只列已开始的步骤。 */
+export type MarkStep = { step: "mark"; status: ReceiptStatus; color: MarkColor };
+/** 会话操作回执在 attempt_id / status 之外的字段；reply / send_item 不带。 */
+export type ReceiptExtra = { steps?: MarkStep[]; reason?: ConvActionReason; page_observed?: PageObserved };
+
+/**
+ * 本地阻止原因 → 契约回执原因。页面状态两类原样；能力撤回与确认截止各自归类；
+ * 其余（会话、租约、上下文版本变化，页面忙，重启等）一律 not_started。
+ */
+export function convActionReason(detail: string | null | undefined): ConvActionReason {
+  switch (detail) {
+    case "conv_state_changed":
+    case "conv_state_unavailable":
+      return detail;
+    case "capability_not_confirmed":
+      return "capability_withdrawn";
+    case "claim_expiring":
+    case "decision_expired":
+    case "reply_deadline_exceeded":
+      return "deadline_exceeded";
+    default:
+      return "not_started";
+  }
+}
 
 /** 契约“聊天页附加发送”：心跳能力名。 */
 export const CAP_SEND_ITEM = "send_item";
@@ -91,8 +120,11 @@ export type EventRequest = {
   context: { history_complete: boolean; messages: ContextMessage[]; orders?: ContextOrder[]; goods?: GoodsSnapshot[]; send_options?: SendOptions; conv_state?: ConvState };
 };
 
-/** send_item 不附文字，text 为空串；item 只在 send_item 时存在。 */
-export type Decision = { action: Action; text: string; reason: string; expires_at: number; item?: SendItem };
+/**
+ * send_item 不附文字，text 为空串；item 只在 send_item 时存在。
+ * mark（契约 1.3）不附文字，mark.color 与 policy_version（正整数）只在 mark 时存在。
+ */
+export type Decision = { action: Action; text: string; reason: string; expires_at: number; item?: SendItem; mark?: { color: MarkColor }; policy_version?: number };
 
 export type Delivery = {
   status: DeliveryStatus;
@@ -227,7 +259,7 @@ export function parseLease(value: unknown): Lease {
 
 const ITEM_TYPES: readonly string[] = ["instruction", "goods_card", "video"];
 
-/** 不认识的 action（或格式不对的 send_item）一律按 none 记录，绝不执行。 */
+/** 不认识的 action（或格式不对的 send_item / mark，以及 transfer）一律按 none 记录，绝不执行。 */
 function parseDecision(value: unknown): Decision | null {
   if (value === null) return null;
   const v = obj(value);
@@ -240,6 +272,10 @@ function parseDecision(value: unknown): Decision | null {
   const item = v.item as Record<string, unknown> | null | undefined;
   if (v.action === "send_item" && item && typeof item === "object" && ITEM_TYPES.includes(item.type as string) && typeof item.option_id === "string" && item.option_id.length > 0 && item.option_id.length <= 64) {
     return { action: "send_item", text: "", ...base, item: { type: item.type as SendItemType, option_id: item.option_id } };
+  }
+  const mark = v.mark as Record<string, unknown> | null | undefined;
+  if (v.action === "mark" && mark && typeof mark === "object" && !Array.isArray(mark) && MARK_COLORS.includes(mark.color as MarkColor) && Number.isInteger(v.policy_version) && (v.policy_version as number) > 0) {
+    return { action: "mark", text: "", ...base, mark: { color: mark.color as MarkColor }, policy_version: v.policy_version as number };
   }
   return { action: "none", text: "", reason: `unsupported_action:${typeof v.action === "string" ? v.action.slice(0, 32) : "invalid"}`, expires_at: base.expires_at };
 }

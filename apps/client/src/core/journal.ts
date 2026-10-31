@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { Card, EventSnapshot, Kind, ReceiptStatus, Role } from "./protocol.js";
+import type { Card, EventSnapshot, Kind, ReceiptExtra, ReceiptStatus, Role } from "./protocol.js";
 
 export type StoredMessage = {
   id: string;
@@ -35,6 +35,8 @@ export type ReceiptRecord = {
   platform_message_id: string | null;
   upload: "pending" | "uploaded" | "rejected";
   error: string | null;
+  /** 会话操作（契约 1.3）回执的步骤、原因与页面观察；只含步骤名、状态、颜色与原因分类，不含平台原文或编号。 */
+  extra?: ReceiptExtra;
 };
 
 export type AttemptRecord = {

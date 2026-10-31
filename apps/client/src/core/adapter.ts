@@ -1,4 +1,4 @@
-import type { Card, ImageMime, Kind, MarkColor, Role } from "./protocol.js";
+import type { Card, ImageMime, Kind, MarkColor, PageObserved, Role } from "./protocol.js";
 import type { PlatformOrder } from "./pddOrders.js";
 import type { PageHealthView } from "./pageHealth.js";
 
@@ -78,6 +78,23 @@ export type PlatformSendOption =
  */
 export type SendItemRequest = { conversation_id: string; option: PlatformSendOption; attempt_id: string; deadline: number; recheck: () => string | null };
 
+/**
+ * 契约“标星执行与成功判据”。deadline：确认截止（本机时钟，秒），过了不能再点击，也不能再认定成功。
+ * recheck：真正点击那一刻调用；返回非空即阻止原因，适配器须放弃点击并返回 not_sent。
+ */
+export type MarkRequest = { conversation_id: string; color: MarkColor; attempt_id: string; deadline: number; recheck: () => string | null };
+
+/**
+ * confirmed：成功判据全部满足。
+ * not_sent：点击前放弃；reason 为契约页面原因（conv_state_changed / conv_state_unavailable）或运行时阻止原因，由运行时归类。
+ * unknown：已开始点击但不能确认；不重试、不补做。
+ * page_observed：点击后读一次星标，只供显示，不参与判定。
+ */
+export type MarkResult =
+  | { status: "confirmed"; page_observed: PageObserved }
+  | { status: "not_sent"; reason: string }
+  | { status: "unknown"; reason: string; page_observed?: PageObserved };
+
 export type AdapterEvent =
   | { type: "status" }
   /** 平台会话建立或重新登录：运行时必须换新 session_id。 */
@@ -107,6 +124,12 @@ export interface PlatformAdapter {
    * 且读取前后页面代次未变；否则 marked 为 null。颜色未可靠读到时为 null。
    */
   readConvState?(conversationId: string, timeoutMs: number): Promise<{ marked: boolean | null; color: MarkColor | null }>;
+  /**
+   * 契约“标星执行与成功判据”：在该买家会话上只点星标颜色浮层中的目标颜色项（不点星标本身、不取消收藏）。
+   * 点击前核对页面代次、唯一打开的会话、星标未收藏与浮层归属；点击窗口内只放行一条与本次一致的标星请求，
+   * 按该请求自己的响应判定。只有成功判据全部满足才返回 confirmed。
+   */
+  markConversation?(request: MarkRequest): Promise<MarkResult>;
   /**
    * 通过平台页面自身按钮发送一项已有内容。只有平台明确成功且聊天记录相对点击前恰好新增一条
    * 对应对象的客服消息时才返回 confirmed（附该消息编号）；点击前放弃返回 not_sent；其余 unknown。

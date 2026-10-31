@@ -3,6 +3,7 @@ import {
   Lease,
   MAX_BODY_BYTES,
   Me,
+  ReceiptExtra,
   ReceiptStatus,
   normalizeBackendUrl,
   parseHealth,
@@ -98,9 +99,13 @@ export class BackendClient {
     return parseSnapshot(await this.request("POST", `/api/v1/events/${encodeURIComponent(eventId)}/cancel`, body));
   }
 
-  async receipt(eventId: string, attempt_id: string, status: ReceiptStatus, platform_message_id?: string): Promise<EventSnapshot> {
-    const payload: Record<string, string> = { attempt_id, status };
-    if (status === "sent" && platform_message_id) payload.platform_message_id = platform_message_id;
+  /** 会话操作（契约 1.3）另带 steps / reason / page_observed，且不带 platform_message_id。 */
+  async receipt(eventId: string, attempt_id: string, status: ReceiptStatus, platform_message_id?: string, extra?: ReceiptExtra): Promise<EventSnapshot> {
+    const payload: Record<string, unknown> = { attempt_id, status };
+    if (status === "sent" && platform_message_id && !extra) payload.platform_message_id = platform_message_id;
+    if (extra?.steps?.length) payload.steps = extra.steps;
+    if (extra?.reason) payload.reason = extra.reason;
+    if (extra?.page_observed) payload.page_observed = extra.page_observed;
     return parseSnapshot(await this.request("POST", `/api/v1/events/${encodeURIComponent(eventId)}/receipt`, JSON.stringify(payload)));
   }
 }

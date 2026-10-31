@@ -1,5 +1,9 @@
 import type { EventRecord, StoredMessage, UnknownCheck } from "./journal.js";
+import type { MarkColor } from "./protocol.js";
 import type { ShopRuntime } from "./runtime.js";
+
+/** 标星颜色的界面名称；orange 店主称“黄色”。 */
+export const MARK_COLOR_NAMES: Record<MarkColor, string> = { orange: "黄色", red: "红色", green: "绿色", blue: "蓝色" };
 
 /** 原因代码 → 给非技术人员看的中文说明。 */
 export const REASONS: Record<string, string> = {
@@ -80,6 +84,22 @@ export const REASONS: Record<string, string> = {
   model_response_too_large: "后台模型返回过大",
   pdd_adapter_not_implemented: "拼多多收发尚未接入",
   pdd_send_not_implemented: "拼多多发送尚未接入，未调用平台",
+  mark_invalid: "标星决定格式不对，未执行",
+  conv_state_not_retained: "提交时的会话状态未保留（客户端重启），不标星",
+  conv_state_not_unmarked: "提交时会话已收藏或状态未读到，不标星",
+  conv_state_changed: "会话或星标状态已变化，未点击",
+  conv_state_unavailable: "无法可靠读取星标或颜色浮层，未点击",
+  mark_request_not_observed: "点击后没有看到页面发出标星请求",
+  mark_request_blocked: "页面发出的标星请求与本次不符，已在本机拦截",
+  mark_response_not_ok: "平台响应不满足成功判据",
+  mark_request_failed: "标星请求加载失败",
+  mark_response_timeout: "确认截止前没有取到平台响应",
+  mark_binding_unproven: "平台已按成功判据答复，但目前无法证明这条请求来自本次点击（本阶段一律待核查）",
+  mark_request_ambiguous: "点击期间页面发出了不止一条标星/取消收藏请求，无法确认哪条来自本次",
+  mark_request_before_click: "点击前页面已发出标星/取消收藏请求",
+  manual_input_during_mark: "标星期间平台页面有人工操作",
+  page_changed_during_mark: "标星期间平台页面已变化",
+  platform_changed_during_mark: "标星期间平台登录或店铺已变化",
 };
 
 export function reasonText(code: string | null | undefined): string {
@@ -102,6 +122,29 @@ export function unknownStatus(reason: string, check: UnknownCheck | undefined): 
   return { label: "结果待核查", tone: "error", reason: `${base}请到平台聊天记录确认。不会自动重发。` };
 }
 
+/** 标星决定的状态：结果只按回执与本地尝试记录显示；unknown 永不重试，请人工到平台查看星标。 */
+function markStatus(ev: EventRecord, color: MarkColor | undefined): MessageStatus {
+  const name = color ? MARK_COLOR_NAMES[color] : "";
+  const check = "请到平台查看该会话星标。不会重试。";
+  const a = ev.attempt;
+  if (a) {
+    switch (a.phase) {
+      case "sent":
+        return { label: "已标星", tone: "ok", reason: `${name}，平台已确认` };
+      case "unknown":
+        return { label: "标星结果待核查", tone: "error", reason: `${reasonText(a.detail)}。${check}` };
+      case "not_sent":
+      case "aborted_before_send":
+      case "claim_failed":
+        return { label: "未标星", tone: "warn", reason: reasonText(a.detail) };
+      default:
+        return { label: "标星中", tone: "wait", reason: "" };
+    }
+  }
+  if (ev.snapshot?.delivery.status === "unknown") return { label: "标星结果待核查", tone: "error", reason: check };
+  return { label: "建议标星", tone: "suggest", reason: ev.blocked ? `未执行：${reasonText(ev.blocked)}` : name };
+}
+
 export function messageStatus(message: StoredMessage, ev: EventRecord | undefined, note: string | undefined): MessageStatus | null {
   if (message.role !== "buyer") return null;
   if (!ev) {
@@ -110,6 +153,7 @@ export function messageStatus(message: StoredMessage, ev: EventRecord | undefine
     if (note) return { label: "未自动处理", tone: "warn", reason: reasonText(note) };
     return { label: "等待处理", tone: "wait", reason: "" };
   }
+  if (ev.snapshot?.decision?.action === "mark") return markStatus(ev, ev.snapshot.decision.mark?.color);
   const a = ev.attempt;
   if (a) {
     if (["not_sent", "aborted_before_send", "claim_failed"].includes(a.phase) && a.detail === "reply_deadline_exceeded") return { label: "本条待人工", tone: "handoff", reason: reasonText(a.detail) };
@@ -143,7 +187,18 @@ export function messageStatus(message: StoredMessage, ev: EventRecord | undefine
       return { label: "建议交人工", tone: "handoff", reason: `${reasonText(s.decision.reason)}（仅为建议，平台未执行转接）` };
     case "none":
       return { label: "无需回复", tone: "muted", reason: reasonText(s.decision.reason) };
+    case "mark":
+      return markStatus(ev, s.decision.mark?.color);
   }
+}
+
+/** 界面显示的决定内容：回复文字、附加发送的候选名称或标星颜色。 */
+function decisionText(rt: ShopRuntime, ev: EventRecord | undefined): string | null {
+  const d = ev?.snapshot?.decision;
+  if (!ev || !d) return ev ? rt.itemLabel(ev) : null;
+  if (d.action === "reply") return d.text;
+  if (d.action === "mark") return d.mark ? `标星：${MARK_COLOR_NAMES[d.mark.color]}` : "标星";
+  return rt.itemLabel(ev);
 }
 
 export function shopView(rt: ShopRuntime, now = Date.now() / 1000) {
@@ -161,7 +216,7 @@ export function shopView(rt: ShopRuntime, now = Date.now() / 1000) {
         created_at: m.created_at,
         live: m.live,
         status: messageStatus(m, ev, conv.notes[m.id]),
-        decision_text: ev?.snapshot?.decision?.action === "reply" ? ev.snapshot.decision.text : ev ? rt.itemLabel(ev) : null,
+        decision_text: decisionText(rt, ev),
         event_id: ev?.event_id ?? null,
         context_revision: ev?.context_revision ?? null,
         history_complete: ev ? ev.history_complete : null,

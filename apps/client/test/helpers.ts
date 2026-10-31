@@ -123,6 +123,7 @@ export async function makeShop(opts: {
   now?: () => number;
   monotonicNow?: () => number;
   log?: (line: string) => void;
+  declareMark?: boolean;
 }): Promise<Harness> {
   const shop = opts.shop ?? "shop-a";
   const platformShopId = opts.platformShopId ?? `pdd-${shop}`;
@@ -138,6 +139,7 @@ export async function makeShop(opts: {
     now: opts.now,
     monotonicNow: opts.monotonicNow,
     log: opts.log,
+    declareMark: opts.declareMark,
   });
   await rt.start();
   if (opts.login !== false) {
