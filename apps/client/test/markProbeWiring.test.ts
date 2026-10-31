@@ -25,7 +25,7 @@ const realAppend = fs.appendFile;
   return (realAppend as (...a: unknown[]) => void)(file, data, opts, cb);
 };
 
-function harness(probe: boolean) {
+function harness(probe: boolean, realFresh = false) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "claw-mark-probe-"));
   const bodies = new Map<string, string>();
   const dbg = Object.assign(new EventEmitter(), {
@@ -39,13 +39,16 @@ function harness(probe: boolean) {
     lastActiveUid: string | null;
     watchEpoch: number;
     freshActive(): Promise<Read>;
+    scanKeepingFresh(): Promise<unknown>;
   };
   const reads: Read[] = [];
   let freshCalls = 0;
-  adapter.freshActive = async () => {
-    freshCalls++;
-    return reads.shift() ?? { uid: null, epoch: adapter.watchEpoch, gen: 0 };
-  };
+  if (!realFresh) {
+    adapter.freshActive = async () => {
+      freshCalls++;
+      return reads.shift() ?? { uid: null, epoch: adapter.watchEpoch, gen: 0 };
+    };
+  }
   adapter.attachNetwork(page);
   const file = path.join(dir, "marked.jsonl");
   const request = (id: string, p: string, postData: string, response: string) => {
@@ -171,6 +174,23 @@ test("真实 freshActive：重复读同一会话代次不变；A→B→A 代次�
   assert.equal(r6.uid, null);
   assert.equal(r6.epoch, adapter.watchEpoch);
 });
+
+for (const rebuild of [true, false]) {
+  test(`真实 attachNetwork + freshActive：请求现场读取完成后${rebuild ? "页面重建、同 uid 旧响应晚到记为未知" : "页面未变（对照）记为同一会话"}`, async () => {
+    const h = harness(true, true);
+    let scans = 0;
+    h.adapter.scanKeepingFresh = async () => (scans++, { items: [{ key: `${A}-x`, active: true, unread: false }] });
+    h.request("1", LIST, "{}", listBody);
+    for (let t = Date.now(); scans < 1 && Date.now() - t < 3000; ) await new Promise((r) => setTimeout(r, 10));
+    await new Promise((r) => setTimeout(r, 20));
+    if (rebuild) h.adapter.watchEpoch++;
+    h.finish("1");
+    const [rec] = await h.records(1);
+    assert.equal(scans, 2);
+    if (rebuild) assert.deepEqual([rec.active_known, rec.active_same_as_request, rec.active_value], [false, false, "missing"]);
+    else assert.deepEqual([rec.active_known, rec.active_same_as_request, rec.active_value], [true, true, 2]);
+  });
+}
 
 test("非诊断模式：不现场读取、不写 marked.jsonl", async () => {
   const h = harness(false);
