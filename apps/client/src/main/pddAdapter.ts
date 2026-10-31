@@ -14,7 +14,7 @@ import type { PlatformPage } from "./platformWorkspace.js";
 import { dispatchPageClick, type PageClickResult } from "./pddClick.js";
 import { PddMessageWatcher } from "./pddMessageWatcher.js";
 import { popupSweepScript, type PopupSweepMode, type PopupSweepResult } from "./pddPopups.js";
-import { markedListProbe, markRequestProbe, type MarkProbeRecord } from "./markProbe.js";
+import { MARKED_LIST_PATH, MARK_REQUEST_PATH, markedListProbe, markRequestProbe, type MarkProbeRecord, UNMARK_REQUEST_PATH } from "./markProbe.js";
 
 const LOGIN_URL = "https://mms.pinduoduo.com/chat-merchant/index.html";
 
@@ -907,7 +907,8 @@ export class PddPageAdapter implements PlatformAdapter {
     };
     const dbg = win.webContents.debugger;
     // 监听只装一次；渲染进程崩溃会使调试通道断开，恢复时由 enableNetwork 重新附加并开启拦截。
-    const pending = new Map<string, { path: string; postData: string | null; buyer: string | null; epoch: number; optionsEpoch: number; active: string | null }>();
+    const pending = new Map<string, { path: string; postData: string | null; buyer: string | null; epoch: number; optionsEpoch: number; active: Promise<string | null> | null }>();
+    const markWatched = (p: string) => p === MARK_REQUEST_PATH || p === UNMARK_REQUEST_PATH || p === MARKED_LIST_PATH;
     const discovered = new Map<string, string>();
     const seen = new Set<string>();
     const writeOnce = (kind: string, p: string, schema: unknown) => {
@@ -931,15 +932,10 @@ export class PddPageAdapter implements PlatformAdapter {
         }
         if (!p) return;
         const postData = typeof params.request.postData === "string" ? params.request.postData : null;
-        pending.set(params.requestId, { path: p, postData, buyer: this.orders.started(p, jsonOrNull(postData)), epoch: this.orders.epoch, optionsEpoch: this.sendOptions.epoch, active: this.lastActiveUid });
+        const active = schemaFile && markWatched(p) ? this.freshActiveUid(this.watchEpoch).catch(() => null) : null;
+        pending.set(params.requestId, { path: p, postData, buyer: this.orders.started(p, jsonOrNull(postData)), epoch: this.orders.epoch, optionsEpoch: this.sendOptions.epoch, active });
         if (postData && schemaFile) write({ kind: "request", path: p, schema: schemaOf(postData) });
-        if (schemaFile) {
-          try {
-            writeMarked(markRequestProbe(p, postData, this.lastActiveUid));
-          } catch {
-            // 诊断记录失败不得影响消息回调。
-          }
-        }
+        void active?.then((uid) => writeMarked(markRequestProbe(p, postData, uid))).catch(() => undefined);
       } else if (method === "Network.loadingFinished") {
         const action = discovered.get(params.requestId);
         if (action) {
@@ -971,10 +967,12 @@ export class PddPageAdapter implements PlatformAdapter {
             }
             if (PddSendOptionBook.watches(req.path) && req.optionsEpoch === this.sendOptions.epoch) this.sendOptions.response(req.path, jsonOrNull(req.postData), jsonOrNull(body), Math.floor(Date.now() / 1000));
             if (!schemaFile) return;
-            try {
-              writeMarked(markedListProbe(req.path, body, this.lastActiveUid, req.active));
-            } catch {
-              // 诊断记录失败不得影响消息回调。
+            if (req.active && req.path === MARKED_LIST_PATH) {
+              const atRequest = req.active;
+              const epoch = this.watchEpoch;
+              void Promise.all([atRequest, this.freshActiveUid(epoch)])
+                .then(([before, now]) => writeMarked(markedListProbe(req.path, body, now, before)))
+                .catch(() => undefined);
             }
             const schema = schemaOf(body);
             const key = req.path + JSON.stringify(schema);
@@ -2134,6 +2132,14 @@ export class PddPageAdapter implements PlatformAdapter {
     const scan = await this.run<Scan>(SCAN).catch(() => null);
     if (scan?.freshBuyer) this.pendingFreshBuyer = true;
     return scan;
+  }
+
+  /** 现场读取唯一打开对话的买家编号（不用扫描缓存 lastActiveUid）；页面代次变化或没有唯一打开的对话返回 null。 */
+  private async freshActiveUid(epoch: number): Promise<string | null> {
+    const scan = await this.scanKeepingFresh();
+    const active = scan?.items.filter((i) => i.active) ?? [];
+    if (this.watchEpoch !== epoch || active.length !== 1) return null;
+    return buyerFromListKey(active[0].key);
   }
 
   /** 当前打开对话的绑定令牌：页面代次＋列表项键的摘要（不含可读身份）；没有唯一打开的对话返回 null。 */

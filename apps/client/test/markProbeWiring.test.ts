@@ -25,7 +25,13 @@ function harness(probe: boolean) {
     sendCommand: async (_m: string, p?: { requestId?: string }) => ({ body: bodies.get(p?.requestId ?? "") ?? "", base64Encoded: false }),
   });
   const page = { isDestroyed: () => false, webContents: { debugger: dbg } };
-  const adapter = new PddPageAdapter("fixture", "虚构店铺", probe ? path.join(dir, "requests.jsonl") : null) as unknown as { attachNetwork(w: unknown): void; lastActiveUid: string | null };
+  const adapter = new PddPageAdapter("fixture", "虚构店铺", probe ? path.join(dir, "requests.jsonl") : null) as unknown as {
+    attachNetwork(w: unknown): void;
+    lastActiveUid: string | null;
+    freshActiveUid(epoch: number): Promise<string | null>;
+  };
+  const fresh: (string | null)[] = [];
+  adapter.freshActiveUid = async () => (fresh.length ? (fresh.shift() as string | null) : null);
   adapter.attachNetwork(page);
   const send = (id: string, p: string, postData: string, response: string) => {
     bodies.set(id, response);
@@ -37,12 +43,15 @@ function harness(probe: boolean) {
     const file = path.join(dir, "marked.jsonl");
     return fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
   };
-  return { adapter, send, records, dir };
+  return { adapter, send, records, dir, fresh };
 }
+
+const listBody = JSON.stringify({ success: true, result: { color_map: { [ACTIVE]: 2, [OTHER]: 3 }, marked_conversations: [] } });
 
 test("诊断模式：标星请求与收藏列表响应写入 marked.jsonl，只含布尔/计数/候选数值", async () => {
   const h = harness(true);
   h.adapter.lastActiveUid = ACTIVE;
+  h.fresh.push(ACTIVE, ACTIVE, ACTIVE);
   h.send("1", "/plateau/chat/mark_conversation", JSON.stringify({ data: { cmd: "mark_conversation", color: 2, uid: ACTIVE } }), JSON.stringify({ success: true, result: { success: true } }));
   h.send("2", "/plateau/chat/marked_lastest_conversations", JSON.stringify({ data: { cmd: "x" } }), JSON.stringify({ success: true, result: { has_more: false, color_map: { [ACTIVE]: 2, [OTHER]: 3 }, marked_conversations: [{ from: { uid: ACTIVE }, to: { uid: "cs-1" } }] } }));
   h.send("3", "/plateau/chat/mark_read", JSON.stringify({ data: { conversation: { uid: ACTIVE } } }), "{}");
@@ -56,6 +65,32 @@ test("诊断模式：标星请求与收藏列表响应写入 marked.jsonl，只�
   const text = fs.readFileSync(path.join(h.dir, "marked.jsonl"), "utf8");
   for (const id of [ACTIVE, OTHER, "cs-1"]) assert.ok(!text.includes(id), `marked.jsonl 不得含编号 ${id}`);
   assert.equal(fs.statSync(path.join(h.dir, "marked.jsonl")).mode & 0o777, 0o600);
+});
+
+test("扫描缓存仍是旧会话：以现场读取为准，不把旧会话的颜色记成当前会话", async () => {
+  const h = harness(true);
+  h.adapter.lastActiveUid = ACTIVE;
+  h.fresh.push(ACTIVE, OTHER);
+  h.send("1", "/plateau/chat/marked_lastest_conversations", "{}", listBody);
+  const [rec] = await h.records();
+  assert.equal(rec.active_same_as_request, false);
+  assert.equal(rec.active_value, 3);
+});
+
+test("现场读不到唯一打开的对话：记为未知，不用扫描缓存兜底", async () => {
+  const h = harness(true);
+  h.adapter.lastActiveUid = ACTIVE;
+  h.fresh.push(null, null, null);
+  h.send("1", "/plateau/chat/mark_conversation", JSON.stringify({ data: { color: 2, uid: ACTIVE } }), "{}");
+  h.send("2", "/plateau/chat/marked_lastest_conversations", "{}", listBody);
+  const recs = await h.records();
+  const mark = recs.find((r) => r.kind === "mark_request");
+  const list = recs.find((r) => r.kind === "marked_list");
+  assert.equal(mark.active_known, false);
+  assert.equal(mark.target_is_active, false);
+  assert.equal(list.active_known, false);
+  assert.equal(list.active_in_map, false);
+  assert.equal(list.active_value, "missing");
 });
 
 test("非诊断模式：不写 marked.jsonl", async () => {

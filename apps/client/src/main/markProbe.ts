@@ -69,7 +69,7 @@ export function markedListProbe(path: string, text: string | null, active: strin
     kind: "marked_list",
     parsed: result !== null,
     active_known: active !== null,
-    active_same_as_request: active === activeAtRequest,
+    active_same_as_request: active !== null && active === activeAtRequest,
     map_present: map !== null,
     map_entries: map ? Object.keys(map).length : 0,
     active_in_map: inMap,

@@ -88,7 +88,9 @@ describe("收藏列表：只看 result.color_map 与 result.marked_conversations
     const unknown = markedListProbe(MARKED_LIST_PATH, body, null, null);
     assert.equal(unknown?.active_in_map, false);
     assert.equal(unknown?.active_known, false);
+    assert.equal(unknown?.active_same_as_request, false);
     assert.equal(markedListProbe(MARKED_LIST_PATH, body, ACTIVE, OTHER)?.active_same_as_request, false);
+    assert.equal(markedListProbe(MARKED_LIST_PATH, body, ACTIVE, null)?.active_same_as_request, false);
   });
   test("map 中当前会话的值越界/小数/字符串只记类别", () => {
     for (const [v, want] of [[11, "out_of_set"], [0.5, "not_integer"], ["2", "str"], [{ c: 1 }, "obj"]] as const) {
