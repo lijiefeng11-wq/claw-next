@@ -8,7 +8,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import deadlines, diagnostics, goods_snapshot, modelconfig, modelsecrets, senditems
+from . import conversation_actions, deadlines, diagnostics, goods_snapshot, modelconfig, modelsecrets, senditems
 from .content import validate_content
 from .orders import validate_orders
 from .lock import DataLock
@@ -60,6 +60,7 @@ def validate_event(p):
     goods_snapshot.validate_goods(ctx, require)
     goods_snapshot.validate_references(ctx, require)
     senditems.validate_options(ctx, require)
+    conversation_actions.validate_context(ctx, require)
 
 
 def validate_settings(p):
@@ -74,8 +75,11 @@ def validate_settings(p):
         require(isinstance(rule, dict) and identifier(rule.get("id")) and rule["id"] not in seen, "invalid_rule_id")
         seen.add(rule["id"])
         require(isinstance(rule.get("contains"), str) and 0 < len(rule["contains"].strip()) <= 500, "invalid_rule_contains")
-        require("reply" in rule or "send" in rule, "invalid_rule_reply")
+        require("reply" in rule or "send" in rule or "handling" in rule, "invalid_rule_reply")
+        require("handling" not in rule or not ({"reply", "send"} & set(rule)), "invalid_rule_handling")
         item = {k: rule[k] for k in ("id", "contains")}
+        if "handling" in rule:
+            item["handling"] = conversation_actions.validate_policy(rule["handling"], require)
         if "reply" in rule:
             require(isinstance(rule["reply"], str) and 0 < len(rule["reply"].strip()) <= 2000, "invalid_rule_reply")
             item["reply"] = rule["reply"]
@@ -85,7 +89,10 @@ def validate_settings(p):
             require(isinstance(rule["description"], str) and len(rule["description"]) <= 500, "invalid_rule_description")
             item["description"] = rule["description"]
         clean.append(item)
-    return {"enabled": p["enabled"], "mode": p["mode"], "system_prompt": p["system_prompt"], "rules": clean}
+    result = {"enabled": p["enabled"], "mode": p["mode"], "system_prompt": p["system_prompt"], "rules": clean}
+    if "fallback" in p:
+        result["fallback"] = conversation_actions.validate_fallback(p["fallback"], require)
+    return result
 
 
 DEFAULT_SETTINGS = {"enabled": False, "mode": "rules", "system_prompt": "仅根据已知店铺规则回答；无法确认则转人工。", "rules": [], "version": 1}
@@ -334,7 +341,8 @@ class Store:
             resumed = owner and old["session_id"] == p["session_id"] and bool(old.get("restart_pending"))
             gen = old["generation"] if same or resumed else (old["generation"] + 1 if old else 1)
             lease = {"shop_id": identity["shop_id"], "client_id": identity["client_id"], "instance_id": p["instance_id"], "session_id": p["session_id"], "generation": gen, "expires_at": now + 60}
-            lease["capabilities"] = [cap for cap in (senditems.CAPABILITY, deadlines.CAPABILITY, goods_snapshot.CAPABILITY) if cap in caps]
+            lease["capabilities"] = [cap for cap in (senditems.CAPABILITY, deadlines.CAPABILITY, goods_snapshot.CAPABILITY,
+                                                    *conversation_actions.READY_CAPABILITIES) if cap in caps]
             self.db.execute("INSERT OR REPLACE INTO leases VALUES (?,?)", (identity["shop_id"], json.dumps(lease)))
             self._resolve_recovery(identity["shop_id"], lease, now)
             return lease
@@ -377,7 +385,7 @@ class Store:
         result = json.loads(row["decision"]) if row["decision"] else {}
         return (delivery["status"] == "unclaimed" and delivery.get("attempt_id") is None
                 and (row["state"] in ("pending", "processing")
-                     or (row["state"] == "ready" and result.get("action") in ("reply", "send_item"))))
+                     or (row["state"] == "ready" and result.get("action") in ("reply", "send_item", "mark", "transfer"))))
 
     @staticmethod
     def _deadline_terminal(row):
@@ -495,6 +503,15 @@ class Store:
                 self._expire_deadline(row)
                 return self._view(self._row(identity, p["event_id"]))
             lease = self._check_lease(identity, p)
+            caps = lease.get("capabilities", [])
+            has_mark = "mark_conversation" in caps
+            has_transfer = "transfer_conversation" in caps
+            if "conv_state" in p["context"]:
+                require(has_mark or has_transfer, "capability_not_confirmed")
+            if has_mark or has_transfer:
+                require("conv_state" in p["context"], "conv_state_required")
+            if "transfer_targets" in p["context"]:
+                require(has_transfer, "capability_not_confirmed")
             if "goods" in p["context"] or any("items" in order for order in p["context"].get("orders", [])):
                 require(goods_snapshot.CAPABILITY in lease.get("capabilities", []), "capability_not_confirmed")
             if has_budget:
@@ -594,7 +611,8 @@ class Store:
             if row["state"] != "processing":
                 # A duplicate/late completion cannot overwrite an existing decision or delivery.
                 return json.loads(row["decision"]) if row["decision"] else {"action": "none", "text": "", "reason": "superseded", "expires_at": time.time()}
-            if decision.get("action") in ("reply", "send_item"):
+            decision = self._action_fallback(job, decision)
+            if decision.get("action") in ("reply", "send_item", "mark", "transfer"):
                 # Re-read all permission inputs after asynchronous model work.
                 identity = {"shop_id": row["shop_id"], "client_id": row["client_id"]}
                 original = json.loads(row["payload"])
@@ -607,6 +625,10 @@ class Store:
                     if decision["action"] == "send_item":
                         require(senditems.CAPABILITY in lease.get("capabilities", []), "capability_not_confirmed", 409)
                         require(senditems.valid_item(decision.get("item"), original["context"]), "invalid_send_item", 409)
+                    elif decision["action"] in ("mark", "transfer"):
+                        require(self._valid_conversation_decision(decision, original["context"],
+                                                                 lease.get("capabilities", []), settings),
+                                "invalid_conversation_action", 409)
                 except ApiError as exc:
                     reason = exc.code
                 if reason:
@@ -626,9 +648,51 @@ class Store:
                 if failure:
                     timing["failure_class"] = failure
             self._save_timing(*key, timing)
-            if decision["action"] not in ("reply", "send_item") or clock.get("deadline") is None:
+            if decision["action"] not in ("reply", "send_item", "mark", "transfer") or clock.get("deadline") is None:
                 self._clocks.pop(key, None)
             return decision
+
+    @staticmethod
+    def _valid_conversation_decision(result, context, capabilities, settings):
+        if not conversation_actions.valid_decision(result, context, capabilities, settings["version"]):
+            return False
+        source, _, key = result["reason"].partition(":")
+        if source == "fallback":
+            policy = settings.get("fallback", {}).get(key)
+        elif source in ("rule", "rule_semantic"):
+            policy = next((rule.get("handling") for rule in settings["rules"] if rule["id"] == key), None)
+        else:
+            policy = None
+        if policy is None:
+            return False
+        expected = conversation_actions.resolve(policy, context, capabilities, settings["version"], result["reason"])
+        return expected == {key: value for key, value in result.items() if key != "expires_at"}
+
+    @staticmethod
+    def _action_fallback(job, result):
+        """Only saved server policies turn an eligible judgment into an action."""
+        if (result.get("action") != "handoff" or job.get("block_reason")
+                or not job["settings"]["enabled"] or not job["payload"]["context"]["history_complete"]):
+            return result
+        reason = result.get("reason", "")
+        if reason == deadlines.REASON:
+            return result
+        if reason == "no_matching_rule" or reason.startswith("model:"):
+            kind = "unhandled"
+        elif reason == "decision_internal_error" or reason == "model_not_configured" or reason == "vehicle_knowledge_unavailable":
+            kind = "error"
+        elif reason.startswith("model_unavailable:"):
+            failures = [item.rpartition("=")[2] for item in reason.removeprefix("model_unavailable:").split(",")
+                        if not item.endswith("=not_configured")]
+            kind = "model_timeout" if failures and failures[-1] == "timeout" else "error"
+        else:
+            return result
+        policy = job["settings"].get("fallback", {}).get(kind)
+        if policy is None or policy["action"] == "handoff":
+            return result
+        resolved = conversation_actions.resolve(policy, job["payload"]["context"], job.get("capabilities", []),
+                                                job["settings"]["version"], "fallback:" + kind)
+        return {**resolved, "expires_at": result["expires_at"]}
 
     def get(self, identity, event):
         with self.lock, self.db:
@@ -679,7 +743,7 @@ class Store:
                 require(not self._deadline_terminal(row), deadlines.REASON, 409)
                 lease = self._check_lease(identity, p)
                 decision = json.loads(row["decision"]) if row["decision"] else None
-                require(row["state"] == "ready" and decision and decision["action"] in ("reply", "send_item"), "not_reply", 409)
+                require(row["state"] == "ready" and decision and decision["action"] in ("reply", "send_item", "mark", "transfer"), "not_reply", 409)
                 if decision["action"] == "send_item":
                     require(senditems.CAPABILITY in lease.get("capabilities", []), "capability_not_confirmed", 409)
                     require(senditems.valid_item(decision.get("item"), original["context"]), "invalid_send_item", 409)
@@ -687,6 +751,10 @@ class Store:
                 require(self._is_latest(row), "superseded", 409)
                 settings = self._settings(identity["shop_id"])
                 require(settings["enabled"] and settings["version"] == row["settings_version"], "settings_changed", 409)
+                if decision["action"] in ("mark", "transfer"):
+                    require(self._valid_conversation_decision(decision, original["context"],
+                                                             lease.get("capabilities", []), settings),
+                            "invalid_conversation_action", 409)
                 if d["status"] == "unclaimed":
                     d.update(status="claimed", attempt_id=p["attempt_id"], claim_expires_at=time.time() + 10)
                     self._delivery(row, d)
@@ -696,13 +764,28 @@ class Store:
     def receipt(self, identity, event, p):
         require(isinstance(p, dict) and identifier(p.get("attempt_id")), "invalid_attempt_id")
         require(p.get("status") in ("sent", "not_sent", "unknown"), "invalid_receipt_status")
-        if p["status"] == "sent":
-            require(identifier(p.get("platform_message_id")), "platform_message_id_required")
         with self.lock, self.db:
             self._expire_claims()
             row = self._row(identity, event)
             d = json.loads(row["delivery"])
             require(d["attempt_id"] == p["attempt_id"], "attempt_mismatch", 409)
+            result = json.loads(row["decision"]) if row["decision"] else {}
+            if result.get("action") in ("mark", "transfer"):
+                clean = conversation_actions.receipt(result["action"], result, p, require)
+                if d["status"] != "claimed":
+                    require(d["status"] == clean["status"], "receipt_conflict", 409)
+                    if "steps" in d:
+                        require(all(d.get(key) == clean.get(key) for key in ("steps", "page_observed", "reason")),
+                                "receipt_conflict", 409)
+                    else:
+                        require(d["status"] == "unknown", "receipt_conflict", 409)
+                    return self._view(row)
+                d.update(clean, platform_message_id=None, recorded_at=time.time())
+                self._delivery(row, d)
+                return self._view(self._row(identity, event))
+            require("steps" not in p, "invalid_receipt_steps")
+            if p["status"] == "sent":
+                require(identifier(p.get("platform_message_id")), "platform_message_id_required")
             platform_id = p.get("platform_message_id") if p["status"] == "sent" else None
             if d["status"] != "claimed":
                 require(d["status"] == p["status"] and d.get("platform_message_id") == platform_id, "receipt_conflict", 409)

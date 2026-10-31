@@ -175,7 +175,7 @@ window.setupAdminAssist = function (options) {
     function showTarget() {
       const selected = state.rules.find(r => "replace:" + r.id === choice.value);
       target.textContent = selected ? "将替换：" + selected.contains + "\n原回复：" + (selected.reply || "[无文字]") +
-        (selected.send ? "\n注意：这条原有发送条目，替换后会移除发送条目，改用上面的文字。" : "") : "";
+        (selected.send || selected.handling ? "\n注意：这条原有发送或平台处理方式，替换后会移除原处理方式，改用上面的文字。" : "") : "";
     }
     choice.addEventListener("change", () => { showTarget(); sync(); });
     contains.input.addEventListener("input", update);
@@ -216,7 +216,7 @@ window.setupAdminAssist = function (options) {
     let changed = 0;
     for (const item of draft.items) {
       const choice = item.choice.value; if (choice === "skip") continue;
-      const value = {contains: item.contains.value.trim(), description: item.description.value.trim(), reply: item.reply.value.trim(), send: null};
+      const value = {contains: item.contains.value.trim(), description: item.description.value.trim(), reply: item.reply.value.trim(), send: null, handling: null};
       if (!value.contains || value.contains.length > 500 || value.description.length > 500 || !value.reply || value.reply.length > 2000) {
         say("rule-draft-status", "所选草稿有空白或过长内容，请修改后再填入。"); return;
       }

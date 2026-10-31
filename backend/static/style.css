@@ -1830,3 +1830,13 @@ button:disabled {
   .rule-row > .rule-field, .rule-row > .rule-field:nth-child(2), .rule-row > .rule-field:nth-child(3), .rule-row .rule-reply-group { grid-column: 2 / 4; }
   .rule-row .rule-delete { grid-column: 3; grid-row: auto; margin-top: 0; }
 }
+.fallback-policy {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+.policy-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 8px;
+}
