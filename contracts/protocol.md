@@ -329,7 +329,8 @@ status 只能 sent/not_sent/unknown。sent 必须具有平台明确成功回执�
 用途：店铺配置的兜底处理（处理不了、报错、超时等）可以选择“给该买家会话标星（选颜色）”或“把该会话转给指定客服账号（转人工）”。本段生效前，上文 `handoff` 仍只是建议，前台不执行任何平台转接或收藏；**回复文字里出现“转人工”等字样永远不触发平台操作**。仅观察模式不执行本段动作。
 
 拼多多页面实测事实（前台诊断记录，只记结构）：
-- 收藏与标星是同一状态，颜色为红/橙/蓝/绿四选一；未收藏时选颜色即收藏。
+- 收藏与标星是同一状态，颜色四选一；未收藏时选颜色即收藏，点星标本身即以默认色收藏。
+- 颜色与平台 `mark_conversation` 请求 `color` 数值的对应（店主在场逐个点选并确认，2026-10-31）：`orange`（店主称“黄色”，点星标时的默认色）= 1，`red` = 2，`green` = 3，`blue` = 4。管理界面对 `orange` 显示为“黄色”。0 与大于 4 的数值未观察，不得使用。
 - 转移入口为会话工具栏“转移会话”，对话框按客服行选择，再选“无原因直接转移”（另有原因项与“发送”，前台不点）。
 - **已收藏的会话不可转移**：平台返回失败并给出“取消收藏并转移 / 暂不转移收藏会话”。页面在“取消收藏并转移”后依次发出 `unmark_conversation`、`move_conversation`，随后页面自行发出 `close_conversation`（前台不主动调用该接口，其作用对象与必要性待核实）。
 - 平台响应字段语义（`result.result`、`error_code` 等）尚未核实；核实前不得据此判定成功。
@@ -351,7 +352,7 @@ status 只能 sent/not_sent/unknown。sent 必须具有平台明确成功回执�
 |---|---|---|
 | `conv_state` | 确认 `mark_conversation` 或 `transfer_conversation` 时必填 | 对象，只允许下列三键 |
 | `conv_state.marked` | 是 | 布尔或 null；null 表示本次没有可靠读到（见下） |
-| `conv_state.color` | 是 | `red`/`orange`/`blue`/`green`；`marked` 为 false 或 null 时为 null |
+| `conv_state.color` | 是 | `red`/`orange`（界面显示“黄色”）/`blue`/`green`；`marked` 为 false 或 null 时为 null |
 | `conv_state.observed_at` | 是 | 有限数字（Unix 秒） |
 | `transfer_targets` | 否（仅确认 `transfer_conversation` 时允许） | 数组，最多 50 项；省略或空表示前台没有读到可转接客服 |
 | `target_id` | 是 | 非空字符串 ≤64，数组内唯一；前台生成的不透明编号，不是平台编号 |
