@@ -2146,8 +2146,10 @@ export class PddPageAdapter implements PlatformAdapter {
    */
   private async freshActive(sentEpoch: number): Promise<string | null> {
     const scan = this.watchEpoch === sentEpoch ? await this.scanKeepingFresh() : null;
-    const active = scan?.items.filter((i) => i.active) ?? [];
-    return this.watchEpoch === sentEpoch && active.length === 1 ? buyerFromListKey(active[0].key) : null;
+    // 同一对话可同时出现在“待回复”与“全部”列表并都带 active；按买家去重后仍须唯一。
+    const buyers = new Set((scan?.items ?? []).filter((i) => i.active).map((i) => buyerFromListKey(i.key)));
+    const [only] = buyers;
+    return this.watchEpoch === sentEpoch && buyers.size === 1 && only ? only : null;
   }
 
   /** 当前打开对话的绑定令牌：页面代次＋列表项键的摘要（不含可读身份）；没有唯一打开的对话返回 null。 */
