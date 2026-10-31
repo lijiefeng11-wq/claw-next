@@ -69,46 +69,44 @@ describe("标星请求：只认精确路由与 data.color / data.uid", () => {
 describe("收藏列表：只看 result.color_map 与 result.marked_conversations", () => {
   test("当前会话在 color_map 中：记数值与计数，不输出键、完整 map 或任何编号", () => {
     const body = list({ page: 1, has_more: false, color_map: { [ACTIVE]: 2, [OTHER]: 4 }, marked_conversations: [conv(ACTIVE, "cs-55"), conv(OTHER, "cs-55")] });
-    const rec = markedListProbe(MARKED_LIST_PATH, body, ACTIVE, true);
+    const rec = markedListProbe(MARKED_LIST_PATH, body, ACTIVE);
     assert.deepEqual(rec, {
-      kind: "marked_list", parsed: true, active_known: true, active_same_as_request: true,
+      kind: "marked_list", parsed: true, active_known: true,
       map_present: true, map_entries: 2, active_in_map: true, active_value: 2,
       list_present: true, list_count: 2, from_uid_active: 1, to_uid_active: 0, has_more: false,
     });
     assert.deepEqual(leaks(rec), []);
   });
   test("当前会话不在 map 中：active_in_map=false、数值 missing（不据此推出未收藏）", () => {
-    const rec = markedListProbe(MARKED_LIST_PATH, list({ has_more: true, color_map: { [OTHER]: 1 }, marked_conversations: [] }), ACTIVE, true);
+    const rec = markedListProbe(MARKED_LIST_PATH, list({ has_more: true, color_map: { [OTHER]: 1 }, marked_conversations: [] }), ACTIVE);
     assert.equal(rec?.active_in_map, false);
     assert.equal(rec?.active_value, "missing");
     assert.equal(rec?.has_more, true);
   });
-  test("当前会话未知、请求与响应期间切换会话", () => {
+  test("当前会话未知：不查 map；记录不含“与请求时同一会话”判断", () => {
     const body = list({ color_map: { [ACTIVE]: 1 }, marked_conversations: [] });
-    const unknown = markedListProbe(MARKED_LIST_PATH, body, null, true);
-    assert.equal(unknown?.active_in_map, false);
-    assert.equal(unknown?.active_known, false);
-    assert.equal(unknown?.active_same_as_request, false);
-    assert.equal(markedListProbe(MARKED_LIST_PATH, body, ACTIVE, false)?.active_same_as_request, false);
+    const unknown = markedListProbe(MARKED_LIST_PATH, body, null);
+    assert.deepEqual([unknown?.active_known, unknown?.active_in_map, unknown?.active_value], [false, false, "missing"]);
+    assert.equal("active_same_as_request" in (unknown ?? {}), false);
   });
   test("map 中当前会话的值越界/小数/字符串只记类别", () => {
     for (const [v, want] of [[11, "out_of_set"], [0.5, "not_integer"], ["2", "str"], [{ c: 1 }, "obj"]] as const) {
-      assert.equal(markedListProbe(MARKED_LIST_PATH, list({ color_map: { [ACTIVE]: v } }), ACTIVE, true)?.active_value, want);
+      assert.equal(markedListProbe(MARKED_LIST_PATH, list({ color_map: { [ACTIVE]: v } }), ACTIVE)?.active_value, want);
     }
   });
   test("同名 color_map 嵌在别处、result 不是对象：不认", () => {
     const nested = JSON.stringify({ success: true, result: { extra: { color_map: { [ACTIVE]: 2 } } }, color_map: { [ACTIVE]: 3 } });
-    const rec = markedListProbe(MARKED_LIST_PATH, nested, ACTIVE, true);
+    const rec = markedListProbe(MARKED_LIST_PATH, nested, ACTIVE);
     assert.equal(rec?.map_present, false);
     assert.equal(rec?.active_in_map, false);
-    assert.equal(markedListProbe(MARKED_LIST_PATH, JSON.stringify({ result: [1] }), ACTIVE, true)?.parsed, false);
-    assert.equal(markedListProbe(MARKED_LIST_PATH, JSON.stringify({ result: { color_map: [2] } }), ACTIVE, true)?.map_present, false);
+    assert.equal(markedListProbe(MARKED_LIST_PATH, JSON.stringify({ result: [1] }), ACTIVE)?.parsed, false);
+    assert.equal(markedListProbe(MARKED_LIST_PATH, JSON.stringify({ result: { color_map: [2] } }), ACTIVE)?.map_present, false);
   });
   test("原型链上的键不算在 map 中", () => {
-    const rec = markedListProbe(MARKED_LIST_PATH, list({ color_map: {} }), "toString", true);
+    const rec = markedListProbe(MARKED_LIST_PATH, list({ color_map: {} }), "toString");
     assert.equal(rec?.active_in_map, false);
   });
   test("无关路径不记", () => {
-    assert.equal(markedListProbe("/plateau/chat/latest_conversations", list({ color_map: { [ACTIVE]: 2 } }), ACTIVE, true), null);
+    assert.equal(markedListProbe("/plateau/chat/latest_conversations", list({ color_map: { [ACTIVE]: 2 } }), ACTIVE), null);
   });
 });
