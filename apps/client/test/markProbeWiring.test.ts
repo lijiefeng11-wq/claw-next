@@ -66,26 +66,30 @@ function harness(probe: boolean) {
   const finish = (id: string) => dbg.emit("message", {}, "Network.loadingFinished", { requestId: id });
   const send = (id: string, p: string, postData: string, response: string) => (request(id, p, postData, response), finish(id));
   const lines = () => (fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
-  const records = async (n: number) => (await wait(() => lines().length >= n), lines());
+  // 默认只看请求与列表记录；响应记录另由 withResponses 取，避免写入先后影响取第一条。
+  const pick = (all: boolean) => lines().filter((r) => all || !String(r.kind).endsWith("_response"));
+  const records = async (n: number, withResponses = false) => (await wait(() => pick(withResponses).length >= n), pick(withResponses));
   return { adapter, request, finish, send, records, file, scans, scanCalls: () => scanCalls };
 }
 
 const listBody = JSON.stringify({ success: true, result: { has_more: false, color_map: { [A]: 2, [B]: 7 }, marked_conversations: [{ from: { uid: A }, to: { uid: "cs-1" } }] } });
 const LIST = "/plateau/chat/marked_lastest_conversations";
 const MARK = "/plateau/chat/mark_conversation";
-const markBody = (uid: string, color: number) => JSON.stringify({ data: { cmd: "mark_conversation", color, uid } });
+const markBody = (uid: string, color: number) => JSON.stringify({ data: { cmd: "mark_conversation", request_id: 1, color, uid } });
 
 test("同一会话 A：记数值与计数，文件不含编号、请求权限 0600；记录不含“与请求时同一会话”判断", async () => {
   const h = harness(true);
   h.adapter.lastActiveUid = A;
   h.scans.push({ items: only(A) }, { items: only(A) });
-  h.send("1", MARK, markBody(A, 2), JSON.stringify({ success: true }));
+  h.send("1", MARK, markBody(A, 2), JSON.stringify({ success: true, result: { response: A, request_id: 1, result: "ok", success: true } }));
   h.send("2", LIST, "{}", listBody);
   h.send("3", "/plateau/chat/mark_read", JSON.stringify({ data: { conversation: { uid: A } } }), "{}");
-  const recs = await h.records(2);
+  const recs = await h.records(3, true);
   const mark = recs.find((r) => r.kind === "mark_request");
   const list = recs.find((r) => r.kind === "marked_list");
-  assert.equal(recs.length, 2);
+  const resp = recs.find((r) => r.kind === "mark_response");
+  assert.equal(recs.length, 3);
+  assert.deepEqual([resp.top_success, resp.inner_success, resp.request_id_match, resp.result_value, resp.response_value], [true, true, true, "ok", "other"]);
   assert.deepEqual([mark.active_known, mark.target_is_active, mark.color], [true, true, 2]);
   assert.deepEqual([list.active_known, list.active_in_map, list.active_value, list.from_uid_active], [true, true, 2, 1]);
   assert.equal("active_same_as_request" in list, false);
