@@ -352,7 +352,7 @@ status 只能 sent/not_sent/unknown。sent 必须具有平台明确成功回执�
 |---|---|---|
 | `conv_state` | 确认 `mark_conversation` 或 `transfer_conversation` 时必填 | 对象，只允许下列三键 |
 | `conv_state.marked` | 是 | 布尔或 null；null 表示本次没有可靠读到（见下） |
-| `conv_state.color` | 是 | `red`/`orange`（界面显示“黄色”）/`blue`/`green`；`marked` 为 false 或 null 时为 null |
+| `conv_state.color` | 是 | `red`/`orange`（界面显示“黄色”）/`blue`/`green` 或 null；`marked` 为 false 或 null 时必须为 null，`marked=true/color=null` 只表示已收藏但颜色未知 |
 | `conv_state.observed_at` | 是 | 有限数字（Unix 秒） |
 | `transfer_targets` | 否（仅确认 `transfer_conversation` 时允许） | 数组，最多 50 项；省略或空表示前台没有读到可转接客服 |
 | `target_id` | 是 | 非空字符串 ≤64，数组内唯一；前台生成的不透明编号，不是平台编号 |
@@ -374,11 +374,11 @@ status 只能 sent/not_sent/unknown。sent 必须具有平台明确成功回执�
 新增两个 action，一次事件一项，不附文字：
 
 ```json
-{"action":"mark","mark":{"color":"red"},"reason":"fallback:model_timeout","expires_at":1790000060.0}
-{"action":"transfer","transfer":{"target_id":"t-1","unmark_policy":{"allow":true,"version":3}},"reason":"fallback:unhandled","expires_at":1790000060.0}
+{"action":"mark","mark":{"color":"red"},"policy_version":3,"reason":"fallback:model_timeout","expires_at":1790000060.0}
+{"action":"transfer","transfer":{"target_id":"t-1","unmark_policy":{"allow":true,"version":3}},"policy_version":3,"reason":"fallback:unhandled","expires_at":1790000060.0}
 ```
 
-- `mark.color` 四选一；若 `conv_state` 已是该颜色，后台不生成 mark。
+- `mark.color` 四选一；若 `conv_state` 已是该颜色，后台不生成 mark。两种新动作都省略 `text`，携带正整数 `policy_version`，等于本事件冻结的店铺设置版本；`transfer.unmark_policy.version` 也等于该版本。设置变化后旧决定不得提交或首次 claim。
 - 一事件一动作：不组合“先发文字再转人工”，也不组合“先标星再转移”。店铺兜底配置对每类情形（`unhandled` 无法处理 / `error` 报错 / `model_timeout` 模型超时）各选一种：不处理、handoff 建议、mark（选颜色）、transfer（填账号显示名）——四者互斥；规则与话术共用同一套结构化处理方式，配置带店铺策略版本，决定里携带该版本，版本变化后旧决定 claim 409。
 - **超时边界。** `fallback:model_timeout` 只指“在事件既有预算内、模型调用超时后的兜底”：它是普通决定，照常受 `expires_at`、claim 许可和契约 A 预算约束，不重置或延长任何预算。总预算已耗尽的事件按契约 A 以 `handoff` + `reply_deadline_exceeded` 终结，**不可复活、不可 claim，也不生成 mark/transfer**；若以后要求预算耗尽后仍自动转人工，须另定独立的动作时限与归属，并重新审查。
 - `transfer.unmark_policy` 是店铺**一次配置的固定策略**及其版本：`allow=true` 表示“遇平台以已收藏为由拒绝转移时，取消收藏后再转一次”；未配置视为 `allow=false`。前台只按决定里携带的策略执行，不自行放宽。策略版本变化后，旧版本的决定不能 claim（409）。
@@ -419,15 +419,35 @@ status 只能 sent/not_sent/unknown。sent 必须具有平台明确成功回执�
 | 任一步 unknown（含 `unmarked=null`） | unknown | 不重试、不补做 |
 | `transfer`=unknown | unknown | 不再进行后续步骤 |
 
+- 已领取但确定尚未开始任何平台步骤时，仅可提交 `status=not_sent`，`steps` 省略或为空；不能伪造未开始的步骤。`page_observed` 若提供，仅为 `marked` / `left_list` / `unchanged` / `unknown`，不参与聚合。回执顶层及步骤可选 `reason` 仅为 `blocked_by_mark` / `platform_rejected` / `conv_state_unavailable` / `conv_state_changed` / `capability_withdrawn` / `deadline_exceeded` / `not_started`，不得携带原始平台文字。
+- 后台核验 `steps` 与冻结决定的颜色/取消收藏策略一致、顺序与上表一致，整体 `status` 必须等于聚合结果；无授权不得报告第二个 `unmark_and_transfer` 步骤。相同回执幂等，终态后的状态、步骤、观察或原因冲突返回409，unknown 不被晚回执覆盖。
 - `sent` 须同时满足：平台对应接口明确成功（字段语义核实后补入判据），且该成功与本对话、本次请求（transfer 时还有指定接收人的稳定标识）对应。缺失或冲突一律 `unknown`。
 - `page_observed` 只是页面观察（mark：星标状态与颜色；transfer：会话离开非空会话列表），**不能**单独构成 `sent`，也不能据此触发任何补做动作。
 - 被明确拒绝的步骤永远不能聚合为 `sent`；transfer 的整体 `sent` 只来自最后一个转移步骤的明确成功，mark 的整体 `sent` 只来自 `mark` 步骤的明确成功。`steps` 只记步骤名、状态、`color`（仅 mark）与 `unmarked`，不含客服名、买家标识或平台原文。
-- 后台按 `decision.action` 校验回执：mark/transfer 带 `platform_message_id` 返回 400；`steps` 与 action 不匹配（如 mark 回执出现转移步骤）返回 400。
+- 后台按 `decision.action` 校验回执：mark/transfer 带非 null 的 `platform_message_id` 返回 400（省略或 null 允许）；`steps` 与 action 不匹配（如 mark 回执出现转移步骤）返回 400。
 - unknown 规则同主协议：永久保留、不重试、不覆盖，只锁定该事件。
 
 ### 测试要求（实现阶段）
 
 至少覆盖：能力协商四种组合 × 两个能力；未确认能力时的字段与 action；字段校验（必填、类型、上限、重复、未知字段）；接收人名称零项/多项/包含关系/备注命中不得生成；策略版本变化后 claim 409；`allow=false` 遇收藏拒绝报 not_sent 且不取消收藏；`allow=true` 时取消收藏或再次转移任一步 unknown 即停止；能力已确认但状态取不到/过期/歧义时上报 `marked=null`、不生成 mark/transfer 且正常回复照常；回执聚合表每一行（含“收藏已取消但转移失败”）与 mark 单步骤三种状态、未开始步骤省略；mark/transfer 的 sent 不带 platform_message_id 可被接受、带了返回 400；`reply_deadline_exceeded` 终结事件不生成 mark/transfer、不能 claim；模型超时兜底不重置预算；页面观察不得报 sent；点击前切换会话、浮层不属于星标、目标行重排均不点击；临时空列表不算离开。
+
+### 管理配置与后台准备（1.3 草案补充，待双方共同审查）
+
+管理设置接口仍是 `PUT /api/v1/admin/shops/{shop_id}/settings`。新增可选 `fallback`，只允许 `unhandled`（判断无法处理）、`error`（模型/内部判断报错）、`model_timeout`（最后实际尝试的模型槽超时且事件预算尚未耗尽）三键；缺省保持旧行为。每项使用下列四种互斥策略之一：
+
+```json
+{"action":"none"}
+{"action":"handoff"}
+{"action":"mark","color":"orange"}
+{"action":"transfer","account":"主账号","allow_unmark":true}
+```
+
+- 策略只接受对应示例字段。颜色仅四色字符串，不接受平台数值；`account` 为首尾去空白后1–40字的显示名，与本次接收人列表完全相等匹配，不能猜稳定标识。`allow_unmark` 只能布尔，缺省false；管理页新选转人工时可预选true，管理员保存时一并确认一次策略，执行时不逐次询问。
+- 每条规则可用 `handling` 携带同一策略，代替原 `reply` / `send`，二者不得混用；旧文字/商品内容规则保持原约定。混合方式的模型只能选择提供的规则ID，由后台根据已保存策略解析动作；不得由模型自由产生颜色、接收人或新动作。
+- `unhandled` 仅覆盖无规则匹配或合法模型handoff；`error` 不覆盖租约、权限、会话归属、历史不完整等安全拒绝。总预算耗尽的 `reply_deadline_exceeded` 永不变为新动作，策略不刷新预算或有效期。
+- 保存策略增加既有店铺设置版本，设置/策略变更使旧未领取决定失效。动作领取照常核对租约、能力、同一上下文、最新事件、设置版本及总截止；已领取重查不延长许可。
+- 只读 `conv_state` / `transfer_targets` 均绑定本店铺、账号/租约、页面、当前会话和 `context_revision`；过期、缺失或歧义应未知。`observed_at` 为有限Unix秒。后台不会把此类状态或客服列表交给模型。
+- 本阶段仅交付隔离实现准备，后台允许协商的新平台动作能力清单默认保持为空；保存配置不会打开能力，也不能绕过当前仅观察设置。任何正式启用必须另经前台实现、目标绑定、稳定接收人和平台成功语义核实及明确安排，不能因为草案/代码PR合并而自动启用。
 
 ## unknown 人工核查（1.0 补充）
 
