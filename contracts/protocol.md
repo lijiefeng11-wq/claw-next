@@ -518,6 +518,12 @@ unknown 表示前台无法确认平台是否发出。管理员可到平台聊天
 ## 管理 API（仅管理员）
 
 - `GET /api/v1/admin/summary`：`{"counts":{"pending":0,"processing":0,"ready":0,"sent":0,"unknown":0},"protocol_version":"1.0"}`。
+  - 后台本地维护可增量返回 `maintenance`：`{"model_failures":{"<shop_id>":3},"worker_alive":true,"backup":{"status":"idle","last_success":null}}`。仅管理员可读；未登录、客户端令牌和首次密码未更换的管理员不得读取。客户端事件 / claim / receipt 及协议版本不变，旧后台可不返回该字段。
+  - `model_failures` 是按配置店铺隔离的本进程连续模型失败次数（达到 3 次提醒），不是平台发送失败次数；规则直接命中、取消和过期不证明模型恢复。模型判断明确成功才清除对应店铺计数，进程重启从零计数；策略 fallback 不抹去原模型失败。
+  - `worker_alive` 仅表示判断线程是否存活，不证明模型、平台或真实业务健康。`backup.status` 为 `idle|ok|error`，`last_success` 为最近有效 SQLite 快照的 Unix 秒或 null；仅元数据，不返回路径、备份、原始异常或模型内容。
+  - 管理页登录后本地轮询并提示：连接未确认、线程停止、模型连续失败、unknown 记录、备份失败。缺失 / 畸形计数或请求失败不视为健康；已有记录保持不确定或过期提示。页面关闭 / 未登录时不承诺通知，不调用外部服务。
+  - 备份为本机后台 SQLite 的每日一致性快照，保留最近 7 份，POSIX 目录 0700 / 文件 0600；不包含独立认证库、密钥或客户端资料，不等于完整部署回退。仅在独立实现部署后生效；不授权恢复、重启或平台动作。
+  - unknown 数量包括已经人工核查但仍保留原 unknown 状态的历史；提醒不改写、不清除、不重试这些记录。建议回复的展示也不赋予 claim / 发送权限，前台“仅观察”与“人工接管”的发送阻止保持。
 - `GET /api/v1/admin/shops`：`{"shops":[{"shop_id":"demo-shop","name":"演示店铺","settings":{...},"lease":null或租约}]}`。
 - `GET /api/v1/admin/events?shop_id=demo-shop&limit=50`：`{"events":[事件快照...]}`；limit 1–200，不传店铺查全部。
 - `POST /api/v1/admin/prompt-draft`：根据管理员本次输入生成未应用的提示词草稿，详见下方“管理员提示词草稿”约定；不写入店铺设置。

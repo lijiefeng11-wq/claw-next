@@ -3,7 +3,7 @@
 //       npm run package -- --platform darwin --arch arm64
 //       node scripts/package.mjs --stage-only    # 只生成待打包内容并打印目录（测试用，不下载 Electron）
 //       npm run package:mac -- --zip              # 另外生成可分发的 zip（macOS 上用 ditto，保留符号链接与权限）
-// 产物在 out/，不含测试代码、配置、登录资料或任何店铺数据；不公证。项目 MIT 许可证在 app.asar 里；
+// 产物在 out/，不含测试代码、配置、登录资料或任何店铺数据；不公证。CI 经 CLAW_NEXT_BUILD_SHA / CLAW_NEXT_BUILD_RUN 写入构建信息（见下）。项目 MIT 许可证在 app.asar 里；
 // macOS 包另把 Electron/Chromium 许可证放进 .app/Contents/Resources/ThirdPartyLicenses/（见 licenses.mjs）。
 // 在 macOS 上打 macOS 包时做本机临时签名（ad-hoc，codesign --sign -）：Apple 芯片要求可执行文件签名有效，
 // packager 修改应用信息后原签名失效，下载后会被系统报“已损坏”。在其他系统上打 macOS 包无法签名，会给出提示。
@@ -52,8 +52,24 @@ if (!fs.existsSync(license)) throw new Error(`missing project LICENSE: ${license
 fs.copyFileSync(license, path.join(stage, "LICENSE"));
 fs.cpSync(path.join(build, "src"), path.join(stage, "dist", "src"), { recursive: true });
 fs.rmSync(build, { recursive: true, force: true });
+
+// 构建信息（客户端“检查更新”用）：完整提交 SHA、CI 运行序号、目标平台与架构，放在包外资源
+// （macOS：.app/Contents/Resources/build-info.json，随签名覆盖）。只由 CI 经环境变量提供；本机打包没有时写 null，
+// 客户端据此不提供检查更新。两项须同时提供且格式严格正确，否则直接报错，不打出带错误版本信息的包。
+const buildSha = process.env.CLAW_NEXT_BUILD_SHA || null;
+const buildRun = process.env.CLAW_NEXT_BUILD_RUN || null;
+if ((buildSha === null) !== (buildRun === null)) throw new Error("CLAW_NEXT_BUILD_SHA 与 CLAW_NEXT_BUILD_RUN 须同时提供");
+if (buildSha !== null && !/^[0-9a-f]{40}$/.test(buildSha)) throw new Error("CLAW_NEXT_BUILD_SHA 须为 40 位小写十六进制完整提交 SHA");
+if (buildRun !== null && !/^[1-9][0-9]{0,9}$/.test(buildRun)) throw new Error("CLAW_NEXT_BUILD_RUN 须为正整数");
+const resources = path.join(root, "out", "resources");
+fs.rmSync(resources, { recursive: true, force: true });
+fs.mkdirSync(resources, { recursive: true });
+const buildInfo = path.join(resources, "build-info.json");
+fs.writeFileSync(buildInfo, JSON.stringify({ sha: buildSha, run: buildRun === null ? null : Number(buildRun), platform, arch }) + "\n");
+
 if (process.argv.includes("--stage-only")) {
   console.log(`staged: ${stage}`);
+  console.log(`resources: ${resources}`);
   process.exit(0);
 }
 
@@ -72,12 +88,17 @@ try {
     appCategoryType: "public.app-category.business",
     win32metadata: { CompanyName: "Claw-Next", ProductName: pkg.productName, FileDescription: pkg.description, InternalName: pkg.productName },
     asar: true,
+    extraResource: [buildInfo],
     prune: false,
     overwrite: true,
     quiet: true,
   });
 } finally {
   fs.rmSync(stage, { recursive: true, force: true });
+}
+for (const p of paths) {
+  const res = platform === "darwin" ? path.join(p, `${pkg.productName}.app`, "Contents", "Resources") : path.join(p, "resources");
+  if (fs.readFileSync(path.join(res, "build-info.json"), "utf8") !== fs.readFileSync(buildInfo, "utf8")) throw new Error(`build-info.json 未按原样进入包：${path.relative(root, p)}`);
 }
 for (const p of paths) console.log(`packaged: ${path.relative(root, p)}`);
 
@@ -98,8 +119,8 @@ if (platform === "darwin") {
       const zip = path.join(root, "out", `${pkg.productName}-darwin-${arch}.zip`);
       fs.rmSync(zip, { force: true });
       execFileSync("ditto", ["-c", "-k", "--sequesterRsrc", "--keepParent", appPath, zip], { stdio: "inherit" });
-      verifyZipEntries(zip, licenses);
-      console.log(`zipped: ${path.relative(root, zip)}（第三方许可证条目与原文一致）`);
+      verifyZipEntries(zip, [...licenses, { entry: `${pkg.productName}.app/Contents/Resources/build-info.json`, source: buildInfo }]);
+      console.log(`zipped: ${path.relative(root, zip)}（第三方许可证与 build-info.json 条目与原文一致）`);
     }
   }
 }

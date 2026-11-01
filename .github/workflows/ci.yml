@@ -16,11 +16,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.13'
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
           package-manager-cache: false
@@ -30,6 +30,9 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Check management script
         run: node --check backend/static/app.js
+      - name: Verify client release script (fake gh, no GitHub writes)
+        if: runner.os == 'Linux'
+        run: python -W error::ResourceWarning .github/scripts/test_publish_client_release.py
   client-contract:
     name: Client contract (${{ matrix.os }})
     strategy:
@@ -44,11 +47,11 @@ jobs:
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           package-manager-cache: false
@@ -75,11 +78,11 @@ jobs:
         working-directory: apps/client
     # 不设置 ELECTRON_SKIP_BINARY_DOWNLOAD：本作业需要实际下载 Electron。
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           package-manager-cache: false
@@ -103,7 +106,7 @@ jobs:
       - name: Upload screenshots
         # 只上传截图目录；不上传配置、数据库、客户端数据或日志。
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: client-ui-e2e-screenshots-${{ matrix.os }}
           path: ${{ runner.temp }}/claw-next-e2e-shots
@@ -131,11 +134,11 @@ jobs:
       # 只跳过 npm 安装 electron 时的下载；打包脚本会自行下载与开发依赖同版本的 Electron。
       ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           package-manager-cache: false
@@ -145,6 +148,11 @@ jobs:
         run: npm ci
       - name: Package the standalone app for this system
         # macOS 上打包会做本机临时签名并校验；--zip 生成可分发的 zip（Windows 上忽略）。
+        # 只有受信任的 main 推送才写入构建信息（完整 SHA + 运行序号，供客户端“检查更新”比较）；
+        # PR 与其他分支为空，包内记为 null，客户端不会把它当作可升级的发行版。
+        env:
+          CLAW_NEXT_BUILD_SHA: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.sha || '' }}
+          CLAW_NEXT_BUILD_RUN: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_number || '' }}
         run: npm run package -- --zip
       - name: Smoke-test the packaged app (synthetic backend, mock platform)
         env:
@@ -152,9 +160,46 @@ jobs:
         run: node scripts/smoke.mjs
       - name: Upload the packaged app
         # 只在冒烟测试通过后上传打包产物（不含配置、口令、登录资料或店铺数据），保留 7 天。
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: Claw-Next-Client-${{ runner.os }}
           path: ${{ matrix.artifact }}
           if-no-files-found: error
           retention-days: 7
+  publish-client-release:
+    # 客户端“检查更新”的发行来源（#34）。只在受信任的 main 推送、且本次运行全部检查都成功后执行；
+    # 发布的是本次运行里已通过冒烟测试的同一个 Mac 产物，不重新构建。只有本 job 有写权限，PR 不会运行它。
+    # 只用固定到完整 SHA 的 actions/checkout 取发布脚本，其余用 runner 自带的 gh 与 python3；构建链上的 action 也都固定到完整 SHA。
+    name: Publish client release (main only)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [backend-contract, client-contract, client-ui-e2e, client-package-smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    concurrency:
+      # 串行发布，不取消进行中的发布；客户端只按“运行序号最大且是本机提交的后继”选版本，旧运行晚发布也不会成为更新目标。
+      group: client-release
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      SHA: ${{ github.sha }}
+      RUN: ${{ github.run_number }}
+      ZIP: Claw-Next-Client-darwin-arm64.zip
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # 只取发布脚本（与本次运行同一提交）；不把有写权限的令牌留在 git 配置里。
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - name: Download the smoke-tested macOS package from this run
+        run: gh run download "$GITHUB_RUN_ID" --repo "$REPO" --name Claw-Next-Client-macOS --dir pkg
+      - name: Verify package layout and build info against this run
+        # 包根唯一为 Claw-Next-Client.app/（及其 __MACOSX 属性），无绝对路径、无 ..、无重复条目；
+        # build-info.json 的 sha/run/platform/arch 与本次运行一致；生成 .sha256（同源，只作完整性）。
+        run: python3 .github/scripts/publish_client_release.py verify pkg
+      - name: Publish (draft, verify assets, then prerelease; state checked by read-back)
+        # 不覆盖既有 tag / release；查询结果不明即停止；失败只删除读回确认仍为本次草稿的 release。详见脚本说明。
+        run: python3 .github/scripts/publish_client_release.py publish pkg
