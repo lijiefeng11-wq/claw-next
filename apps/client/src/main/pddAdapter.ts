@@ -2578,8 +2578,11 @@ export class PddPageAdapter implements PlatformAdapter {
       if (typeof open === "string") return `not_executed:open_button_${open}`;
       blocked = await gate();
       if (blocked) return `not_executed:${blocked}`;
-      if ((await this.nativeClick(open, page, epoch)).status !== "dispatched") return "not_executed:open_click_failed";
+      // 打开对话框：not_sent 保持原样；unknown 表示按下命令已发出、可能已经生效，不补点，记一条结果后按页面观察继续。
+      const openClick = await this.nativeClick(open, page, epoch);
+      if (openClick.status === "not_sent") return "not_executed:open_click_failed";
       opened = true;
+      if (openClick.status === "unknown") log({ phase: "open_click", result: "unknown", reason: openClick.reason });
       let rows: TransferRow[] | string = "dialog_missing";
       for (let i = 0; i < 10 && (typeof rows === "string" || !rows.length); i++) {
         await sleep(300);
