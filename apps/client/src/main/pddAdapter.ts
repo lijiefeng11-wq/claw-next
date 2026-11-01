@@ -9,6 +9,7 @@ import { PddSessionTracker } from "../core/pddSession.js";
 import { PageHealth } from "../core/pageHealth.js";
 import { GOODS_CARD_SEND_PATH, INSTRUCT_PATH, INSTRUCT_SEND_PATH, instructMatches, instructRequestAllowed, instructResponseOk, instructTarget, PddSendOptionBook, RECOMMEND_GOODS_PATH, goodsRequestAllowed, goodsResponseOk, parseRecommendGoods, planGoodsClick, verifyGoodsTarget, type GoodsRow, VIDEO_LIST_PATH, libraryResponseOk, verifyVideoTarget, judgeItemReceipt, libraryRequestAllowed, parseSyncMessages, parseVideoRows, planVideoClick, type SeenMessage, type VideoRow } from "../core/pddSendItems.js";
 import { isAllowedImageUrl, isAllowedPlatformUrl, partitionFor, sniffImage } from "../core/security.js";
+import { LOGIN_COOKIE_NAME, LOGIN_COOKIE_URL, loginExpiryOf } from "../core/loginExpiry.js";
 import { MAX_IMAGE_BYTES, type PageObserved } from "../core/protocol.js";
 import { judgeMark, MARK_COLOR_VALUE, MARK_QUIET_MS, markRequestVerdict, markResponseOk, newMarkWatch, observeInput, type MarkWatch } from "../core/pddMark.js";
 import type { PlatformPage } from "./platformWorkspace.js";
@@ -1526,7 +1527,53 @@ export class PddPageAdapter implements PlatformAdapter {
     const page = this.health.view();
     // 页面异常时以页面状态为准，避免显示“等待登录”掩盖崩溃或无响应。
     const abnormal = page.gave_up || (page.state !== "ok" && page.state !== "loading");
-    return { ...base, detail: abnormal ? page.detail : base.detail, page, nav: this.navState(this.window) };
+    return { ...base, detail: abnormal ? page.detail : base.detail, page, nav: this.navState(this.window), login_expires_at: this.loginExpiresAt };
+  }
+
+  /** 平台登录凭据的过期时间（Unix 秒）；只读过期时间，从不读取、记录或上报 Cookie 的值。 */
+  private loginExpiresAt: number | null = null;
+  private loginExpiryWatched = false;
+  /** dispose 时撤销：Cookie 变化监听与兜底定时器（重连会新建适配器，不撤销会让旧适配器一直被引用并重复读取）。 */
+  private loginExpiryStop: (() => void) | null = null;
+  private disposed = false;
+
+  /**
+   * 跟踪本店分区里登录凭据的过期时间：凭据变化时（扫码、续期、退出）立即重读，另每 10 分钟兜底重读一次。
+   * 读不到时为 null；任何异常都不影响平台页面与收发。
+   */
+  private watchLoginExpiry() {
+    if (this.loginExpiryWatched || this.disposed) return;
+    this.loginExpiryWatched = true;
+    try {
+      const cookies = session.fromPartition(partitionFor(this.shopId)).cookies;
+      const refresh = () => {
+        if (this.disposed) return;
+        void cookies
+          .get({ url: LOGIN_COOKIE_URL, name: LOGIN_COOKIE_NAME })
+          .then((list) => {
+            if (this.disposed) return;
+            const next = loginExpiryOf(list);
+            if (next === this.loginExpiresAt) return;
+            this.loginExpiresAt = next;
+            console.log(`[${this.shopId}] platform login expires_at=${next === null ? "none" : new Date(next * 1000).toISOString()}`);
+            this.emit({ type: "status" });
+          })
+          .catch(() => undefined);
+      };
+      const onChanged = (_e: unknown, cookie: { name?: string } | undefined) => {
+        if (cookie?.name === LOGIN_COOKIE_NAME) refresh();
+      };
+      cookies.on("changed", onChanged);
+      const timer = setInterval(refresh, 10 * 60_000);
+      timer.unref?.();
+      this.loginExpiryStop = () => {
+        clearInterval(timer);
+        cookies.removeListener("changed", onChanged);
+      };
+      refresh();
+    } catch {
+      // 读不到过期时间只是少一条提醒。
+    }
   }
 
   /**
@@ -1626,6 +1673,7 @@ export class PddPageAdapter implements PlatformAdapter {
     if (this.window && !this.window.isDestroyed()) return;
     if (!this.createPage) throw new Error("platform_workspace_unavailable");
     this.startProbe();
+    this.watchLoginExpiry();
     const win = this.createPage();
     this.health = new PageHealth();
     this.healthKey = "";
@@ -2722,6 +2770,9 @@ export class PddPageAdapter implements PlatformAdapter {
   }
 
   dispose() {
+    this.disposed = true;
+    this.loginExpiryStop?.();
+    this.loginExpiryStop = null;
     this.messageWatcher?.close();
     this.listeners.length = 0;
     if (this.window && !this.window.isDestroyed()) this.window.close();

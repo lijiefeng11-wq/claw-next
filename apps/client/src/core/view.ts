@@ -1,6 +1,7 @@
 import type { EventRecord, StoredMessage, UnknownCheck } from "./journal.js";
 import type { MarkColor } from "./protocol.js";
 import type { ShopRuntime } from "./runtime.js";
+import { loginExpiryText } from "./loginExpiry.js";
 
 /** 标星颜色的界面名称；orange 店主称“黄色”。 */
 export const MARK_COLOR_NAMES: Record<MarkColor, string> = { orange: "黄色", red: "红色", green: "绿色", blue: "蓝色" };
@@ -317,7 +318,7 @@ export function shopView(rt: ShopRuntime, now = Date.now() / 1000) {
     instance_id: rt.instanceId,
     session_id: rt.sessionId,
     backend: { state: rt.backendState.state, detail: reasonText(rt.backendState.detail) || rt.backendState.detail, client_id: rt.backendState.me?.client_id ?? null },
-    platform: { logged_in: platform.logged_in, identity: platform.identity, detail: platform.detail, identity_ok: identityOk, expected: rt.config.platform_shop_id },
+    platform: { logged_in: platform.logged_in, identity: platform.identity, detail: platform.detail, identity_ok: identityOk, expected: rt.config.platform_shop_id, login_expiry: loginExpiryText(platform.login_expires_at, now * 1000) },
     lease: { state: rt.lease.state, generation: rt.lease.generation, seconds_left: Math.max(0, Math.round(rt.lease.valid_until - now)), detail: reasonText(rt.lease.detail) || rt.lease.detail },
     duplicates: rt.duplicates,
     conversations,

@@ -11,13 +11,13 @@
     instance_id: string;
     session_id: string | null;
     backend: { state: string; detail: string; client_id: string | null };
-    platform: { logged_in: boolean; identity: { platform_shop_id: string; display_name: string } | null; detail: string; identity_ok: boolean; expected: string };
+    platform: { logged_in: boolean; identity: { platform_shop_id: string; display_name: string } | null; detail: string; identity_ok: boolean; expected: string; login_expiry?: string };
     lease: { state: string; generation: number; seconds_left: number; detail: string };
     duplicates: number;
     conversations: Conv[];
   };
   type ShopConfig = { shop_id: string; display_name: string; backend_url: string; platform_shop_id: string; adapter: "mock" | "pdd"; mode: string };
-  type ShopEntry = { config: ShopConfig; token_set: boolean; running: boolean; error: string | null; platform: { logged_in: boolean; detail: string; page?: { state: string; gave_up: boolean }; nav?: { on_chat: boolean; can_go_back: boolean } } | null; alert: { level: "error" | "warn"; text: string } | null; view: View | null };
+  type ShopEntry = { config: ShopConfig; token_set: boolean; running: boolean; error: string | null; platform: { logged_in: boolean; detail: string; login_expiry?: string; page?: { state: string; gave_up: boolean }; nav?: { on_chat: boolean; can_go_back: boolean } } | null; alert: { level: "error" | "warn"; text: string } | null; view: View | null };
   type Startup = { supported: boolean; platform: string; launch_at_login: boolean; restart_on_crash: boolean; managed: boolean; location_ok?: boolean };
   type UpdateView = { supported: boolean; state: string; current: { run: number; sha: string } | null; candidate: { run: number; sha: string } | null; detail: string };
   type AppState = { app: { secure_storage: boolean; startup?: Startup; update?: UpdateView }; shops: ShopEntry[] };
@@ -264,7 +264,7 @@
     if (!v) {
       return [
         ["后台连接", "", "未连接", entry.error ?? "点击“连接后台”开始"],
-        ["平台连接", "", entry.platform?.logged_in ? "已登录" : "未登录", entry.platform?.detail ?? (entry.config.adapter === "pdd" ? "可直接打开平台登录窗口" : "需先连接后台")],
+        ["平台连接", "", entry.platform?.logged_in ? "已登录" : "未登录", [entry.platform?.detail ?? (entry.config.adapter === "pdd" ? "可直接打开平台登录窗口" : "需先连接后台"), entry.platform?.login_expiry].filter(Boolean).join("\n")],
         ["店铺身份", "", "未核验", `期望平台店铺：${entry.config.platform_shop_id}`],
         ["发送归属", "", "无", "未持有发送归属，不会发送"],
       ];
@@ -278,7 +278,7 @@
     const leaseValue = v.lease.state === "held" ? `已持有（第 ${v.lease.generation} 代）` : v.lease.state === "busy" ? "被其他客户端占用" : v.lease.state === "error" ? "异常" : "未持有";
     return [
       ["后台连接", backendTone, backendValue, v.backend.state === "ok" ? `客户端 ${v.backend.client_id} · 协议 1.0` : v.backend.detail],
-      ["平台连接", v.platform.logged_in ? "ok" : "warn", v.platform.logged_in ? "已登录" : "未登录", v.platform.detail],
+      ["平台连接", v.platform.logged_in ? "ok" : "warn", v.platform.logged_in ? "已登录" : "未登录", [v.platform.detail, v.platform.login_expiry].filter(Boolean).join("\n")],
       ["店铺身份", idTone, idValue, identity ? `实际：${identity.display_name}（${identity.platform_shop_id}）\n期望：${v.platform.expected}` : `期望平台店铺：${v.platform.expected}`],
       ["发送归属", leaseTone, leaseValue, v.lease.state === "held" ? `剩余约 ${v.lease.seconds_left} 秒 · 每 15 秒续租` : v.lease.detail],
     ];

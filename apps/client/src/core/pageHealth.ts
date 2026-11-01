@@ -208,11 +208,14 @@ export class PageHealth {
 
 export type ShopAlert = { level: "error" | "warn"; text: string };
 
+export const NOT_LOGGED_IN_ALERT_MS = 60000;
+export const LOGIN_EXPIRY_WARN_MS = 12 * 3600 * 1000;
+
 /**
  * 店铺是否需要提醒（侧栏标红、系统通知）。只用于拼多多店铺；模拟店铺不提醒。
  * pageOpen：平台页面是否存在（用户关闭平台页面不提醒）。
  */
-export function shopAlert(input: { adapter: "mock" | "pdd"; pageOpen: boolean; logged_in: boolean; page: PageHealthView | null }): ShopAlert | null {
+export function shopAlert(input: { adapter: "mock" | "pdd"; pageOpen: boolean; logged_in: boolean; page: PageHealthView | null; now?: number; login_expires_at?: number | null }): ShopAlert | null {
   if (input.adapter !== "pdd" || !input.pageOpen || !input.page) return null;
   const p = input.page;
   if (p.gave_up) return { level: "error", text: "平台页面异常，自动恢复失败" };
@@ -220,5 +223,7 @@ export function shopAlert(input: { adapter: "mock" | "pdd"; pageOpen: boolean; l
   if (p.state === "unresponsive") return { level: "error", text: "平台页面无响应" };
   if (p.state === "load_failed") return { level: "error", text: "平台页面加载失败" };
   if (!input.logged_in && p.session_lost) return { level: "error", text: "平台登录已失效，请重新扫码" };
+  if (input.now !== undefined && !input.logged_in && p.state === "ok" && input.now - p.since >= NOT_LOGGED_IN_ALERT_MS) return { level: "warn", text: "平台未登录，请扫码登录" };
+  if (input.now !== undefined && input.logged_in && typeof input.login_expires_at === "number" && Number.isFinite(input.login_expires_at) && input.login_expires_at * 1000 - input.now <= LOGIN_EXPIRY_WARN_MS) return { level: "warn", text: "平台登录 12 小时内过期，方便时请重新扫码" };
   return null;
 }

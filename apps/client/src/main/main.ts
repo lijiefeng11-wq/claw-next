@@ -7,7 +7,8 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
-import type { PlatformAdapter } from "../core/adapter.js";
+import type { PlatformAdapter, PlatformStatus } from "../core/adapter.js";
+import { loginExpiryText } from "../core/loginExpiry.js";
 import { ConfigStore } from "../core/configStore.js";
 import { SessionStore, restorePlan, runRestore } from "../core/sessionStore.js";
 import { IPC_CHANNELS, IpcPayload, IpcValidationError, validateIpc, validateToken } from "../core/ipc.js";
@@ -54,6 +55,11 @@ let platformWorkspace: PlatformWorkspace | null = null;
 
 /** stopping：旧运行实例尚未停稳（可能仍在平台发送）；停稳前不得建新实例或新平台窗口。 */
 type ShopSlot = { runtime: ShopRuntime | null; adapter: PlatformAdapter | null; stopping: Promise<void> | null; instanceId: string; error: string | null; ephemeralToken: string | null };
+
+/** 界面用的平台状态：附上登录有效期文字（只开平台页、未连后台时也显示）。 */
+function platformState(st: PlatformStatus | null) {
+  return st ? { ...st, login_expiry: loginExpiryText(st.login_expires_at) } : null;
+}
 
 class Controller {
   readonly configs = new ConfigStore(path.join(userData, "config"));
@@ -103,7 +109,7 @@ class Controller {
           token_set: this.secrets.has(c.shop_id) || !!s?.ephemeralToken,
           running: !!s?.runtime,
           error: s?.error ?? null,
-          platform: s?.adapter?.status() ?? null,
+          platform: platformState(s?.adapter?.status() ?? null),
           alert: this.alertFor(c),
           view: s?.runtime ? shopView(s.runtime) : null,
         };
@@ -115,20 +121,28 @@ class Controller {
   private alertFor(config: ShopConfig): ShopAlert | null {
     const st = this.slots.get(config.shop_id)?.adapter?.status();
     if (!st) return null;
-    return shopAlert({ adapter: config.adapter, pageOpen: !!st.page, logged_in: st.logged_in, page: st.page ?? null });
+    return shopAlert({ adapter: config.adapter, pageOpen: !!st.page, logged_in: st.logged_in, page: st.page ?? null, now: Date.now(), login_expires_at: st.login_expires_at ?? null });
   }
 
   private readonly alerted = new Map<string, string>();
 
-  /** 店铺进入新的提醒状态时发一次系统通知；恢复后再次出现才会再提醒。 */
-  private notifyAlert(config: ShopConfig) {
+  /** 店铺进入新的提醒状态时发一次系统通知；恢复后再次出现才会再提醒。返回提醒状态是否变化。 */
+  private notifyAlert(config: ShopConfig): boolean {
     const alert = this.alertFor(config);
     const key = alert?.text ?? "";
-    if ((this.alerted.get(config.shop_id) ?? "") === key) return;
+    if ((this.alerted.get(config.shop_id) ?? "") === key) return false;
     this.alerted.set(config.shop_id, key);
-    if (!alert || SMOKE || !Notification.isSupported()) return;
+    if (!alert || SMOKE || !Notification.isSupported()) return true;
     console.log(`[${config.shop_id}] alert ${alert.text}`);
     new Notification({ title: `${config.display_name}：${alert.text}`, body: "请到 Claw-Next 客户端查看并处理。", silent: false }).show();
+    return true;
+  }
+
+  /** 有时间条件的提醒（未登录超过 1 分钟、登录即将过期）不随状态事件触发，定时重新判断。 */
+  tickAlerts() {
+    let changed = false;
+    for (const config of this.configs.list()) if (this.slots.get(config.shop_id)?.adapter) changed = this.notifyAlert(config) || changed;
+    if (changed) this.push();
   }
 
   push() {
@@ -743,6 +757,8 @@ app.whenReady().then(async () => {
   hardenSessions();
   registerIpc();
   await createWindow();
+  // 有时间条件的店铺提醒（未登录超过 1 分钟、登录 12 小时内过期）每 30 秒重新判断一次。
+  setInterval(() => controller.tickAlerts(), 30_000).unref?.();
   // 替换脚本据此判断新版本已能正常启动（只含运行序号、进程号与时间）。
   if (!SMOKE && app.isPackaged) writeReadyMarker(userData, BUILD_INFO);
   if (!SMOKE && !process.env.CLAW_NEXT_DEV_BACKEND_CONFIG) await controller.restoreSessions();

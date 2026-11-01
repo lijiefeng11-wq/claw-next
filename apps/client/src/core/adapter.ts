@@ -14,6 +14,8 @@ export type PlatformStatus = {
   page?: PageHealthView;
   /** 平台页面导航状态（仅真实平台页面存在时提供）：是否停在会话页、能否后退。 */
   nav?: PlatformNav;
+  /** 平台登录凭据的过期时间（Unix 秒；仅真实平台页面存在时提供，读不到为 null）。只用于提醒，不参与收发判断。 */
+  login_expires_at?: number | null;
 };
 
 export type PlatformNav = { on_chat: boolean; can_go_back: boolean };
