@@ -41,6 +41,37 @@ test("待打包内容来自全新编译：dist 中的旧残留不进包；只含
   }
 });
 
+const stageOnly = (env: Record<string, string | undefined>) =>
+  spawnSync(process.execPath, [path.join(root, "scripts", "package.mjs"), "--stage-only"], { cwd: root, encoding: "utf8", timeout: 120_000, env: { ...process.env, CLAW_NEXT_BUILD_SHA: "", CLAW_NEXT_BUILD_RUN: "", ...env } });
+const buildInfoOf = () => JSON.parse(fs.readFileSync(path.join(root, "out", "resources", "build-info.json"), "utf8"));
+
+test("构建信息：CI 提供完整 SHA 与运行序号时原样写入；本机打包写 null；格式不对或只给一项直接报错", () => {
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+  try {
+    let r = stageOnly({ CLAW_NEXT_BUILD_SHA: sha, CLAW_NEXT_BUILD_RUN: "1234" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(buildInfoOf(), { sha, run: 1234, platform: process.platform, arch: process.arch });
+    r = stageOnly({});
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(buildInfoOf(), { sha: null, run: null, platform: process.platform, arch: process.arch });
+    for (const env of [
+      { CLAW_NEXT_BUILD_SHA: sha },
+      { CLAW_NEXT_BUILD_RUN: "12" },
+      { CLAW_NEXT_BUILD_SHA: sha.slice(0, 7), CLAW_NEXT_BUILD_RUN: "12" },
+      { CLAW_NEXT_BUILD_SHA: sha.toUpperCase(), CLAW_NEXT_BUILD_RUN: "12" },
+      { CLAW_NEXT_BUILD_SHA: sha, CLAW_NEXT_BUILD_RUN: "0" },
+      { CLAW_NEXT_BUILD_SHA: sha, CLAW_NEXT_BUILD_RUN: "1.5" },
+      { CLAW_NEXT_BUILD_SHA: sha, CLAW_NEXT_BUILD_RUN: "-3" },
+    ]) {
+      r = stageOnly(env);
+      assert.notEqual(r.status, 0, `应拒绝：${JSON.stringify(env)}`);
+    }
+  } finally {
+    fs.rmSync(path.join(root, "out", "stage"), { recursive: true, force: true });
+    fs.rmSync(path.join(root, "out", "resources"), { recursive: true, force: true });
+  }
+});
+
 // macOS 的 zip 只装 .app：Electron/Chromium 许可证要在签名前原样放进 .app，zip 生成后核对条目与原文。
 // 用虚构目录结构验证（不下载 Electron）；zip 核对需要 unzip 命令，没有时跳过该项。
 const hasUnzip = spawnSync("unzip", ["-v"]).status === 0;
