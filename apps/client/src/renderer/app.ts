@@ -54,7 +54,29 @@
     update_not_available: "请先点“检查更新”",
     update_busy: "正在检查或安装更新，请稍候",
     update_app_path_unexpected: "客户端安装位置异常，不能自动更新",
+    shop_not_found: "找不到这个店铺，请刷新后重新选择",
+    value_required: "请填写回复内容",
+    invalid_adapter: "平台类型不正确，请重新选择模拟平台或拼多多",
+    invalid_backend_url: "后台地址格式不对，请检查后重新填写",
+    invalid_mode: "运行模式只能是仅观察、自动处理或人工接管",
+    invalid_on: "人工接管的开关状态不正确，请刷新后重试",
+    invalid_kind: "消息类型不正确，只能是文字、图片或卡片",
+    invalid_stable_id: "消息编号选项不正确，请刷新后重试",
+    invalid_action: "模拟操作名称不正确，请刷新后重试",
+    invalid_send_behavior: "模拟平台的发送结果选项不正确，请重新选择",
+    invalid_nav_action: "页面操作只能是后退或回到会话",
+    invalid_startup_settings: "启动设置格式不对，请刷新后重新勾选",
+    invalid_workspace_zoom: "页面缩放比例不正确，请重新选择",
+    invalid_workspace_bounds: "平台页面位置或大小不正确，请调整窗口后重试",
+    payload_not_object: "请求内容格式不对，请更新客户端或查看日志",
+    unknown_channel: "这个操作当前版本不支持，请更新客户端",
   };
+
+  function errorText(code: string | undefined): string {
+    if (code && ERRORS[code]) return ERRORS[code];
+    if (code?.startsWith("unexpected_field:")) return "请求格式不对（含不认识的字段），请更新客户端或查看日志";
+    return `操作失败：${code}`;
+  }
 
   const MODES: [string, string, string][] = [
     ["observe", "仅观察", "只收消息、取后台判断，不发送"],
@@ -128,7 +150,7 @@
   async function call(channel: string, payload?: unknown): Promise<boolean> {
     const r = await bridge.invoke(channel, payload);
     if (!r.ok) {
-      toast(ERRORS[r.error ?? ""] ?? `操作失败：${r.error}`);
+      toast(errorText(r.error));
       return false;
     }
     if (r.data) apply(r.data);
@@ -355,7 +377,7 @@
             title: "关闭平台页面上的引导、公告、广告浮层（不会发送消息，涉及协议、处罚的提示留给人工）",
             onclick: async () => {
               const r = await bridge.invoke("shop:dismissPopups", { shop_id: id });
-              if (!r.ok) return toast(ERRORS[r.error ?? ""] ?? `操作失败：${r.error}`);
+              if (!r.ok) return toast(errorText(r.error));
               const n = (r.data as unknown as { dismissed?: number } | undefined)?.dismissed ?? 0;
               toast(n ? `已关闭 ${n} 个平台弹窗` : "没有找到可自动关闭的弹窗；剩下的请在页面上手动关闭");
             },
