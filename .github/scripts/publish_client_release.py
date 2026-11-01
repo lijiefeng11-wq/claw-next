@@ -7,7 +7,8 @@
 - 发布前：同名 git tag 必须明确不存在（404），任何同名 release（含草稿）都不存在；查询失败即停止。
 - 先建草稿并立即记下 release id，再上传；资产按 API 名单核对恰好两个固定文件，并下载回来逐字节比较。
 - 转为预发布后读回核对；随后核对真实 tag 最终指向本次完整 SHA。
-- 失败时只删除“读回确认仍是草稿且 id 为本次创建”的 release；已发布或无法确认的一律保留并报错。
+- 失败时只删除“读回确认仍是草稿且 id 为本次创建（取自本次 201 响应）”的 release；已发布或无法确认的一律保留并报错。
+  创建被拒绝或结果不明、没有本次 id 时，不认领任何同名草稿，停止并提示人工核对。
 """
 import hashlib
 import json
@@ -158,11 +159,9 @@ def publish(pkg):
     status, data = api("POST", f"repos/{repo}/releases", body)
     rid = data.get("id") if status == 201 and isinstance(data, dict) else None
     if not isinstance(rid, int):
-        # 创建结果不明：发布前已确认没有同名 release，只有恰好一个同名草稿才能确定是本次创建的。
-        drafts = [r for r in releases_with_tag(repo, tag) if r.get("draft") is True]
-        if len(drafts) == 1 and isinstance(drafts[0].get("id"), int):
-            cleanup(repo, drafts[0]["id"], tag)
-        raise Stop(f"create draft failed (status {status})")
+        # 创建被拒绝或结果不明、又没有可证明属于本次的 release id：停止并保留现状，不认领随后出现的同名草稿
+        # （tag、目标 SHA、时间或列表唯一都不能证明归属），由人工核对。
+        raise Stop(f"create draft failed or unknown (status {status}); no release id of this run, nothing deleted — check releases for {tag} manually")
     print(f"draft {rid} created")
     try:
         for name in files:

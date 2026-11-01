@@ -52,6 +52,10 @@ if a[0] == "api":
         r = {"id": st["next_id"], "tag_name": body["tag_name"], "target": body["target_commitish"], "draft": body["draft"], "prerelease": body["prerelease"], "assets": []}
         st["next_id"] += 1; st["releases"].append(r)
         if flags.get("create_lost"): save(); sys.exit(1)
+        if flags.get("create_rejected_after_concurrent_draft"):
+            st["releases"].remove(r)
+            st["releases"].append({"id": 91, "tag_name": body["tag_name"], "target": body["target_commitish"], "draft": True, "prerelease": True, "assets": []})
+            out(422, {"message": "already_exists"})
         out(201, pub(r))
     if len(parts) >= 5 and parts[3] == "releases":
         r = rel(int(parts[4]))
@@ -217,11 +221,23 @@ class PublishTests(Harness):
         self.assertNotEqual(self.run_script("publish").returncode, 0)
         self.assertEqual(self.state()["releases"], [])
 
-    def test_create_response_lost_cleans_own_draft(self):
+    def test_create_response_lost_is_left_for_manual_check(self):
+        # 创建响应丢失：没有本次 id，不认领同名草稿，保留现状、报错。
         self.ready()
         self.set_state({"create_lost": True})
         self.assertNotEqual(self.run_script("publish").returncode, 0)
-        self.assertEqual(self.state()["releases"], [])
+        st = self.state()
+        self.assertEqual([x["draft"] for x in st["releases"]], [True])
+        self.assertIsNone(st.get("deleted"))
+
+    def test_concurrent_draft_then_create_rejected_is_not_deleted(self):
+        # 预检之后别人建了同名草稿（id 91），本次 POST 被 422 拒绝：别人的草稿不得被删。
+        self.ready()
+        self.set_state({"create_rejected_after_concurrent_draft": True})
+        self.assertNotEqual(self.run_script("publish").returncode, 0)
+        st = self.state()
+        self.assertEqual([x["id"] for x in st["releases"]], [91])
+        self.assertIsNone(st.get("deleted"))
 
     def test_publish_response_lost_but_applied_is_kept(self):
         self.ready()
