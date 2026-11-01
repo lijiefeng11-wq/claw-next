@@ -91,7 +91,7 @@ export const REASONS: Record<string, string> = {
   conv_state_changed: "会话或星标状态已变化，未点击",
   conv_state_unavailable: "无法可靠读取星标或颜色浮层，未点击",
   mark_request_not_observed: "点击后没有看到页面发出标星请求",
-  mark_request_blocked: "页面发出的标星请求与本次不符，已在本机拦截",
+  mark_request_blocked: "页面发出的标星请求与本次不符，拦截结果未确认",
   mark_response_not_ok: "平台响应不满足成功判据",
   mark_request_failed: "标星请求加载失败",
   mark_response_timeout: "确认截止前没有取到平台响应",
