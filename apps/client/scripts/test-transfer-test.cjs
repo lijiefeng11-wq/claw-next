@@ -68,7 +68,12 @@ const page = (active, agents, favorited = false) => `<!doctype html><meta charse
       rows.appendChild(tr);
     });
     window.switchConv = () => { const [a, b] = document.querySelectorAll(".chat-item-box"); a.classList.remove("active"); b.classList.add("active"); };
-    document.getElementById("open").addEventListener("click", () => { clicks.push("open"); document.getElementById("dlg").style.display = "block"; if (window.switchOnOpen) switchConv(); });
+    document.getElementById("open").addEventListener("click", () => {
+      clicks.push("open");
+      if (window.blockOnOpen) { const end = Date.now() + window.blockOnOpen; while (Date.now() < end) {} }
+      if (!window.noDialogOnOpen) document.getElementById("dlg").style.display = "block";
+      if (window.switchOnOpen) switchConv();
+    });
     document.getElementById("x").addEventListener("click", () => { clicks.push("close"); document.getElementById("dlg").style.display = "none"; document.querySelector(".el-popover").style.display = "none"; });
     document.getElementById("cancel").addEventListener("click", () => { clicks.push("cancel"); document.querySelector(".el-popover").style.display = "none"; });
     const leave = () => document.querySelector('[data-random="9001-x"]').closest("li").remove();
@@ -209,6 +214,15 @@ app.whenReady().then(async () => {
     {
       const { r, clicks } = await run(page(true, [T]), { probe: false });
       check("非诊断模式：不执行", r === "not_executed:probe_mode_required" && clicks.length === 0, { r, clicks });
+    }
+    {
+      const { r, clicks, log } = await run(page(true, ["虚构客服A", T]), { before: "window.blockOnOpen = 1500" });
+      check("打开对话框点击回执不确定但对话框已打开：不补点、按页面观察继续，仍只确认目标", r === "unknown:left_list_observed" && JSON.stringify(clicks) === `["open","row:${T}","ok:${T}"]`, { r, clicks });
+      check("打开对话框点击回执不确定：写 open_click/unknown 记录，日志不含客服名", log.some((l) => l.phase === "open_click" && l.result === "unknown" && typeof l.reason === "string") && !JSON.stringify(log).includes("虚构客服A") && !JSON.stringify(log).includes(T), log);
+    }
+    {
+      const { r, clicks } = await run(page(true, ["虚构客服A", T]), { before: "window.blockOnOpen = 1500; window.noDialogOnOpen = true" });
+      check("打开对话框回执不确定且对话框没出现：不重点、按页面观察返回未执行", r.startsWith("not_executed:") && clicks.filter((c) => c === "open").length === 1 && !clicks.some((c) => c.startsWith("row:") || c.startsWith("ok:")), { r, clicks });
     }
     win.destroy();
   } catch (err) {
