@@ -53,11 +53,18 @@ class ActionDataTests(unittest.TestCase):
                 self.assertEqual(resolved(policy, ctx, caps)["action"], "handoff")
         self.assertEqual(resolved(MARK)["action"], "mark")
         self.assertEqual(resolved(MARK, context(True, "red"))["action"], "none")
-        self.assertEqual(resolved(MARK, context(True, None))["action"], "mark")
-        self.assertEqual(resolved(MARK, context(True, "blue"))["action"], "mark")
+        self.assertEqual(resolved(MARK, context(True, None))["action"], "none")
+        self.assertEqual(resolved(MARK, context(True, "blue"))["action"], "none")
         self.assertEqual(resolved(TRANSFER, context(True, "red"))["action"], "transfer")
         self.assertNotIn("text", resolved(MARK))
         self.assertNotIn("text", resolved(TRANSFER))
+
+    def test_mark_requires_explicitly_unmarked_at_revalidation(self):
+        result = resolved(MARK)
+        for marked, color in ((True, None), (True, "red"), (True, "blue"), (None, None), (0, None)):
+            with self.subTest(marked=marked, color=color):
+                self.assertFalse(ca.valid_decision(result, context(marked, color), ca.CAPABILITIES, 3))
+        self.assertTrue(ca.valid_decision(result, context(False), ca.CAPABILITIES, 3))
 
     def test_recipient_requires_one_exact_name(self):
         target = context()["transfer_targets"][0]

@@ -14,6 +14,8 @@ from urllib.parse import parse_qs, urlsplit
 
 from . import chatrules, diagnostics, modelconfig, modelworker, promptdraft, promptmerge, vehicle_knowledge
 from .auth import AdminAuth
+from .backups import BackupManager
+from .operations import Operations
 from .content import MAX_EVENT_BYTES
 from .engine import ProviderFailure, decide, decision, immediate_decision, test_slot
 from .store import ApiError, Store, identifier, require, validate_settings
@@ -286,7 +288,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.auth.change_password(token, self._json(), self.client_address[0])
                 return self._send(200, {"ok": True, "reauthenticate": True})
             if path == "/api/v1/admin/summary" and method == "GET":
-                return self._send(200, store.summary())
+                summary = store.summary()
+                summary["maintenance"] = {**self.server.operations.snapshot(),
+                                          "worker_alive": self.server.worker.is_alive(),
+                                          "backup": self.server.backups.snapshot()}
+                return self._send(200, summary)
             if path == "/api/v1/admin/shops" and method == "GET":
                 return self._send(200, {"shops": store.shops()})
             if path == "/api/v1/admin/events" and method == "GET":
@@ -408,6 +414,9 @@ class Server(ThreadingHTTPServer):
         self.stop, self.wake = threading.Event(), threading.Event()
         self.prompt_draft_slot = threading.BoundedSemaphore(1)
         self.model_workers = {}
+        self.operations = Operations()
+        self.backups = BackupManager(data_dir)
+        self.backups.start()
         self.worker = threading.Thread(target=self._work, name="claw-next-decisions", daemon=True)
         self.worker.start()
 
@@ -486,6 +495,7 @@ class Server(ThreadingHTTPServer):
             except Exception as exc:
                 diagnostics.failure("decision_internal_error", exc)
                 result = decision("handoff", "decision_internal_error")
+            self.operations.model_finished(job["shop_id"], result)
             future.set_result(result)
         self.wake.set()
 
@@ -500,6 +510,7 @@ class Server(ThreadingHTTPServer):
     def server_close(self):
         super().server_close()
         if hasattr(self, "stop"):
+            self.backups.close()
             self.stop.set()
             self.wake.set()
             deadline = time.monotonic() + 25

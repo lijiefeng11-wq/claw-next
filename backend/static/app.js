@@ -53,6 +53,8 @@
     requestSeq: 0,
     shopPollTimer: null,
     shopPollInFlight: false,
+    maintenance: null,
+    healthCounts: null,
     shopStatus: "unknown",
     shopError: "",
     shopUpdatedAt: null,
@@ -84,7 +86,7 @@
   const IDS = [
     "login-view", "login-panel", "login-form", "username-input", "password-input", "login-btn",
     "login-notice", "login-error",
-    "dashboard", "admin-badge", "logout-btn", "global-alert", "nav-toggle", "nav-backdrop",
+    "dashboard", "admin-badge", "logout-btn", "global-alert", "health-alert", "nav-toggle", "nav-backdrop",
     "topbar-route", "topbar-shop-status", "dashboard-refresh-btn",
     "count-pending", "count-processing", "count-ready", "count-sent", "count-unknown",
     "summary-meta", "account-meta", "account-panel", "account-close",
@@ -242,6 +244,39 @@
     box.className = "alert" + (kind ? " alert-" + kind : "");
     setText(box, message);
     box.hidden = false;
+  }
+
+  function applyHealthSummary(summary) {
+    const counts = summary && summary.counts;
+    if (!counts || !["pending", "processing", "ready", "sent", "unknown"].every(function (key) {
+      return Number.isInteger(counts[key]) && counts[key] >= 0;
+    })) {
+      throw new ApiError(0, "bad_response", "后台状态返回异常，请刷新核对。");
+    }
+    state.maintenance = summary.maintenance;
+    state.healthCounts = counts;
+    renderSummary(counts);
+    renderHealthAlert(false);
+  }
+
+  function renderHealthAlert(unavailable) {
+    const box = el["health-alert"];
+    const messages = [];
+    if (unavailable) {
+      messages.push("后台连接未确认，状态可能已过期；请检查后台是否运行。");
+    } else {
+      const maintenance = state.maintenance || {};
+      const failures = maintenance.model_failures || {};
+      if (Object.keys(failures).some(function (shop) { return failures[shop] >= 3; })) {
+        messages.push("模型已连续至少 3 次判断失败，请检查模型配置和连接；计数自本次后台启动起。");
+      }
+      if (maintenance.worker_alive === false) messages.push("后台判断任务已停止，请检查后台运行状态。");
+      if (maintenance.backup && maintenance.backup.status === "error") messages.push("数据库自动备份失败，旧备份保留；请检查数据目录权限与剩余空间。");
+      const unknown = state.healthCounts && state.healthCounts.unknown;
+      if (Number.isInteger(unknown) && unknown > 0) messages.push("有 " + unknown + " 条发送结果不确定记录（含已人工核查的历史），请查看处理记录；不会自动重试。");
+    }
+    setText(box, messages.join(" "));
+    box.hidden = messages.length === 0;
   }
 
   function showRemoteNote(message) {
@@ -1358,6 +1393,9 @@
     state.formSignature = "";
     state.formDirty = false;
     state.events = [];
+    state.maintenance = null;
+    state.healthCounts = null;
+    renderHealthAlert(false);
     state.requestSeq += 1;
     state.shopStatus = "unknown";
     state.shopError = "";
@@ -1875,7 +1913,7 @@
       if (summary && summary.protocol_version && summary.protocol_version !== PROTOCOL_VERSION) {
         showAlert("服务端协议版本为 " + String(summary.protocol_version) + "，与页面 " + PROTOCOL_VERSION + " 不一致。", "warn");
       }
-      renderSummary(summary && summary.counts ? summary.counts : null);
+      applyHealthSummary(summary);
       const shops = shopsData && Array.isArray(shopsData.shops) ? shopsData.shops : [];
       state.shopStatus = "ok";
       state.shopError = "";
@@ -1897,6 +1935,7 @@
       }
       state.shopStatus = "error";
       state.shopError = errorText(err);
+      renderHealthAlert(true);
       renderShopConnections();
       setText(el["summary-meta"], "加载失败");
       setText(el["system-connection"], "未确认");
@@ -1933,7 +1972,8 @@
       return false;
     }
     try {
-      const data = await request("/api/v1/admin/shops");
+      const results = await Promise.all([request("/api/v1/admin/shops"), request("/api/v1/admin/summary")]);
+      const data = results[0];
       if (isStale(epoch) || state.token !== token) {
         return false;
       }
@@ -1942,6 +1982,7 @@
       state.shopError = "";
       state.shopUpdatedAt = new Date();
       applyShopsSnapshot(shops, {});
+      applyHealthSummary(results[1]);
       setText(el["system-connection"], "正常");
       setText(el["system-checked"], formatTime(Math.floor(Date.now() / 1000)));
       return true;
@@ -1955,6 +1996,7 @@
       }
       state.shopStatus = "error";
       state.shopError = errorText(err);
+      renderHealthAlert(true);
       renderShopConnections();
       const shop = currentShop();
       renderLease(shop ? shop.lease : null);
@@ -3146,6 +3188,9 @@
         }
         if (decision.reason !== undefined && decision.reason !== null) {
           decisionCell.appendChild(smallLine("原因：" + String(decision.reason), "small"));
+        }
+        if (decision.action === "reply" && delivery && delivery.status === "unclaimed") {
+          decisionCell.appendChild(smallLine("建议回复 · 尚未领取发送，请先人工核对", "small muted"));
         }
         if (typeof decision.text === "string" && decision.text) {
           const textNode = document.createElement("div");
