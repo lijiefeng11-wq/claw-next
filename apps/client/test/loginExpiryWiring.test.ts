@@ -66,3 +66,31 @@ test("读取本店分区 PASS_ID 的过期时间；凭据变化时刷新并发�
   for (const secret of ["SECRET-VALUE-1", "SECRET-VALUE-2", "SECRET-OTHER"]) assert.ok(!text.includes(secret), `日志不得含 ${secret}`);
   assert.match(text, /platform login expires_at=/);
 });
+
+test("dispose 后撤销 Cookie 监听：重连新建适配器不会留下旧监听，旧适配器不再读取", async () => {
+  jar.length = 0;
+  jar.push({ name: "PASS_ID", value: "SECRET-VALUE-3", expirationDate: 1795000000 });
+  const before = cookies.listenerCount("changed");
+  const make = () =>
+    new PddPageAdapter("fixture-shop-2", "虚构店铺", null) as unknown as { watchLoginExpiry(): void; dispose(): void; loginExpiresAt: number | null };
+  const first = make();
+  first.watchLoginExpiry();
+  await wait(() => first.loginExpiresAt === 1795000000);
+  assert.equal(cookies.listenerCount("changed"), before + 1);
+  first.dispose();
+  assert.equal(cookies.listenerCount("changed"), before);
+  // 已销毁的适配器再收到变化也不读取、不更新。
+  jar[0] = { name: "PASS_ID", value: "SECRET-VALUE-4", expirationDate: 1796000000 };
+  cookies.emit("changed", {}, jar[0], "explicit", false);
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(first.loginExpiresAt, 1795000000);
+  // 销毁后不再开始跟踪。
+  first.watchLoginExpiry();
+  assert.equal(cookies.listenerCount("changed"), before);
+  const second = make();
+  second.watchLoginExpiry();
+  await wait(() => second.loginExpiresAt === 1796000000);
+  assert.equal(cookies.listenerCount("changed"), before + 1);
+  second.dispose();
+  assert.equal(cookies.listenerCount("changed"), before);
+});

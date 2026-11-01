@@ -7,7 +7,8 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
-import type { PlatformAdapter } from "../core/adapter.js";
+import type { PlatformAdapter, PlatformStatus } from "../core/adapter.js";
+import { loginExpiryText } from "../core/loginExpiry.js";
 import { ConfigStore } from "../core/configStore.js";
 import { SessionStore, restorePlan, runRestore } from "../core/sessionStore.js";
 import { IPC_CHANNELS, IpcPayload, IpcValidationError, validateIpc, validateToken } from "../core/ipc.js";
@@ -54,6 +55,11 @@ let platformWorkspace: PlatformWorkspace | null = null;
 
 /** stopping：旧运行实例尚未停稳（可能仍在平台发送）；停稳前不得建新实例或新平台窗口。 */
 type ShopSlot = { runtime: ShopRuntime | null; adapter: PlatformAdapter | null; stopping: Promise<void> | null; instanceId: string; error: string | null; ephemeralToken: string | null };
+
+/** 界面用的平台状态：附上登录有效期文字（只开平台页、未连后台时也显示）。 */
+function platformState(st: PlatformStatus | null) {
+  return st ? { ...st, login_expiry: loginExpiryText(st.login_expires_at) } : null;
+}
 
 class Controller {
   readonly configs = new ConfigStore(path.join(userData, "config"));
@@ -103,7 +109,7 @@ class Controller {
           token_set: this.secrets.has(c.shop_id) || !!s?.ephemeralToken,
           running: !!s?.runtime,
           error: s?.error ?? null,
-          platform: s?.adapter?.status() ?? null,
+          platform: platformState(s?.adapter?.status() ?? null),
           alert: this.alertFor(c),
           view: s?.runtime ? shopView(s.runtime) : null,
         };

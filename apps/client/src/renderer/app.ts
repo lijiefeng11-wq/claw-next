@@ -17,7 +17,7 @@
     conversations: Conv[];
   };
   type ShopConfig = { shop_id: string; display_name: string; backend_url: string; platform_shop_id: string; adapter: "mock" | "pdd"; mode: string };
-  type ShopEntry = { config: ShopConfig; token_set: boolean; running: boolean; error: string | null; platform: { logged_in: boolean; detail: string; page?: { state: string; gave_up: boolean }; nav?: { on_chat: boolean; can_go_back: boolean } } | null; alert: { level: "error" | "warn"; text: string } | null; view: View | null };
+  type ShopEntry = { config: ShopConfig; token_set: boolean; running: boolean; error: string | null; platform: { logged_in: boolean; detail: string; login_expiry?: string; page?: { state: string; gave_up: boolean }; nav?: { on_chat: boolean; can_go_back: boolean } } | null; alert: { level: "error" | "warn"; text: string } | null; view: View | null };
   type Startup = { supported: boolean; platform: string; launch_at_login: boolean; restart_on_crash: boolean; managed: boolean; location_ok?: boolean };
   type UpdateView = { supported: boolean; state: string; current: { run: number; sha: string } | null; candidate: { run: number; sha: string } | null; detail: string };
   type AppState = { app: { secure_storage: boolean; startup?: Startup; update?: UpdateView }; shops: ShopEntry[] };
@@ -264,7 +264,7 @@
     if (!v) {
       return [
         ["后台连接", "", "未连接", entry.error ?? "点击“连接后台”开始"],
-        ["平台连接", "", entry.platform?.logged_in ? "已登录" : "未登录", entry.platform?.detail ?? (entry.config.adapter === "pdd" ? "可直接打开平台登录窗口" : "需先连接后台")],
+        ["平台连接", "", entry.platform?.logged_in ? "已登录" : "未登录", [entry.platform?.detail ?? (entry.config.adapter === "pdd" ? "可直接打开平台登录窗口" : "需先连接后台"), entry.platform?.login_expiry].filter(Boolean).join("\n")],
         ["店铺身份", "", "未核验", `期望平台店铺：${entry.config.platform_shop_id}`],
         ["发送归属", "", "无", "未持有发送归属，不会发送"],
       ];
