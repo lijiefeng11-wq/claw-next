@@ -3,6 +3,7 @@ import { PlatformWorkspace } from "./platformWorkspace.js";
 import { IpcMainInvokeEvent, Notification, app, dialog, ipcMain, screen, session, shell } from "electron";
 import { shopAlert, type ShopAlert } from "../core/pageHealth.js";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -21,6 +22,7 @@ import { parseDevAction } from "../core/devAction.js";
 import { SecretStore } from "./secrets.js";
 import { ARG_LAUNCHED_BY_AGENT, ARG_NO_HANDOVER, ARG_SUPERVISED, startupDecision, userDataFromArgv } from "../core/startup.js";
 import { StartupManager } from "./startupManager.js";
+import { Updater, readBuildInfo, writeReadyMarker } from "./updater.js";
 
 const APP_NAME = "Claw-Next-Client";
 app.setName(APP_NAME);
@@ -42,6 +44,8 @@ if (!gotLock) {
   // 同一数据目录只允许一个客户端进程，避免两个实例共用日志与发送状态。
   app.quit();
 }
+/** 包内构建信息（CI 发布的版本才有）；本机打包为 null，不提供检查更新。 */
+const BUILD_INFO = app.isPackaged ? readBuildInfo(process.resourcesPath) : null;
 /** 开机自启与崩溃重启（打包版）。本进程是否由系统托管或守护程序启动，看启动参数。 */
 const startup = new StartupManager(userData, userDataOverride ? userData : null, process.argv.includes(ARG_LAUNCHED_BY_AGENT) || process.argv.includes(ARG_SUPERVISED));
 
@@ -59,6 +63,20 @@ class Controller {
   /** 恢复进行中被用户手动操作过的店铺：其待恢复步骤作废。 */
   private readonly restoreTouched = new Set<string>();
   private readonly slots = new Map<string, ShopSlot>();
+  /** 客户端“检查更新”（#34）；安装期间 updateHold 为真，所有店铺（含之后新连接的）暂停准备提交、领取、附加发送与标星。 */
+  readonly updater = new Updater({
+    packaged: app.isPackaged,
+    platform: process.platform,
+    current: BUILD_INFO,
+    appPath: path.resolve(process.execPath, "..", "..", ".."),
+    userData,
+    userDataArg: userDataOverride ? userData : null,
+    uid: os.userInfo().uid,
+    locationOk: () => startup.locationOk(),
+    agentPlist: () => startup.agentPlist(),
+    onChange: () => this.push(),
+  });
+  private updateHold = false;
 
   slotsForDev(): [string, ShopSlot][] {
     return [...this.slots.entries()];
@@ -77,7 +95,7 @@ class Controller {
 
   state() {
     return {
-      app: { name: APP_NAME, secure_storage: this.secrets.available(), smoke: SMOKE, startup: startup.view() },
+      app: { name: APP_NAME, secure_storage: this.secrets.available(), smoke: SMOKE, startup: startup.view(), update: this.updater.view() },
       shops: this.configs.list().map((c) => {
         const s = this.slots.get(c.shop_id);
         return {
@@ -206,6 +224,7 @@ class Controller {
         instanceId: s.instanceId,
         onChange: () => this.push(),
         log: (line) => console.log(`[${shopId}] ${line}`),
+        updateHold: () => this.updateHold,
       });
     } catch (err) {
       adapter.dispose();
@@ -353,6 +372,33 @@ class Controller {
       case "conv:takeover":
         this.running(p.shop_id).setTakeover(p.conversation_id, p.on);
         return this.state();
+      case "app:checkUpdate":
+        await this.updater.check();
+        return this.state();
+      case "app:installUpdate": {
+        const choice = await dialog.showMessageBox({
+          type: "question",
+          buttons: ["下载并安装", "取消"],
+          defaultId: 1,
+          cancelId: 1,
+          message: "下载并安装新版本？",
+          detail:
+            "客户端会先下载并核对新版本，再等进行中的发送和回执处理完，然后自动退出、替换并重新打开（一般 1–2 分钟）。\n" +
+            "这段时间所有店铺暂停自动回复，期间新到的消息不会自动回复。\n" +
+            "新版本没有苹果签名，打开时 macOS 可能会提示，需要你按提示允许；新版本 2 分钟内没能正常打开，会自动换回现在的版本。",
+        });
+        if (choice.response !== 0) return this.state();
+        await this.updater.install({
+          setUpdateHold: (on) => {
+            this.updateHold = on;
+            console.log(`update hold=${on}`);
+            this.push();
+          },
+          allIdleForUpdate: () => [...this.slots.values()].every((slot) => !slot.stopping && (!slot.runtime || slot.runtime.idleForUpdate())),
+          quit: () => app.quit(),
+        });
+        return this.state();
+      }
       case "app:setStartup": {
         if (!startup.supported()) throw new IpcValidationError("startup_unsupported");
         if (!startup.locationOk()) throw new IpcValidationError("startup_needs_applications");
@@ -697,6 +743,8 @@ app.whenReady().then(async () => {
   hardenSessions();
   registerIpc();
   await createWindow();
+  // 替换脚本据此判断新版本已能正常启动（只含运行序号、进程号与时间）。
+  if (!SMOKE && app.isPackaged) writeReadyMarker(userData, BUILD_INFO);
   if (!SMOKE && !process.env.CLAW_NEXT_DEV_BACKEND_CONFIG) await controller.restoreSessions();
   if (!SMOKE && process.env.CLAW_NEXT_DEV_BACKEND_CONFIG) {
     await devAutoConnect(process.env.CLAW_NEXT_DEV_BACKEND_CONFIG);

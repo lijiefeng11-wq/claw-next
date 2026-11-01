@@ -84,6 +84,7 @@ export const REASONS: Record<string, string> = {
   model_response_too_large: "后台模型返回过大",
   pdd_adapter_not_implemented: "拼多多收发尚未接入",
   pdd_send_not_implemented: "拼多多发送尚未接入，未调用平台",
+  update_pending: "客户端正在安装更新，暂停发送",
   mark_invalid: "标星决定格式不对，未执行",
   conv_state_not_retained: "提交时的会话状态未保留（客户端重启），不标星",
   conv_state_not_unmarked: "提交时会话已收藏或状态未读到，不标星",

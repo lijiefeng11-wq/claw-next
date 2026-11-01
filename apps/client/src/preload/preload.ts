@@ -16,6 +16,8 @@
     "shop:platformNav",
     "shop:setMode",
     "app:setStartup",
+    "app:checkUpdate",
+    "app:installUpdate",
     "conv:takeover",
     "sim:message",
     "sim:action",

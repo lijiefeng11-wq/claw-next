@@ -40,6 +40,8 @@ import { ReplyTiming, REPLY_DEADLINE_REASON } from "./replyTiming.js";
 
 export type ShopMode = "observe" | "auto" | "manual";
 export const SHOP_MODES: readonly ShopMode[] = ["observe", "auto", "manual"];
+/** 客户端安装更新期间的阻止原因（见 RuntimeOptions.updateHold）。 */
+export const UPDATE_HOLD_REASON = "update_pending";
 
 export type ShopConfig = {
   shop_id: string;
@@ -124,6 +126,11 @@ export type RuntimeOptions = {
    * 默认关闭：实现合并不等于启用，正式启用须另行明确安排并经审查。
    */
   declareMark?: boolean;
+  /**
+   * 客户端“检查更新”安装期间的全局保持（#34），由主进程统一提供，对之后新建的运行时同样生效。
+   * 为真时禁止新的准备提交、领取、附加发送与标星；已领取的尝试照常归结，unknown 不变。
+   */
+  updateHold?: () => boolean;
 };
 
 type BackendState = { state: "idle" | "connecting" | "ok" | "error"; detail: string; me: Me | null };
@@ -196,6 +203,8 @@ export class ShopRuntime {
   /** 事件提交时的 conv_state，只在内存；重启后该事件的 mark 不执行。 */
   private readonly eventConvState = new Map<string, ConvState>();
   private readonly declareMark: boolean;
+  /** 客户端“检查更新”安装期间的全局保持（见 RuntimeOptions.updateHold）。 */
+  private readonly updateHold: () => boolean;
   /** 最近一次成功心跳确认的能力，随租约（instance+session+generation）变化重置。 */
   private capabilities = new Set<string>();
   /** 正在发出取消请求的事件（契约 A.5），避免并发重复发起。 */
@@ -215,6 +224,7 @@ export class ShopRuntime {
     this.log = options.log ?? (() => undefined);
     this.onChange = options.onChange ?? (() => undefined);
     this.declareMark = options.declareMark === true;
+    this.updateHold = options.updateHold ?? (() => false);
     this.backend = new BackendClient(options.config.backend_url, options.token, options.fetchImpl, this.timing.requestTimeoutMs);
     this.journal = new Journal(options.dataDir);
     this.journal.onRecord = (rec, previous) => {
@@ -550,6 +560,7 @@ export class ShopRuntime {
   /** 需要先满足的提交条件；不满足时消息只保存，不进入自动处理。 */
   private submitBlocker(): string | null {
     if (this.stopped) return "runtime_stopped";
+    if (this.updateHold()) return UPDATE_HOLD_REASON;
     if (this.backendState.state !== "ok") return "backend_unavailable";
     const platform = this.platformCheck();
     if (platform) return platform;
@@ -620,7 +631,7 @@ export class ShopRuntime {
    * 预热读到的变化照常使该对话版本递增，此时没有在途决定，不影响已提交的事件。
    */
   private warm(conversationId: string) {
-    if (this.stopped || this.config.mode !== "auto" || !this.sendItemConfirmed() || !this.adapter.warmConversation) return;
+    if (this.stopped || this.updateHold() || this.config.mode !== "auto" || !this.sendItemConfirmed() || !this.adapter.warmConversation) return;
     if (this.journal.conversation(conversationId).takeover || this.platformCheck()) return;
     void this.adapter.warmConversation(conversationId).catch(() => undefined);
   }
@@ -730,6 +741,8 @@ export class ShopRuntime {
     const memoryOnly = images.attachments.length > 0 || hasOrders || hasGoods || hasOptions;
     const stored = memoryOnly ? JSON.stringify(request) : body;
     if (Buffer.byteLength(stored, "utf8") > MAX_BODY_BYTES || Buffer.byteLength(body, "utf8") > MAX_EVENT_BYTES) return this.journal.note(conversationId, messageId, "body_too_large");
+    // 准备期间进入了“更新中”：不再提交新事件。
+    if (this.updateHold()) return this.journal.note(conversationId, messageId, UPDATE_HOLD_REASON);
     if (memoryOnly) this.fullBodies.set(request.event_id, body);
     if (candidates) this.eventOptions.set(request.event_id, candidates.map);
     if (request.context.conv_state) this.eventConvState.set(request.event_id, request.context.conv_state);
@@ -953,6 +966,7 @@ export class ShopRuntime {
   /** 发送前核验；返回阻止原因，null 表示可以继续。 */
   sendBlocker(ev: EventRecord, afterClaim = false): string | null {
     if (this.stopped) return "runtime_stopped";
+    if (this.updateHold()) return UPDATE_HOLD_REASON;
     if (this.config.mode === "observe") return "mode_observe";
     if (this.config.mode === "manual") return "mode_manual";
     const conv = this.journal.conversation(ev.conversation_id);
@@ -1275,6 +1289,18 @@ export class ShopRuntime {
     this.journal.setTakeover(conversationId, on);
     this.journal.bumpRevision(conversationId, on ? "manual_takeover" : "manual_release");
     this.changed();
+  }
+
+  /** 可以安装更新：没有进行中的发送 / 领取 / 标星，所有尝试都已有结果，且没有未上传完的回执。 */
+  idleForUpdate(): boolean {
+    if (this.sendingConversations.size) return false;
+    for (const ev of this.journal.events.values()) {
+      const a = ev.attempt;
+      if (!a) continue;
+      if (a.phase === "claim_requested" || a.phase === "claimed" || a.phase === "sending") return false;
+      if (a.receipt?.upload === "pending") return false;
+    }
+    return true;
   }
 
   /** 定时器触发前立即执行一次心跳/补报（测试与界面“重新连接”使用）。 */
