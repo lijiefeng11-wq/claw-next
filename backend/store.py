@@ -126,6 +126,7 @@ class Store:
           PRIMARY KEY(shop_id,event_id), UNIQUE(shop_id,conversation_id,message_id));
         CREATE INDEX IF NOT EXISTS events_pending ON events(state,created_at);
         CREATE INDEX IF NOT EXISTS events_conversation ON events(shop_id,conversation_id,session_id,revision);
+        CREATE INDEX IF NOT EXISTS events_claimed ON events(json_extract(delivery,'$.status')) WHERE state='ready';
         CREATE TABLE IF NOT EXISTS event_runtime (
           shop_id TEXT NOT NULL, event_id TEXT NOT NULL,
           accepted_wall REAL, budget_ms INTEGER, wall_deadline REAL,
@@ -454,9 +455,10 @@ class Store:
         self.db.execute("UPDATE events SET delivery=? WHERE shop_id=? AND event_id=?", (json.dumps(value), row["shop_id"], row["event_id"]))
 
     def _expire_claims(self):
-        for row in self.db.execute("SELECT * FROM events WHERE state='ready'").fetchall():
+        for row in self.db.execute("SELECT shop_id,event_id,delivery FROM events WHERE state='ready' "
+                                   "AND json_extract(delivery,'$.status')='claimed'").fetchall():
             d = json.loads(row["delivery"])
-            if d["status"] == "claimed" and d["claim_expires_at"] <= time.time():
+            if d["claim_expires_at"] <= time.time():
                 d.update(status="unknown", reason="claim_expired")
                 self._delivery(row, d)
 
@@ -808,11 +810,13 @@ class Store:
         with self.lock, self.db:
             self._expire_claims()
             self._expire_deadlines()
-            for row in self.db.execute("SELECT shop_id,state,delivery FROM events"):
-                if row["shop_id"] not in self.shop_ids:
-                    continue
-                counts[row["state"]] += 1
-                status = json.loads(row["delivery"])["status"]
-                if status in ("sent", "unknown"):
-                    counts[status] += 1
+            if self.shop_ids:
+                shops = tuple(sorted(self.shop_ids))
+                placeholders = ",".join("?" for _ in shops)
+                for row in self.db.execute(
+                    "SELECT state,json_extract(delivery,'$.status') AS delivery_status,COUNT(*) AS total "
+                    f"FROM events WHERE shop_id IN ({placeholders}) GROUP BY state,delivery_status", shops):
+                    counts[row["state"]] += row["total"]
+                    if row["delivery_status"] in ("sent", "unknown"):
+                        counts[row["delivery_status"]] += row["total"]
         return {"counts": counts, "protocol_version": "1.0"}
