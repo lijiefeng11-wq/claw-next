@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { ChildProcess, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
@@ -170,7 +170,7 @@ function fixture(o: {
       (async (file) => {
         launched.push(file);
       }),
-    timing: { idleWaitMs: 300, idlePollMs: 20, quitWatchMs: 200 },
+    timing: { idleWaitMs: 300, idlePollMs: 20, quitWatchMs: 200, pendingPollMs: 50 },
     limits: { apiMs: 3000, idleMs: 3000, totalMs: 5000 },
     ...o.deps,
   });
@@ -394,7 +394,7 @@ describe("安装：等任务、启动脚本与退出", () => {
     assert.equal((await first).state, "installing");
   });
 
-  test("本进程没有按时退出、脚本已中止：解除更新中、提示，并允许之后再装", async () => {
+  test("本进程没有按时退出、脚本已中止：认领取消后解除更新中、提示，并允许之后再装", async () => {
     let dir = "";
     const f = await ready(
       fixture({
@@ -410,18 +410,70 @@ describe("安装：等任务、启动脚本与退出", () => {
     assert.equal(v.state, "error");
     assert.match(v.detail, /没有按时退出/);
     assert.equal(f.host.calls.at(-1), "hold:false");
+    assert.ok(fs.statSync(path.join(dir, "claim")).isDirectory());
     assert.equal(fs.readFileSync(path.join(f.app, "version"), "utf8"), "old");
-    // 脚本已中止：允许再次安装（不报 update_busy）。
+    // 已确认取消：允许再次安装（不报 update_busy）。
     assert.equal((await f.updater.install(f.host)).state, "installing");
   });
 
-  test("本进程没有按时退出、脚本状态不明：解除更新中，但不允许再装（避免两个脚本同时等待）", async () => {
-    const f = await ready(fixture({ launch: async (file) => fs.writeFileSync(path.join(path.dirname(file), "swap.log"), "1 start\n") }));
+  test("本进程没有按时退出、脚本还在等：抢先认领即确认取消（脚本之后只能中止），解除并允许再装", async () => {
+    let dir = "";
+    const f = await ready(
+      fixture({
+        launch: async (file) => {
+          dir = path.dirname(file);
+          fs.writeFileSync(path.join(dir, "swap.log"), "1 start\n");
+        },
+      }),
+    );
     await f.updater.install(f.host);
     await new Promise((r) => setTimeout(r, 400));
     assert.equal(f.host.calls.at(-1), "hold:false");
-    await assert.rejects(f.updater.install(f.host), /update_busy/);
+    assert.match(f.updater.view().detail, /确认不会再替换/);
+    // 脚本恢复后建认领标记必然失败（mkdir 原子，已存在）。
+    assert.throws(() => fs.mkdirSync(path.join(dir, "claim")), /EEXIST/);
+    assert.equal((await f.updater.install(f.host)).state, "installing");
   });
+
+  for (const [name, prepare] of [
+    ["认领标记已存在（无法确认是谁建的）", (dir: string) => fs.mkdirSync(path.join(dir, "claim"))],
+    ["暂存目录已不在（无法建认领标记）", (dir: string) => fs.rmSync(dir, { recursive: true, force: true })],
+  ] as const) {
+    test(`本进程没有按时退出、${name}：状态不明，继续保持更新中并显示待确认；脚本自己写出改动前中止才解除`, async () => {
+      let dir = "";
+      const f = await ready(
+        fixture({
+          launch: async (file) => {
+            dir = path.dirname(file);
+            fs.writeFileSync(path.join(dir, "swap.log"), "1 start\n");
+            prepare(dir);
+          },
+        }),
+      );
+      await f.updater.install(f.host);
+      await new Promise((r) => setTimeout(r, 400));
+      let v = f.updater.view();
+      assert.equal(v.state, "pending");
+      assert.match(v.detail, /暂时无法确认更新是否已取消/);
+      assert.equal(f.host.calls.includes("hold:false"), false);
+      assert.equal(f.host.calls.at(-1), "quit");
+      await assert.rejects(f.updater.install(f.host), /update_busy/);
+      // 其他阶段（例如已开始改动）不解除。
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "swap.log"), "1 start\n2 agent=0\n");
+      await new Promise((r) => setTimeout(r, 200));
+      assert.equal(f.updater.view().state, "pending");
+      assert.equal(f.host.calls.includes("hold:false"), false);
+      // 脚本自己写出改动前中止：解除并允许再装。
+      fs.writeFileSync(path.join(dir, "swap.log"), "1 start\n2 aborted_pid_alive\n");
+      await new Promise((r) => setTimeout(r, 200));
+      v = f.updater.view();
+      assert.equal(v.state, "error");
+      assert.match(v.detail, /替换程序已自行中止/);
+      assert.equal(f.host.calls.at(-1), "hold:false");
+      assert.equal((await f.updater.install(f.host)).state, "installing");
+    });
+  }
 
   test("安装前清理已结束的旧暂存目录；回滚失败与进行中的保留", async () => {
     const f = await ready(fixture());
@@ -441,6 +493,100 @@ describe("安装：等任务、启动脚本与退出", () => {
 
   test("清理不到的目录（读不到）不影响安装", () => {
     assert.doesNotThrow(() => cleanupStaging(path.join(os.tmpdir(), "claw-no-such-dir-" + Date.now())));
+  });
+});
+
+// 反例复现（#40 审查 P2）：实际 watchQuit + 实际替换脚本，等待的“旧进程”换成测试自己创建的进程，
+// launchctl / open / pkill 换成只记录调用的替身；替换脚本在看门狗到点前被暂停，之后恢复。仅 POSIX。
+describe("安装：替换脚本被暂停跨过看门狗后恢复", { skip: process.platform === "win32" }, () => {
+  function realSwap(o: { quitWatchMs: number }) {
+    const holder = spawn("sleep", ["60"], { stdio: "ignore" });
+    let helper: ChildProcess | null = null;
+    let helperExit: Promise<number | null> = Promise.resolve(null);
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), "claw-updater-bin-"));
+    const calls = path.join(bin, "calls.log");
+    const fake = (name: string, body = "") => {
+      const file = path.join(bin, name);
+      fs.writeFileSync(file, `#!/bin/bash\necho "${name} $*" >> ${JSON.stringify(calls)}\n${body}\nexit 0\n`, { mode: 0o755 });
+      return file;
+    };
+    const f = fixture({
+      launch: async (file) => {
+        const child = spawn("bash", [file], { stdio: "ignore" });
+        await new Promise<void>((resolve, reject) => {
+          child.once("error", reject);
+          child.once("spawn", () => resolve());
+        });
+        child.kill("SIGSTOP");
+        helper = child;
+        helperExit = new Promise((r) => child.once("exit", (code) => r(code)));
+      },
+      deps: {
+        timing: { idleWaitMs: 300, idlePollMs: 20, quitWatchMs: o.quitWatchMs, pendingPollMs: 50, swapWaitTicks: 600 },
+        swapOverrides: {
+          pid: holder.pid,
+          launchctl: fake("launchctl", "[ \"$1\" = print ] && exit 113"),
+          // 虚构的“新版本”被打开后写出就绪标记（标记路径在建好夹具后才知道，写在 bin/ready_path 里）。
+          open: fake("open", `echo '{"run":105,"pid":2,"at":1}' > "$(cat ${JSON.stringify(path.join(bin, "ready_path"))})"`),
+          pkill: fake("pkill"),
+        },
+      },
+    });
+    const readyFile = path.join(f.root, "user data", "update", "ready.json");
+    fs.mkdirSync(path.dirname(readyFile), { recursive: true });
+    fs.writeFileSync(path.join(bin, "ready_path"), readyFile);
+    const stages = () => {
+      const dir = f.stagingDirs()[0];
+      return fs.readFileSync(path.join(f.apps, dir, "swap.log"), "utf8").trim().split("\n").map((l) => l.split(" ")[1]);
+    };
+    const endOldProcess = () =>
+      new Promise<void>((r) => {
+        holder.once("exit", () => r());
+        holder.kill("SIGTERM");
+      });
+    const resume = async () => {
+      (helper as ChildProcess | null)?.kill("SIGCONT");
+      return Promise.race([helperExit, new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 20_000))]);
+    };
+    const cleanup = () => {
+      holder.kill("SIGKILL");
+      (helper as ChildProcess | null)?.kill("SIGKILL");
+    };
+    return { f, stages, endOldProcess, resume, cleanup, calls: () => (fs.existsSync(calls) ? fs.readFileSync(calls, "utf8") : "") };
+  }
+
+  test("看门狗到点时脚本被暂停：认领取消、解除更新中；之后旧进程退出、脚本恢复，也只能中止，现有应用不动", async () => {
+    const h = realSwap({ quitWatchMs: 300 });
+    try {
+      await ready(h.f);
+      assert.equal((await h.f.updater.install(h.f.host)).state, "installing");
+      await new Promise((r) => setTimeout(r, 600));
+      assert.equal(h.f.updater.view().state, "error");
+      assert.equal(h.f.host.calls.at(-1), "hold:false");
+      await h.endOldProcess();
+      assert.equal(await h.resume(), 1);
+      assert.equal(h.stages().at(-1), "aborted_cancelled");
+      assert.deepEqual(h.stages().filter((s) => s === "moved_old" || s === "moved_new" || s === "done"), []);
+      assert.equal(fs.readFileSync(path.join(h.f.app, "version"), "utf8"), "old");
+      assert.equal(h.calls(), "");
+    } finally {
+      h.cleanup();
+    }
+  });
+
+  test("对照：没有取消时，同一脚本在旧进程退出、恢复后照常完成替换", async () => {
+    const h = realSwap({ quitWatchMs: 60_000 });
+    try {
+      await ready(h.f);
+      assert.equal((await h.f.updater.install(h.f.host)).state, "installing");
+      await h.endOldProcess();
+      assert.equal(await h.resume(), 0);
+      assert.deepEqual(h.stages(), ["start", "agent=0", "moved_old", "moved_new", "done"]);
+      assert.equal(fs.existsSync(path.join(h.f.app, "Contents", "MacOS", "Claw-Next-Client")), true);
+      assert.equal(h.f.host.calls.includes("hold:false"), false);
+    } finally {
+      h.cleanup();
+    }
   });
 });
 

@@ -187,14 +187,20 @@ export function validateZipEntries(entries: ZipEntry[]): string | null {
 }
 
 /**
- * 解压后核对目录树：根下只有本应用（与 __MACOSX 无关，ditto 会把属性还原掉）；所有符号链接按其所在目录解析后
- * 仍在本应用内；不允许硬链接以外的特殊文件。返回阻止原因，通过为 null。
+ * 解压后核对目录树：根下只有本应用（与 __MACOSX 无关，ditto 会把属性还原掉）；所有符号链接都不是绝对路径，
+ * 且按实际链接逐级解析（含链中链、经链接目录的 ..）后仍在本应用内；循环或悬空的链接拒绝；
+ * 不允许硬链接以外的特殊文件。返回阻止原因，通过为 null。
  */
 export function validateExtractedTree(root: string): string | null {
   const names = fs.readdirSync(root);
   if (names.length !== 1 || names[0] !== APP_BUNDLE) return "extract_unexpected_root";
   const app = path.join(root, APP_BUNDLE);
   if (!fs.lstatSync(app).isDirectory()) return "extract_app_not_dir";
+  const appReal = fs.realpathSync.native(app);
+  const inside = (p: string) => {
+    const rel = path.relative(appReal, p);
+    return !(rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel));
+  };
   const stack = [app];
   while (stack.length) {
     const dir = stack.pop() as string;
@@ -204,9 +210,18 @@ export function validateExtractedTree(root: string): string | null {
       if (st.isSymbolicLink()) {
         const target = fs.readlinkSync(p);
         if (path.isAbsolute(target)) return "extract_absolute_symlink";
-        const resolved = path.resolve(path.dirname(p), target);
-        const rel = path.relative(app, resolved);
-        if (rel.startsWith("..") || path.isAbsolute(rel)) return "extract_symlink_escapes";
+        // 先做词法核对（不跟随链接就能看出越界的直接拒绝），再按实际链接解析核对最终位置。
+        if (!inside(path.resolve(fs.realpathSync.native(path.dirname(p)), target))) return "extract_symlink_escapes";
+        let real: string;
+        try {
+          real = fs.realpathSync.native(p);
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException)?.code;
+          if (code === "ELOOP") return "extract_symlink_loop";
+          if (code === "ENOENT" || code === "ENOTDIR") return "extract_symlink_dangling";
+          throw err;
+        }
+        if (!inside(real)) return "extract_symlink_escapes";
         continue;
       }
       if (st.isDirectory()) stack.push(p);
@@ -217,6 +232,14 @@ export function validateExtractedTree(root: string): string | null {
 }
 
 export const UPDATE_RESULT_LOG = "swap.log";
+/**
+ * 本次替换的“认领”标记（暂存目录下的子目录，mkdir 原子创建，谁先建成谁说了算）：
+ * 替换脚本在确认旧进程已退出后、做任何改动（卸载任务、改名）之前先建它，建不成就中止、什么都不动；
+ * 客户端到点没退出时也抢着建它，建成即确认本次脚本以后不会再替换，才可解除“更新中”。
+ */
+export const UPDATE_CLAIM = "claim";
+/** 这两种中止发生在任何改动之前：脚本没碰系统任务、没改名、也没拉起应用。 */
+export const UPDATE_NO_CHANGE_STAGES: readonly string[] = ["aborted_pid_alive", "aborted_cancelled"];
 export const STAGING_PREFIX = ".Claw-Next-Client.update-";
 
 /**
@@ -239,6 +262,7 @@ export function stagingToRemove(dirs: { name: string; mtimeMs: number; last: str
 /**
  * 替换脚本（macOS，bash）：只管理本客户端自己的固定路径与 LaunchAgent，不碰后台的 launchd 任务。
  * 1. 先等旧进程退出（托管启动时在退出前卸载任务会结束自己）；超时仍在就中止，不碰系统任务、不做任何改名；
+ *    旧进程已退出后先建认领标记（见 UPDATE_CLAIM）；已被客户端抢先建成（本次更新已取消）就中止，同样什么都不动；
  * 2. 若本客户端的 LaunchAgent 已加载，卸载它（防止旧包在替换时被系统拉起；正常退出不会被重启）；
  * 3. 同卷改名：旧包 → 回滚副本，新包 → 原路径；第二步失败立即改回；
  * 4. 重新拉起（原来托管的重新加载任务并确认在运行，否则直接打开），等新包写出含本次运行序号的就绪标记；
@@ -252,6 +276,8 @@ export function swapScript(o: {
   backup: string;
   failed: string;
   stateFile: string;
+  /** 认领标记路径（见 UPDATE_CLAIM）。 */
+  claim: string;
   readyFile: string;
   run: number;
   domain: string;
@@ -276,6 +302,7 @@ export function swapScript(o: {
   return `#!/bin/bash
 set -u
 STATE=${q(o.stateFile)}
+CLAIM=${q(o.claim)}
 APP=${q(o.app)}
 NEW=${q(o.newApp)}
 BACKUP=${q(o.backup)}
@@ -297,6 +324,7 @@ relaunch() {
 log start
 i=0; while kill -0 ${o.pid} 2>/dev/null && [ $i -lt ${o.waitTicks ?? 600} ]; do sleep 0.1; i=$((i+1)); done
 if kill -0 ${o.pid} 2>/dev/null; then log aborted_pid_alive; exit 1; fi
+if ! mkdir "$CLAIM" 2>/dev/null; then log aborted_cancelled; exit 1; fi
 if ${lc} print ${target} >/dev/null 2>&1; then AGENT=1; ${lc} bootout ${target} >/dev/null 2>&1; fi
 log "agent=$AGENT"
 if [ ! -d "$APP" ] || [ ! -d "$NEW" ] || [ -e "$BACKUP" ]; then log aborted_precondition; relaunch; exit 1; fi
@@ -348,6 +376,8 @@ const UPDATE_ERROR_TEXT: Record<string, string> = {
   extract_unexpected_root: "解压结果结构不对",
   extract_absolute_symlink: "解压结果含有指向包外的链接",
   extract_symlink_escapes: "解压结果含有指向包外的链接",
+  extract_symlink_loop: "解压结果含有循环的链接",
+  extract_symlink_dangling: "解压结果含有指向不存在位置的链接",
   extract_special_file: "解压结果含有特殊文件",
   bundle_id_mismatch: "新版本的应用标识不对",
   build_info_mismatch: "新版本的构建信息与发布不一致",

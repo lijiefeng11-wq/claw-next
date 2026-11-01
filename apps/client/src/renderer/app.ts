@@ -206,14 +206,14 @@
     if (!u) return null;
     const current = u.current ? `当前版本：构建 ${u.current.run}（${u.current.sha}）` : "当前版本：开发版（没有版本信息）";
     if (!u.supported) return h("div", { class: "hint", text: `${current}。只有放在“应用程序”文件夹里的 Mac 正式版本可以检查更新。` });
-    const busy = ["checking", "downloading", "waiting_tasks", "installing"].includes(u.state);
+    const busy = ["checking", "downloading", "waiting_tasks", "installing", "pending"].includes(u.state);
     return h(
       "div",
       { class: "update-box" },
       h("div", { class: "hint", text: current }),
       h("button", { type: "button", disabled: busy, onclick: () => void call("app:checkUpdate") }, u.state === "checking" ? "正在检查…" : "检查更新"),
       u.state === "available" ? h("button", { type: "button", class: "primary", disabled: busy, onclick: () => void call("app:installUpdate") }, "下载并安装") : null,
-      u.detail ? h("div", { class: u.state === "error" ? "hint error-text" : "hint", text: u.detail }) : null,
+      u.detail ? h("div", { class: u.state === "error" || u.state === "pending" ? "hint error-text" : "hint", text: u.detail }) : null,
     );
   }
 

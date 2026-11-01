@@ -11,6 +11,8 @@ import {
   MAX_DIGEST_BYTES,
   MAX_ZIP_BYTES,
   STAGING_PREFIX,
+  UPDATE_CLAIM,
+  UPDATE_NO_CHANGE_STAGES,
   UPDATE_REPO,
   UPDATE_RESULT_LOG,
   UpdateCandidate,
@@ -30,7 +32,8 @@ import { LAUNCH_AGENT_LABEL } from "../core/startup.js";
 
 // 本文件不引用 electron：打包信息、路径与系统命令都由主进程注入，测试用虚构夹具替换。
 
-export type UpdateState = "idle" | "checking" | "latest" | "available" | "downloading" | "waiting_tasks" | "installing" | "error";
+/** pending：本进程没按时退出、又无法确认替换脚本已取消；继续保持“更新中”，等脚本自己中止或客户端被关闭。 */
+export type UpdateState = "idle" | "checking" | "latest" | "available" | "downloading" | "waiting_tasks" | "installing" | "pending" | "error";
 export type UpdateView = {
   supported: boolean;
   state: UpdateState;
@@ -214,9 +217,11 @@ export type UpdaterDeps = {
   /** 后台启动替换脚本；进程起来后 resolve，起不来 reject。 */
   launch?: (scriptFile: string) => Promise<void>;
   timing?: Partial<UpdaterTiming>;
+  /** 仅测试：替换脚本里等待的进程号与系统命令换成虚构替身。 */
+  swapOverrides?: { pid?: number; launchctl?: string; open?: string; pkill?: string };
 };
-type UpdaterTiming = { idleWaitMs: number; idlePollMs: number; quitWatchMs: number; swapWaitTicks: number };
-const DEFAULT_TIMING: UpdaterTiming = { idleWaitMs: 60_000, idlePollMs: 500, quitWatchMs: 75_000, swapWaitTicks: 600 };
+type UpdaterTiming = { idleWaitMs: number; idlePollMs: number; quitWatchMs: number; swapWaitTicks: number; pendingPollMs: number };
+const DEFAULT_TIMING: UpdaterTiming = { idleWaitMs: 60_000, idlePollMs: 500, quitWatchMs: 75_000, swapWaitTicks: 600, pendingPollMs: 2_000 };
 
 const defaultRun = (file: string, args: string[], timeoutMs: number) => execFileSync(file, args, { encoding: "utf8", timeout: timeoutMs, stdio: ["ignore", "pipe", "ignore"] });
 const defaultLaunch = (scriptFile: string) =>
@@ -400,6 +405,7 @@ export class Updater {
         backup: path.join(dir, "previous.app"),
         failed: path.join(dir, "failed.app"),
         stateFile,
+        claim: path.join(dir, UPDATE_CLAIM),
         readyFile: path.join(this.d.userData, "update", "ready.json"),
         run: c.run,
         domain: `gui/${this.d.uid}`,
@@ -407,6 +413,7 @@ export class Updater {
         plist: this.d.agentPlist(),
         userData: this.d.userDataArg,
         waitTicks: this.t.swapWaitTicks,
+        ...this.d.swapOverrides,
       });
       const scriptFile = path.join(dir, "swap.sh");
       fs.writeFileSync(scriptFile, script, { mode: 0o700 });
@@ -438,17 +445,45 @@ export class Updater {
   }
 
   /**
-   * 替换脚本最多等本进程退出 swapWaitTicks×0.1 秒；到点本进程仍在，脚本已中止（不改名、不碰系统任务）。
-   * 此时解除“更新中”并提示；只有确认脚本已中止才允许再次安装，避免两个脚本同时等待。
+   * 本进程到点仍没退出：不能凭“时间到了”推定替换脚本已结束（脚本可能被延迟或暂停，之后恢复时本进程若已退出就会继续替换）。
+   * 先抢建本次的认领标记：建成即确认脚本以后建不成、只会中止且不做任何改动，才解除“更新中”、允许再装。
+   * 建不成（脚本已认领或暂存目录异常）就是状态不明：继续保持“更新中”、如实显示待确认，
+   * 之后只在脚本自己写出“改动前中止”的记录时解除；本进程退出则由脚本按原流程收尾。
    */
   private watchQuit(host: UpdateHost, dir: string) {
     const timer = setTimeout(() => {
       const stage = lastStage(dir);
-      console.log(`update quit watchdog stage=${stage ?? "none"}`);
-      host.setUpdateHold(false);
-      if (stage?.startsWith("aborted_")) this.busy = false;
-      this.set("error", "客户端没有按时退出，更新已取消，现有客户端未改动。请关闭后重新打开客户端");
+      let cancelled = false;
+      let why = "";
+      try {
+        fs.mkdirSync(path.join(dir, UPDATE_CLAIM));
+        cancelled = true;
+      } catch (err) {
+        why = errCode(err);
+      }
+      console.log(`update quit watchdog stage=${stage ?? "none"} cancel=${cancelled ? "claimed" : why}`);
+      if (cancelled) return this.releaseAfterQuitTimeout(host, "客户端没有按时退出，更新已取消（替换程序确认不会再替换），现有客户端未改动。请关闭后重新打开客户端");
+      this.set("pending", "客户端没有按时退出，暂时无法确认更新是否已取消。所有店铺继续暂停自动回复。请关闭客户端；关闭后若没有自动重新打开，请手动打开");
+      this.watchPending(host, dir);
     }, this.t.quitWatchMs);
     timer.unref?.();
+  }
+
+  /** 状态不明期间定时看替换记录：脚本自己写出改动前中止（见 UPDATE_NO_CHANGE_STAGES）才解除。 */
+  private watchPending(host: UpdateHost, dir: string) {
+    const timer = setInterval(() => {
+      const stage = lastStage(dir);
+      if (!stage || !UPDATE_NO_CHANGE_STAGES.includes(stage)) return;
+      clearInterval(timer);
+      console.log(`update pending resolved stage=${stage}`);
+      this.releaseAfterQuitTimeout(host, "客户端没有按时退出，替换程序已自行中止，更新已取消，现有客户端未改动。请关闭后重新打开客户端");
+    }, this.t.pendingPollMs);
+    timer.unref?.();
+  }
+
+  private releaseAfterQuitTimeout(host: UpdateHost, detail: string) {
+    host.setUpdateHold(false);
+    this.busy = false;
+    this.set("error", detail);
   }
 }

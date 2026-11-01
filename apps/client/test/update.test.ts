@@ -183,14 +183,39 @@ describe("解压后目录核对", () => {
     assert.equal(validateExtractedTree(tree((app) => fs.symlinkSync("/etc", path.join(app, "Contents", "abs")))), "extract_absolute_symlink");
     assert.equal(validateExtractedTree(tree((app) => fs.symlinkSync("../../..", path.join(app, "Contents", "up")))), "extract_symlink_escapes");
   });
+  // 只做词法解析会放过的情形：按实际链接逐级解析才看得出。仅 POSIX（本核对只在 Mac 安装时运行）。
+  test("经链接目录的 .. 越界、循环链接、悬空链接：按实际解析拒绝", { skip: process.platform === "win32" }, () => {
+    const chain = tree((app) => {
+      const dir = path.join(app, "Contents", "dir");
+      fs.mkdirSync(dir);
+      fs.symlinkSync("..", path.join(dir, "up"));
+      // 词法上是 Contents（包内）；实际 up 指向 Contents，再上两级到解压根，越出本应用。
+      fs.symlinkSync("up/../..", path.join(dir, "link"));
+    });
+    assert.equal(validateExtractedTree(chain), "extract_symlink_escapes");
+    const loop = tree((app) => {
+      fs.symlinkSync("b", path.join(app, "Contents", "a"));
+      fs.symlinkSync("a", path.join(app, "Contents", "b"));
+    });
+    assert.equal(validateExtractedTree(loop), "extract_symlink_loop");
+    assert.equal(validateExtractedTree(tree((app) => fs.symlinkSync("missing", path.join(app, "Contents", "x")))), "extract_symlink_dangling");
+    // 对照：经包内链接目录、最终仍在包内的链接通过。
+    const okChain = tree((app) => {
+      const dir = path.join(app, "Contents", "dir");
+      fs.mkdirSync(dir);
+      fs.symlinkSync("..", path.join(dir, "up"));
+      fs.symlinkSync("up/Info.plist", path.join(dir, "plist"));
+    });
+    assert.equal(validateExtractedTree(okChain), null);
+  });
 });
 
 describe("旧暂存目录清理", () => {
   test("只删已结束的：保留最近一次成功的；回滚失败、进行中保留；无记录的残留超过 1 小时才删", () => {
     const now = 10_000_000;
     const d = (n: string, last: string | null, age: number) => ({ name: STAGING_PREFIX + n, mtimeMs: now - age, last });
-    const r = stagingToRemove([d("1", "done", 5000), d("2", "done", 1000), d("3", "rolled_back", 100), d("4", "aborted_pid_alive", 100), d("5", "rollback_failed", 100), d("6", "moved_old", 100), d("7", null, 100), d("8", null, 7200_000), { name: "Other.app", mtimeMs: 0, last: "done" }], now);
-    assert.deepEqual(r.sort(), [STAGING_PREFIX + "1", STAGING_PREFIX + "3", STAGING_PREFIX + "4", STAGING_PREFIX + "8"].sort());
+    const r = stagingToRemove([d("1", "done", 5000), d("2", "done", 1000), d("3", "rolled_back", 100), d("4", "aborted_pid_alive", 100), d("5", "rollback_failed", 100), d("6", "moved_old", 100), d("7", null, 100), d("8", null, 7200_000), d("9", "aborted_cancelled", 100), { name: "Other.app", mtimeMs: 0, last: "done" }], now);
+    assert.deepEqual(r.sort(), [STAGING_PREFIX + "1", STAGING_PREFIX + "3", STAGING_PREFIX + "4", STAGING_PREFIX + "8", STAGING_PREFIX + "9"].sort());
   });
 });
 
@@ -208,6 +233,8 @@ describe("替换脚本", { skip: process.platform === "win32" }, () => {
     holdPid?: boolean;
     newMissing?: boolean;
     backupExists?: boolean;
+    /** 客户端已抢先建成认领标记（本次更新已取消）。 */
+    cancelled?: boolean;
     userData?: string | null;
   };
   function setup(o: Opts) {
@@ -251,6 +278,8 @@ esac`,
       fs.writeFileSync(path.join(newApp, "version"), "new");
     }
     if (o.backupExists) fs.mkdirSync(path.join(staging, "previous.app"));
+    const claim = path.join(staging, "claim");
+    if (o.cancelled) fs.mkdirSync(claim);
     const holder = o.holdPid ? spawnSync("bash", ["-c", "sleep 30 >/dev/null 2>&1 & echo $!"], { encoding: "utf8" }).stdout.trim() : "999999";
     const script = swapScript({
       pid: Number(holder),
@@ -259,6 +288,7 @@ esac`,
       backup: path.join(staging, "previous.app"),
       failed: path.join(staging, "failed.app"),
       stateFile: path.join(staging, "swap.log"),
+      claim,
       readyFile: ready,
       run: 105,
       domain: "gui/501",
@@ -290,6 +320,7 @@ esac`,
       app,
       apps,
       staging,
+      claim,
     };
   }
 
@@ -306,6 +337,18 @@ esac`,
     assert.match(lines[2], /^launchctl bootstrap gui\/501 .*agent\.plist$/);
     assert.doesNotMatch(h.log(), /^open /m);
     assert.doesNotMatch(h.log(), /backend/);
+    // 旧进程退出后、改动之前已建认领标记。
+    assert.ok(fs.statSync(h.claim).isDirectory());
+  });
+
+  test("认领标记已被客户端建成（本次更新已取消）：旧进程退出后中止，不碰系统任务、不改名、不拉起", () => {
+    const h = setup({ agentLoaded: true, cancelled: true, readyRun: 105 });
+    const r = h.run();
+    assert.equal(r.status, 1);
+    assert.deepEqual(h.stages(), ["start", "aborted_cancelled"]);
+    assert.equal(h.version(h.app), "old");
+    assert.equal(fs.existsSync(path.join(h.staging, "previous.app")), false);
+    assert.equal(h.log(), "");
   });
 
   test("未托管：直接打开新版本（带自定义数据目录，路径正确转义）", () => {
@@ -340,6 +383,7 @@ esac`,
       assert.deepEqual(h.stages(), ["start", "aborted_pid_alive"]);
       assert.equal(h.version(h.app), "old");
       assert.equal(fs.existsSync(path.join(h.staging, "previous.app")), false);
+      assert.equal(fs.existsSync(h.claim), false);
       assert.equal(h.log(), "");
     } finally {
       h.kill();
