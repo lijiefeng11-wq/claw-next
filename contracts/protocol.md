@@ -338,7 +338,7 @@ status 只能 sent/not_sent/unknown。sent 必须具有平台明确成功回执�
 ### 能力协商
 
 - 心跳 `capabilities` 新增两个独立能力名 `"mark_conversation"` 与 `"transfer_conversation"`，规则与 `send_item` 相同：以最近一次成功心跳响应为准，与 instance + session + generation 绑定；租约变化重新确认；撤回后在途判断不得产出、已生成的不能 claim、点击前发现撤回则不点击报 `not_sent`。
-- **`transfer_conversation` 在稳定接收人标识核实前不得在任何一端声明**（见下文“接收人”）。
+- **`transfer_conversation` 在本节“接收人”规则与转移成功判据经双方审查前不得在任何一端声明**（见下文“接收人”）。
 - 兼容组合：未确认能力时后台只返回旧 action，并对事件中的 `conv_state` / `transfer_targets` 返回 400；客户端收到不认识或未确认能力的 action 一律不执行、不 claim，本地按 none 记录。
 
 ### 前台提交（`context`）
@@ -362,12 +362,14 @@ status 只能 sent/not_sent/unknown。sent 必须具有平台明确成功回执�
 - **状态取不到时如实上报 `marked=null`，不得捏造 false，也不得丢弃事件。** 适用：星标元素缺失或不唯一、页面加载中、读数与本次 `context_revision` 不对应（过期）、浮层归属无法证明。能力已确认只表示“可以执行”，不等于这次读到了状态。
 - `marked=null` 的事件：后台不得生成 mark 或 transfer；正常 reply / send_item / handoff 流程照常（handoff 仍只是建议）。前台执行 mark/transfer 前若重读发现状态取不到或与提交时不一致，不点击，回执 `not_sent`（reason `conv_state_unavailable` / `conv_state_changed`）。
 - 不上传客服状态数值（语义未知，不推断在线）、备注、接待量或任何平台账号编号。
-- `target_id` 只在本店、本租约、本对话、本 `context_revision` 内有效；前台私有映射为平台稳定客服标识（不随上下文上传、不写日志）。客服列表或映射变化使 `context_revision` 递增。
+- `target_id` 只在本店、本租约、本对话、本 `context_revision` 内有效；前台私有映射为该行的**账号名**（见“接收人”，不随上下文上传、不写日志）。客服列表或映射变化使 `context_revision` 递增。
 
 ### 接收人
 
-- 后台配置的是**账号显示名**（如“主账号”）；生成决定时只在本事件 `transfer_targets` 中按 `name` **完全相等**查找，恰好一项才可用其 `target_id`；零项或多项不得生成 transfer，改为 `handoff` 建议并在 reason 中说明。
-- 前台执行时以私有映射的**平台稳定客服标识**核对对话框行，不能只比显示名。该标识的字段须由前台以脱敏结构核实后补入本段；**补入并经双方审查前，`transfer_conversation` 不启用**。
+- **接收人身份 = 转移会话对话框第一列“账号名”。** 店主确认（2026-11-01，用户直接说明并附对话框截图）：该列“账号名”在平台上不能修改，可作为接收人的稳定身份；“昵称”可以修改，“备注”是店主自填，二者都不作身份依据。用户明确要求按账号名判断，不再另取平台内部客服编号。
+- `transfer_targets[].name` 即该行“账号名”原文（首尾去空白、≤40 字）；后台配置的 `account` 也是账号名。生成决定时只在本事件 `transfer_targets` 中按 `name` **完全相等**查找，恰好一项才可用其 `target_id`；零项或多项不得生成 transfer，改为 `handoff` 建议并在 reason 中说明。昵称、备注或包含关系命中都不算。
+- 前台执行时，在点击该行“转移”之前的同一次页面快照里核对：对话框中账号名列恰为该账号名的行**恰好一行**，且点击坐标落在这一行唯一的“转移”控件上（不点“转移并微信通知”）。账号名缺失、重复或该行按钮不唯一时不点击，回执 `not_sent`（reason `conv_state_unavailable`）。点击后若列表重排使命中行变化，按 unknown 处理，不补做。
+- 本节只确定接收人身份。转移的平台成功判据（`move_conversation` 等响应字段语义）仍未核实，须另行取证、补入并经双方审查后，`transfer_conversation` 才可声明；在此之前前台不实现转移执行。
 
 ### 决定
 
@@ -389,7 +391,7 @@ status 只能 sent/not_sent/unknown。sent 必须具有平台明确成功回执�
 1. claim 前后与点击前的重核同 `send_item` 第 1–3 步；另核对 `conv_state` 与当前页面一致、`target_id` 映射仍在。
 2. 每个平台写入步骤之前先本地持久化该步尝试（attempt_id + 步骤名），再点击；只点平台页面自身按钮，不拼接平台请求。
 3. **mark**：只点星标颜色浮层中的目标颜色项（不点星标本身；浮层须可证明属于当前会话星标）。
-4. **transfer**：点“转移会话”→ 以稳定标识核对的目标行“转移”→“无原因直接转移”。若平台以“已收藏”拒绝：
+4. **transfer**：点“转移会话”→ 以账号名核对的目标行“转移”→“无原因直接转移”。若平台以“已收藏”拒绝：
    - `allow=false`：点“暂不转移收藏会话”，回执 `not_sent`（reason `blocked_by_mark`）。平台已拒绝且未改变状态，这是确定结论。
    - `allow=true`：点“取消收藏并转移”。
    - 平台的“取消收藏并转移”是**一次页面点击**，页面随后自行发出取消收藏与再次转移两个请求；前台把它记为一个步骤 `unmark_and_transfer`，不拆成两次点击。
@@ -421,7 +423,7 @@ status 只能 sent/not_sent/unknown。sent 必须具有平台明确成功回执�
 
 - 已领取但确定尚未开始任何平台步骤时，仅可提交 `status=not_sent`，`steps` 省略或为空；不能伪造未开始的步骤。`page_observed` 若提供，仅为 `marked` / `left_list` / `unchanged` / `unknown`，不参与聚合。回执顶层及步骤可选 `reason` 仅为 `blocked_by_mark` / `platform_rejected` / `conv_state_unavailable` / `conv_state_changed` / `capability_withdrawn` / `deadline_exceeded` / `not_started`，不得携带原始平台文字。
 - 后台核验 `steps` 与冻结决定的颜色/取消收藏策略一致、顺序与上表一致，整体 `status` 必须等于聚合结果；无授权不得报告第二个 `unmark_and_transfer` 步骤。相同回执幂等，终态后的状态、步骤、观察或原因冲突返回409，unknown 不被晚回执覆盖。
-- `sent` 须同时满足：平台对应接口明确成功（字段语义核实后补入判据），且该成功与本对话、本次请求（transfer 时还有指定接收人的稳定标识）对应。缺失或冲突一律 `unknown`。
+- `sent` 须同时满足：平台对应接口明确成功（字段语义核实后补入判据），且该成功与本对话、本次请求（transfer 时还有指定接收人的账号名）对应。缺失或冲突一律 `unknown`。
 - `page_observed` 只是页面观察（mark：星标状态与颜色；transfer：会话离开非空会话列表），**不能**单独构成 `sent`，也不能据此触发任何补做动作。
 - 被明确拒绝的步骤永远不能聚合为 `sent`；transfer 的整体 `sent` 只来自最后一个转移步骤的明确成功，mark 的整体 `sent` 只来自 `mark` 步骤的明确成功。`steps` 只记步骤名、状态、`color`（仅 mark）与 `unmarked`，不含客服名、买家标识或平台原文。
 - 后台按 `decision.action` 校验回执：mark/transfer 带非 null 的 `platform_message_id` 返回 400（省略或 null 允许）；`steps` 与 action 不匹配（如 mark 回执出现转移步骤）返回 400。
@@ -490,12 +492,12 @@ status 只能 sent/not_sent/unknown。sent 必须具有平台明确成功回执�
 {"action":"transfer","account":"主账号","allow_unmark":true}
 ```
 
-- 策略只接受对应示例字段。颜色仅四色字符串，不接受平台数值；`account` 为首尾去空白后1–40字的显示名，与本次接收人列表完全相等匹配，不能猜稳定标识。`allow_unmark` 只能布尔，缺省false；管理页新选转人工时可预选true，管理员保存时一并确认一次策略，执行时不逐次询问。
+- 策略只接受对应示例字段。颜色仅四色字符串，不接受平台数值；`account` 为首尾去空白后1–40字的显示名，与本次接收人列表完全相等匹配，不按昵称或备注匹配。`allow_unmark` 只能布尔，缺省false；管理页新选转人工时可预选true，管理员保存时一并确认一次策略，执行时不逐次询问。
 - 每条规则可用 `handling` 携带同一策略，代替原 `reply` / `send`，二者不得混用；旧文字/商品内容规则保持原约定。混合方式的模型只能选择提供的规则ID，由后台根据已保存策略解析动作；不得由模型自由产生颜色、接收人或新动作。
 - `unhandled` 仅覆盖无规则匹配或合法模型handoff；`error` 不覆盖租约、权限、会话归属、历史不完整等安全拒绝。总预算耗尽的 `reply_deadline_exceeded` 永不变为新动作，策略不刷新预算或有效期。
 - 保存策略增加既有店铺设置版本，设置/策略变更使旧未领取决定失效。动作领取照常核对租约、能力、同一上下文、最新事件、设置版本及总截止；已领取重查不延长许可。
 - 只读 `conv_state` / `transfer_targets` 均绑定本店铺、账号/租约、页面、当前会话和 `context_revision`。这种归属由所在事件的既有认证身份、`instance_id` / `session_id` / `generation` / `conversation_id` / `context_revision` 承载；`conv_state` 仍只含原三键，不新增绑定字段。前台须在本次上下文采集时读取，页面代次或打开会话发生变化时记为未知，不跨事件复用旧状态；过期、缺失或歧义应未知。`observed_at` 为有限Unix秒。后台不会把此类状态或客服列表交给模型。
-- 本阶段仅交付隔离实现准备，后台允许协商的新平台动作能力清单默认保持为空；保存配置不会打开能力，也不能绕过当前仅观察设置。任何正式启用必须另经前台实现、目标绑定、稳定接收人和平台成功语义核实及明确安排，不能因为草案/代码PR合并而自动启用。
+- 本阶段仅交付隔离实现准备，后台允许协商的新平台动作能力清单默认保持为空；保存配置不会打开能力，也不能绕过当前仅观察设置。任何正式启用必须另经前台实现、目标绑定、接收人账号名核对和平台成功语义核实及明确安排，不能因为草案/代码PR合并而自动启用。
 
 ## unknown 人工核查（1.0 补充）
 
