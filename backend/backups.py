@@ -99,9 +99,13 @@ class BackupManager:
         try:
             if self.last_success is None:
                 self._recover()
-            if self.last_success is not None and 0 <= time.time() - self.last_success < self.interval:
-                self._set("ok")
-                return
+            if self.last_success is not None:
+                # Complete any failed retention pass before publishing again,
+                # even when the next daily snapshot has become due.
+                self._prune()
+                if 0 <= time.time() - self.last_success < self.interval:
+                    self._set("ok")
+                    return
             stamp = datetime.datetime.now(datetime.timezone.utc)
             target = self.directory / (stamp.strftime("backup-%Y%m%dT%H%M%S%fZ.sqlite3"))
             fd, name = tempfile.mkstemp(prefix=".backup-", suffix=".tmp", dir=self.directory)
@@ -117,7 +121,7 @@ class BackupManager:
                 finally:
                     destination.close()
                 self._check_stop()
-                with temporary.open("rb") as file:
+                with temporary.open("r+b") as file:
                     os.fsync(file.fileno())
                 if target.exists() or target.is_symlink():
                     raise ValueError("backup name collision")
@@ -130,16 +134,20 @@ class BackupManager:
                         os.close(directory_fd)
             finally:
                 temporary.unlink(missing_ok=True)
-            # Prune only after a complete verified snapshot is durable. A
-            # symlink is not a snapshot; unrelated files are never removed.
-            entries = self._entries()
-            valid_time = [(t, p) for t, p in entries if t <= time.time()]
-            for _, path in valid_time[self.keep:]:
-                if stat.S_ISREG(path.lstat().st_mode):
-                    path.unlink()
+            # Publication succeeded independently of retention. Even if cleanup
+            # fails, its retry must not publish another full snapshot.
             self._set("ok", stamp.timestamp())
+            self._prune()
         finally:
             source.close()
+
+    def _prune(self):
+        # A symlink is not a snapshot; unrelated files are never removed.
+        entries = self._entries()
+        valid_time = [(t, p) for t, p in entries if t <= time.time()]
+        for _, path in valid_time[self.keep:]:
+            if stat.S_ISREG(path.lstat().st_mode):
+                path.unlink()
 
     def _run(self):
         while not self.stop.is_set():

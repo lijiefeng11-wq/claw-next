@@ -108,6 +108,47 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(len(self.files()), 2)
         self.assertEqual(note.read_text(), "keep")
 
+    def test_retention_failure_retries_cleanup_without_new_snapshots(self):
+        database(self.source).close()
+        self.manager.keep = 1
+        self.manager._backup_once()
+        prior = self.files()[0]
+        self.manager.last_success -= self.manager.interval + 1
+        original_unlink = Path.unlink
+
+        def deny_old_snapshot(path, *args, **kwargs):
+            if path.name.startswith("backup-") and path.suffix == ".sqlite3":
+                raise PermissionError("fictional retention failure")
+            return original_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", deny_old_snapshot):
+            with self.assertRaises(PermissionError):
+                self.manager._backup_once()
+            published_at = self.manager.snapshot()["last_success"]
+            self.assertGreater(published_at, time.time() - 5)
+            published = self.files()
+            self.assertEqual(len(published), 2)
+            for _ in range(3):
+                with self.assertRaises(PermissionError):
+                    self.manager._backup_once()
+                self.assertEqual(self.files(), published)
+                self.assertEqual(self.manager.snapshot()["last_success"], published_at)
+            # An overdue daily interval does not bypass failed cleanup either.
+            with patch("backend.backups.time.time", return_value=published_at + self.manager.interval + 1):
+                with self.assertRaises(PermissionError):
+                    self.manager._backup_once()
+            self.assertEqual(self.files(), published)
+            # Recovery from disk also recognizes the successful publication.
+            restarted = BackupManager(self.data, keep=1)
+            self.addCleanup(restarted.close)
+            with self.assertRaises(PermissionError):
+                restarted._backup_once()
+            self.assertEqual(self.files(), published)
+        self.manager._backup_once()
+        self.assertEqual(self.files(), [path for path in published if path != prior])
+        self.assertEqual(self.manager.snapshot()["status"], "ok")
+        self.assertEqual(self.manager.snapshot()["last_success"], published_at)
+
     def test_stop_interrupts_busy_database_and_removes_temporary_file(self):
         connection = database(self.source)
         self.addCleanup(connection.close)
