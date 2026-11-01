@@ -85,6 +85,14 @@ class StoreActionTests(unittest.TestCase):
             _, result = self.ready(self.event("e"+str(i), i+1), decision("handoff", reason))
             self.assertEqual(result["action"], "handoff")
 
+    def test_already_marked_never_recolors_or_claims(self):
+        for i, color in enumerate((None, "red", "blue")):
+            event = self.event("marked" + str(i), i + 1, marked=True)
+            event["context"]["conv_state"]["color"] = color
+            _, result = self.ready(event)
+            self.assertEqual(result["action"], "none")
+            self.code("not_reply", lambda: self.claim(event["event_id"]))
+
     def test_timeout_fallback_only_for_model_timeout(self):
         self.store.update_settings("a", {**self.settings, "rules": [], "fallback": {"error": {"action": "handoff"}, "model_timeout": MARK}})
         _, result = self.ready(result=decision("handoff", "model_unavailable:primary=timeout,backup=not_configured"))

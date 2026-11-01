@@ -61,7 +61,7 @@ def resolve(policy, context, capabilities, version, reason):
     if type(state.get("marked")) is not bool or action + "_conversation" not in capabilities:
         return legacy
     if action == "mark":
-        if state["marked"] and state.get("color") == policy["color"]:
+        if state["marked"] is True:
             return {**legacy, "action": "none"}
         target = {"mark": {"color": policy["color"]}}
     else:
@@ -86,7 +86,7 @@ def valid_decision(result, context, capabilities, version):
     target = result[action]
     if action == "mark":
         return (isinstance(target, dict) and set(target) == {"color"} and target["color"] in COLORS
-                and not (state["marked"] and state.get("color") == target["color"]))
+                and state["marked"] is False)
     if not isinstance(target, dict) or set(target) != {"target_id", "unmark_policy"}:
         return False
     policy = target["unmark_policy"]
