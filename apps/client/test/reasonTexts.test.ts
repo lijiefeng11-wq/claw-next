@@ -34,3 +34,10 @@ test("平台页面操作与回执的原因代码都有中文说明", () => {
 test("这些说明只讲原因，不引导重发，也不替界面标签下结论", () => {
   for (const code of CODES) assert.doesNotMatch(REASONS[code], /重发|重试|补发|再发|已发送|未发送|发送成功/, code);
 });
+
+test("拦截分支只能说明请求不符，不得宣称已拦截（拦截命令的结果没有等待确认）", () => {
+  for (const code of ["pdd_send_blocked_mismatch", "pdd_item_blocked_mismatch"] as const) {
+    assert.doesNotMatch(REASONS[code], /已在本机拦截|已拦截|拦截成功/, code);
+    assert.match(REASONS[code], /未确认/, code);
+  }
+});
