@@ -414,6 +414,15 @@ describe("拼多多适配器：准备预算与预热（Electron 替身）", () =
 describe("拼多多适配器：说明书部分收集与预热续读（Electron 替身）", () => {
   const res = (goodsId: number) => ({ success: true, result: { templateVO: { templateId: goodsId + 100, templateName: "虚构说明书", version: 1 }, goodsVO: { goodsId, goodsName: "虚构商品" }, instructStatus: 1 } });
   /** goods：订单中的商品；buttons：订单区“发送说明书”按钮依次对应的商品；loadMs：页面加载说明书的耗时（null 表示永不加载）。 */
+  /**
+   * “准备只读到 1 个说明书”的时间设计：准备阶段剩余 ≥1000 ms 才开始打开说明书，剩余 ≤500 ms 停止；
+   * 每个对话框约为加载时间 + 等待轮询（≤100 ms）+ 关闭前 300 ms。预算 1300 ms、加载 600 ms 时，
+   * 开始前留有约 300 ms 余量（慢机器上商品与订单步骤也来得及），读完 1 个后剩余必然 ≤400 ms，只会读 1 个。
+   * 原先预算 1050 ms 只留 50 ms 余量，macOS CI 上偶发“一个都没读”（run 41305801841）。
+   */
+  const PARTIAL_BUDGET_MS = 1300;
+  const PARTIAL_LOAD_MS = 600;
+
   function page(goods: number[], buttons: number[], loadMs: number | null, keyless = new Set<number>()) {
     const adapter = new PddPageAdapter("shop-x", "虚构店铺") as any;
     const opened: number[] = [];
@@ -449,8 +458,8 @@ describe("拼多多适配器：说明书部分收集与预热续读（Electron �
   }
 
   test("准备只完成 1/3 → 不限流，随后预热只补齐剩下的 2 个", async () => {
-    const { adapter, opened, stale } = page([501, 502, 503], [501, 502, 503], 300);
-    await adapter.sendOptionsSettled(BUYER, 1050);
+    const { adapter, opened, stale } = page([501, 502, 503], [501, 502, 503], PARTIAL_LOAD_MS);
+    await adapter.sendOptionsSettled(BUYER, PARTIAL_BUDGET_MS);
     assert.deepEqual(opened, [501]);
     assert.equal(stale(), 2);
     assert.equal(adapter.instructTriedAt.has(BUYER), false);
@@ -490,8 +499,8 @@ describe("拼多多适配器：说明书部分收集与预热续读（Electron �
   });
 
   test("部分完成后按钮重排：按订单项指纹续读，不跳过未读商品，不误判试满", async () => {
-    const { adapter, opened, stale, setButtons } = page([501, 502, 503], [501, 502, 503], 300);
-    await adapter.sendOptionsSettled(BUYER, 1050);
+    const { adapter, opened, stale, setButtons } = page([501, 502, 503], [501, 502, 503], PARTIAL_LOAD_MS);
+    await adapter.sendOptionsSettled(BUYER, PARTIAL_BUDGET_MS);
     assert.deepEqual(opened, [501]);
     setButtons([502, 501, 503]);
     await adapter.warmConversation(BUYER);
@@ -500,8 +509,8 @@ describe("拼多多适配器：说明书部分收集与预热续读（Electron �
   });
 
   test("部分完成后插入新订单按钮：新按钮照常读取，已读的不重读", async () => {
-    const { adapter, opened, stale, setButtons } = page([501, 502, 503], [501, 503], 300);
-    await adapter.sendOptionsSettled(BUYER, 1050);
+    const { adapter, opened, stale, setButtons } = page([501, 502, 503], [501, 503], PARTIAL_LOAD_MS);
+    await adapter.sendOptionsSettled(BUYER, PARTIAL_BUDGET_MS);
     assert.deepEqual(opened, [501]);
     setButtons([502, 501, 503]);
     await adapter.warmConversation(BUYER);
@@ -510,8 +519,8 @@ describe("拼多多适配器：说明书部分收集与预热续读（Electron �
   });
 
   test("部分完成后删除已读按钮：剩余按钮照常读取", async () => {
-    const { adapter, opened, stale, setButtons } = page([502, 503], [501, 502, 503], 300);
-    await adapter.sendOptionsSettled(BUYER, 1050);
+    const { adapter, opened, stale, setButtons } = page([502, 503], [501, 502, 503], PARTIAL_LOAD_MS);
+    await adapter.sendOptionsSettled(BUYER, PARTIAL_BUDGET_MS);
     assert.deepEqual(opened, [501]);
     setButtons([502, 503]);
     await adapter.warmConversation(BUYER);
@@ -520,8 +529,8 @@ describe("拼多多适配器：说明书部分收集与预热续读（Electron �
   });
 
   test("指纹取不到的按钮不按旧位置跳过：重新打开核验", async () => {
-    const { adapter, opened, stale } = page([501, 502], [501, 502], 300, new Set([501]));
-    await adapter.sendOptionsSettled(BUYER, 1050);
+    const { adapter, opened, stale } = page([501, 502], [501, 502], PARTIAL_LOAD_MS, new Set([501]));
+    await adapter.sendOptionsSettled(BUYER, PARTIAL_BUDGET_MS);
     assert.deepEqual(opened, [501]);
     await adapter.warmConversation(BUYER);
     assert.deepEqual(opened, [501, 501, 502]);
