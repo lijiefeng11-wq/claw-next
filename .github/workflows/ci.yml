@@ -145,6 +145,11 @@ jobs:
         run: npm ci
       - name: Package the standalone app for this system
         # macOS 上打包会做本机临时签名并校验；--zip 生成可分发的 zip（Windows 上忽略）。
+        # 只有受信任的 main 推送才写入构建信息（完整 SHA + 运行序号，供客户端“检查更新”比较）；
+        # PR 与其他分支为空，包内记为 null，客户端不会把它当作可升级的发行版。
+        env:
+          CLAW_NEXT_BUILD_SHA: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.sha || '' }}
+          CLAW_NEXT_BUILD_RUN: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_number || '' }}
         run: npm run package -- --zip
       - name: Smoke-test the packaged app (synthetic backend, mock platform)
         env:
@@ -158,3 +163,71 @@ jobs:
           path: ${{ matrix.artifact }}
           if-no-files-found: error
           retention-days: 7
+  publish-client-release:
+    # 客户端“检查更新”的发行来源（#34）。只在受信任的 main 推送、且本次运行全部检查都成功后执行；
+    # 发布的是本次运行里已通过冒烟测试的同一个 Mac 产物，不重新构建。只有本 job 有写权限，PR 不会运行它。
+    # 不使用第三方 action：只用 runner 自带的 gh 与 python3。
+    name: Publish client release (main only)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [backend-contract, client-contract, client-ui-e2e, client-package-smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    concurrency:
+      # 串行发布，不取消进行中的发布；客户端只按“运行序号最大且是本机提交的后继”选版本，旧运行晚发布也不会成为更新目标。
+      group: client-release
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      SHA: ${{ github.sha }}
+      RUN: ${{ github.run_number }}
+      ZIP: Claw-Next-Client-darwin-arm64.zip
+    steps:
+      - name: Download the smoke-tested macOS package from this run
+        run: gh run download "$GITHUB_RUN_ID" --repo "$REPO" --name Claw-Next-Client-macOS --dir pkg
+      - name: Verify package layout and build info against this run
+        # 包根唯一为 Claw-Next-Client.app/（及其 __MACOSX 属性），无绝对路径、无 ..、无重复条目；build-info.json 的 sha/run/platform/arch 与本次运行一致。
+        run: |
+          python3 - "pkg/$ZIP" <<'PY'
+          import json, os, sys, zipfile
+          path = sys.argv[1]
+          with zipfile.ZipFile(path) as z:
+              names = z.namelist()
+              assert names and len(names) == len(set(names)), "duplicate or empty entries"
+              for n in names:
+                  parts = n.split("/")
+                  assert not n.startswith("/") and "\\" not in n and ".." not in parts, f"unsafe entry: {n}"
+                  # ditto --sequesterRsrc 会把扩展属性放在 __MACOSX/ 下（AppleDouble），只允许属于本 .app 的那部分。
+                  ok = parts[0] == "Claw-Next-Client.app" or (parts[0] == "__MACOSX" and len(parts) > 1 and parts[1] in ("Claw-Next-Client.app", "._Claw-Next-Client.app"))
+                  assert ok, f"unexpected root: {n}"
+              info = json.loads(z.read("Claw-Next-Client.app/Contents/Resources/build-info.json"))
+          want = {"sha": os.environ["SHA"], "run": int(os.environ["RUN"]), "platform": "darwin", "arch": "arm64"}
+          assert info == want, f"build-info mismatch: {info} != {want}"
+          print("build-info ok", info)
+          PY
+          (cd pkg && sha256sum "$ZIP" > "$ZIP.sha256" && cat "$ZIP.sha256")
+      - name: Publish as a draft, verify uploaded assets, then mark as prerelease
+        run: |
+          TAG="client-$RUN-$SHA"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          # tag 不覆盖：已存在（含草稿）就失败。
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then echo "release $TAG already exists"; exit 1; fi
+          gh release create "$TAG" --repo "$REPO" --target "$SHA" --draft --prerelease --latest=false \
+            --title "Claw-Next 客户端（Mac）构建 $RUN" \
+            --notes "自动发布：main 提交 $SHA，CI 运行序号 $RUN。已通过本次运行的全部检查与 Mac 冒烟测试。未签名；首次打开可能需要按 macOS 提示手动允许。" \
+            "pkg/$ZIP" "pkg/$ZIP.sha256"
+          echo "DRAFT_CREATED=1" >> "$GITHUB_ENV"
+          # 下载回刚上传的资产，逐字节核对后才转为正式的预发布；失败不留半成品（见下一步）。
+          gh release download "$TAG" --repo "$REPO" --dir check
+          cmp "pkg/$ZIP" "check/$ZIP"
+          cmp "pkg/$ZIP.sha256" "check/$ZIP.sha256"
+          test "$(ls check | wc -l)" -eq 2
+          gh release edit "$TAG" --repo "$REPO" --draft=false --prerelease --latest=false
+          echo "PUBLISHED=1" >> "$GITHUB_ENV"
+          gh release view "$TAG" --repo "$REPO" --json tagName,isDraft,isPrerelease,targetCommitish
+      - name: Remove an unfinished draft
+        if: failure() && env.DRAFT_CREATED == '1' && env.PUBLISHED != '1'
+        run: gh release delete "$TAG" --repo "$REPO" --yes
