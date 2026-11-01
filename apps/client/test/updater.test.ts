@@ -61,6 +61,7 @@ function makeZip(entries: { name: string; data?: string; link?: boolean }[]): Bu
 with zipfile.ZipFile(sys.argv[1],'w') as z:
   for e in json.loads(sys.argv[2]):
     i=zipfile.ZipInfo(e['name'])
+    i.filename=e['name']
     i.external_attr=((0o120777 if e.get('link') else (0o40755 if e['name'].endswith('/') else 0o100644))<<16)
     z.writestr(i,e.get('data',''))`;
   const r = spawnSync("python3", ["-I", "-c", code, file, JSON.stringify(entries)]);
@@ -245,7 +246,7 @@ describe("安装：下载与核对失败都不动现有应用", () => {
     assert.equal(f.launched.length, 1);
     const [dir] = f.stagingDirs();
     assert.ok(f.launched[0].startsWith(path.join(f.apps, dir)));
-    assert.equal(fs.statSync(f.launched[0]).mode & 0o777, 0o700);
+    if (process.platform !== "win32") assert.equal(fs.statSync(f.launched[0]).mode & 0o777, 0o700);
     const script = fs.readFileSync(f.launched[0], "utf8");
     assert.ok(script.includes(`APP='${f.app}'`));
     assert.ok(script.includes(`'"run":105[,}]'`));
@@ -339,7 +340,7 @@ describe("安装：下载与核对失败都不动现有应用", () => {
     assertUntouched(f);
   });
 
-  test("没有写入应用所在文件夹的权限：报错，不进入更新中", { skip: process.getuid?.() === 0 ? "root 不受目录权限限制" : false }, async () => {
+  test("没有写入应用所在文件夹的权限：报错，不进入更新中", { skip: process.platform === "win32" ? "Windows 不按 POSIX 权限位限制目录" : process.getuid?.() === 0 ? "root 不受目录权限限制" : false }, async () => {
     const f = await ready(fixture());
     fs.chmodSync(f.apps, 0o555);
     try {
