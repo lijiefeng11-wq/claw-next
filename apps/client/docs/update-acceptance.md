@@ -34,14 +34,14 @@
 | tag 与提交 | `gh api repos/lijiefeng11-wq/claw-next/git/ref/tags/client-M-<SHA>` | 指向同一个完整 SHA |
 | release 状态 | `gh api repos/lijiefeng11-wq/claw-next/releases/tags/client-M-<SHA>` | 非草稿、预发布，资产恰好两个：`Claw-Next-Client-darwin-arm64.zip` 和同名 `.sha256` |
 | 产生它的 CI | Actions 中 run_number 为 M 的那次运行 | 是 main 的 push 运行，`head_sha` 等于该 SHA，所有 job 成功，Publish job 成功 |
-| 与 CI 产物一致 | 用 REST 接口下载该运行的 `Claw-Next-Client-macOS` 产物。下载到的是外层压缩包，先解开，取出其中的 `Claw-Next-Client-darwin-arm64.zip`，再与 release 的 zip 分别 `shasum -a 256`。不要直接对外层压缩包算哈希 | 两个哈希一致，且等于 `.sha256` 里的值 |
+| 与 CI 产物一致 | 用 REST 接口下载该运行的 `Claw-Next-Client-macOS` 产物。下载到的是外层压缩包，先解开，取出其中的 `Claw-Next-Client-darwin-arm64.zip`，再与 release 的 zip 分别 `shasum -a 256`。不要直接对外层压缩包算哈希；外层压缩包可另与 artifact 接口给出的 digest 核对完整性 | 内层 zip 与 release zip 的哈希一致，且等于 `.sha256` 里的值 |
 | 包内构建信息 | 解压 zip，读 `Claw-Next-Client.app/Contents/Resources/build-info.json` | `{sha: 该SHA, run: M, platform: "darwin", arch: "arm64"}` |
 
 证据：上面每一项的命令输出（完整 SHA、run id、两个哈希）。
 
 ## 3. 场景与通过标准
 
-每个场景都要记下：开始和结束时间；操作前后的“客户端设置”截图；客户端日志 `~/Library/Application Support/Claw-Next-Client/logs/client-<日期>.log` 中 `update ` 开头的行；暂存目录 `/Applications/.Claw-Next-Client.update-*/swap.log` 的全文；`~/Library/Application Support/Claw-Next-Client/update/ready.json`；后台任务 PID 前后对比。
+每个场景都要记下：开始和结束时间；操作前后的“客户端设置”截图；客户端日志 `~/Library/Application Support/Claw-Next-Client/logs/client-<日期>.log` 中 `update ` 开头的行；暂存目录 `/Applications/.Claw-Next-Client.update-*/swap.log` 的全文；`~/Library/Application Support/Claw-Next-Client/update/ready.json`；后台任务 PID 前后对比。在下载或核对阶段就失败的场景不会生成 `swap.log` 与 `ready.json`，记“未生成”，不补造文件，也不把缺少的阶段写成已完成。
 
 ### 3.1 正常更新：未开启“崩溃后自动重启”
 
@@ -80,8 +80,8 @@
 2. 在“等待进行中的任务结束”或“正在安装”期间，让买家消息进来（自然到达即可，不主动制造）。
 
 通过标准：
-- [ ] 这段时间到达的消息，记录里的原因是“客户端正在安装更新，暂停发送”。
-- [ ] 没有任何平台发送、附加发送或标星。
+- [ ] 先确认有消息确实是在旧客户端仍在运行、且已进入“更新中”的这段时间里被处理的（日志里 `update hold=true` 之后、客户端退出之前），再看它的原因：应为“客户端正在安装更新，暂停发送”。这段时间没有自然到达的消息就记“未覆盖”，不补造。
+- [ ] 没有任何平台发送、附加发送或标星。只有“没有发送”不能单独证明更新保持生效：仅观察模式本来就不发送，必须以上一条的原因为准。
 - [ ] 已有的 unknown 记录保持原样。
 
 ### 3.5 下载中断
