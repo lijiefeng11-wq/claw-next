@@ -60,7 +60,9 @@ app.whenReady().then(async () => {
     await sleep(3300);
     const clicks = (await iso("window.__clawUi.queue.splice(0)")) || [];
     const map = (await iso(UI_MAP)) || [];
-    const all = JSON.stringify({ clicks, map });
+    // 记录里的 at 是本机点击时间（毫秒），数字可能碰巧含“9001”等虚构编号片段：只核对它是数字，其余字段照常扫描。
+    const all = JSON.stringify({ clicks: clicks.map(({ at, ...rest }) => rest), map });
+    check("点击时间只是数字", clicks.every((c) => Number.isFinite(c.at)), clicks);
     check("会话列表收藏图标：标签取外层 title", clicks.some((c) => c.area === "chat_list" && c.label === "收藏" && c.icon === "i.icon.icon-collect"), clicks);
     check("会话列表标星图标：标签取 title，含数字的类名被去掉", clicks.some((c) => c.area === "chat_list" && c.label === "标星" && c.chain.endsWith("i.icon.icon-star")), clicks);
     check("工具栏转移会话：记录按钮与弹窗标题", clicks.some((c) => c.label === "转移会话" && c.opened.includes("转移会话")), clicks);
