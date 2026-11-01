@@ -189,7 +189,7 @@ const ACTION_FIELDS = new Set(
     "target_id targetId target_uid targetUid uid cs_uid csUid mall_id mallId id ids online busy available reason " +
     "star star_type starType is_star isStar color mark mark_type markType is_mark isMark collect is_collect isCollect " +
     "collected favorite is_favorite isFavorite transfer transfer_type transferType server_time serverTime ts timestamp " +
-    // 转移对话框客服列表：只为确认接收人稳定标识与显示名对应哪个字段，仍只记字段名不记值。
+    // 转移对话框客服列表：只为确认第一列“账号名”（接收人身份）与昵称各对应哪个字段，仍只记字段名不记值。
     "csid cs_id csId nickname nick_name nickName username user_name userName name"
   ).split(" "),
 );
@@ -757,7 +757,7 @@ const TRANSFER_ROWS = `(() => {
   });
 })()`;
 
-/** “转移会话”对话框里名称列恰为 target 的唯一行及其唯一“转移”按钮（页面内脚本片段，供下面两个脚本共用）。 */
+/** “转移会话”对话框里第一列“账号名”恰为 target 的唯一行及其唯一“转移”按钮（页面内脚本片段，供下面两个脚本共用）。 */
 function transferTargetSnippet(target: string): string {
   return `
     const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
