@@ -16,6 +16,7 @@ import { dispatchPageClick, type PageClickResult } from "./pddClick.js";
 import { PddMessageWatcher } from "./pddMessageWatcher.js";
 import { popupSweepScript, type PopupSweepMode, type PopupSweepResult } from "./pddPopups.js";
 import { MARKED_LIST_PATH, MARK_REQUEST_PATH, markedListProbe, markRequestProbe, markResponseProbe, type MarkProbeRecord, UNMARK_REQUEST_PATH } from "./markProbe.js";
+import { type AssignEntry, closeRequestProbe, extractAssignEntries, moveRequestProbe, transferProbePath, type TransferProbePath, type TransferProbeRecord, transferResponseProbe } from "./transferProbe.js";
 
 const LOGIN_URL = "https://mms.pinduoduo.com/chat-merchant/index.html";
 
@@ -193,6 +194,8 @@ const ACTION_FIELDS = new Set(
   ).split(" "),
 );
 const ACTION_SCHEMA_DEPTH = 8;
+/** 诊断转移上下文的有效期：转移结果与关闭会话的请求在此之内到达才关联到本次诊断转移。 */
+const TRANSFER_PROBE_CTX_MS = 120_000;
 const ACTION_SCHEMA_NODES = 2000;
 
 /**
@@ -889,6 +892,10 @@ export class PddPageAdapter implements PlatformAdapter {
   private markWatch: MarkWatch | null = null;
   /** 标星进行中：页面与登录归属是否仍是开始时那一个；失效返回原因。 */
   private markCheck: (() => string | null) | null = null;
+  /** 诊断转移（transferTest）的上下文：只供转移取证记录关联用（账号名只在内存里比较，不写盘）。 */
+  private transferProbeCtx: { target: string; epoch: number; startedAt: number; attemptAt: number | null } | null = null;
+  /** 诊断模式下最近一次客服列表（内存中，只用于与转移请求的 csid 比较，不写盘）。 */
+  private assignCache: { epoch: number; at: number; entries: AssignEntry[] } | null = null;
   /** 标星进行中的页面：只认这个页面监听到的标星请求。 */
   private markPage: PlatformPage | null = null;
   /** 页面最近一次发出标星 / 取消收藏请求的本机时间（毫秒），用于点击前静默。 */
@@ -948,6 +955,16 @@ export class PddPageAdapter implements PlatformAdapter {
     const writeMarked = (rec: MarkProbeRecord | null) => {
       if (markedFile && rec) fs.appendFile(markedFile, JSON.stringify({ at: new Date().toISOString(), ...rec }) + "\n", { mode: 0o600 }, () => undefined);
     };
+    const transferFile = this.probeFile?.replace(/requests\.jsonl$/, "transfer-probe.jsonl") ?? null;
+    const writeTransfer = (rec: TransferProbeRecord) => {
+      if (!transferFile) return;
+      const ctx = this.transferProbeCtx;
+      const live = ctx !== null && Date.now() - ctx.startedAt < TRANSFER_PROBE_CTX_MS && ctx.epoch === this.watchEpoch;
+      const extra = { test_running: live, ms_since_attempt: live && ctx.attemptAt !== null ? Date.now() - ctx.attemptAt : null };
+      fs.appendFile(transferFile, JSON.stringify({ at: new Date().toISOString(), ...rec, ...extra }) + "\n", { mode: 0o600 }, () => undefined);
+    };
+    // 转移取证：转移、关闭会话、客服列表三类请求按 CDP requestId 配对（只在诊断模式下记录）。
+    const transferReqs = new Map<string, { kind: TransferProbePath; postData: string | null; epoch: number }>();
     const dbg = win.webContents.debugger;
     // 标星守护期间，页面收到的每条输入事件都须与前台自己的输入命令配对，否则视为人工介入（契约“来源绑定”）。
     win.webContents.on("input-event", (_e, input) => {
@@ -967,6 +984,24 @@ export class PddPageAdapter implements PlatformAdapter {
     };
     dbg.on("message", (_e, method, params: any) => {
       if (method === "Network.requestWillBeSent") {
+        if (transferFile) {
+          try {
+            const tk = transferProbePath(params.request?.url);
+            if (tk) {
+              const postData = typeof params.request.postData === "string" ? params.request.postData : null;
+              const epoch = this.watchEpoch;
+              transferReqs.set(params.requestId, { kind: tk, postData, epoch });
+              if (tk !== "assign") {
+                void this.freshActive(epoch)
+                  .catch(() => null)
+                  .then((uid) => writeTransfer(tk === "move" ? moveRequestProbe(postData, uid, this.transferProbeTarget(epoch), this.assignFor(epoch)) : closeRequestProbe(postData, uid)))
+                  .catch(() => undefined);
+              }
+            }
+          } catch {
+            // 诊断记录失败不得影响消息回调。
+          }
+        }
         const p = probePath(params.request?.url);
         const action = !p && schemaFile ? actionProbePath(params.request?.url) : null;
         if (action) {
@@ -990,6 +1025,20 @@ export class PddPageAdapter implements PlatformAdapter {
             .catch(() => undefined);
         }
       } else if (method === "Network.loadingFinished") {
+        const tr = transferReqs.get(params.requestId);
+        if (tr) {
+          transferReqs.delete(params.requestId);
+          dbg
+            .sendCommand("Network.getResponseBody", { requestId: params.requestId })
+            .then((r: any) => {
+              const body = r.base64Encoded ? null : (r.body as string);
+              if (tr.kind !== "assign") return writeTransfer(transferResponseProbe(tr.kind, body));
+              const entries = extractAssignEntries(body);
+              if (entries) this.assignCache = { epoch: tr.epoch, at: Date.now(), entries };
+              writeTransfer({ kind: "assign_response", parsed: entries !== null, entries: entries?.length ?? 0 });
+            })
+            .catch(() => writeTransfer({ kind: `${tr.kind}_response`, body_unavailable: true }));
+        }
         const action = discovered.get(params.requestId);
         if (action) {
           discovered.delete(params.requestId);
@@ -1041,6 +1090,11 @@ export class PddPageAdapter implements PlatformAdapter {
             if (req.path === MARK_REQUEST_PATH) this.onMarkResponse(params.requestId, null, true, markLost);
           });
       } else if (method === "Network.loadingFailed") {
+        const trFailed = transferReqs.get(params.requestId);
+        if (trFailed) {
+          transferReqs.delete(params.requestId);
+          writeTransfer({ kind: `${trFailed.kind}_response`, load_failed: true });
+        }
         discovered.delete(params.requestId);
         const failed = pending.get(params.requestId);
         this.orders.finished(failed?.buyer ?? null);
@@ -2240,6 +2294,18 @@ export class PddPageAdapter implements PlatformAdapter {
    * 页面代次已不是请求发出时的 sentEpoch（读取前或读取后）、或没有唯一打开的对话时返回 null（未知）。
    * 扫描只能看到读取时刻，不能证明两次读取之间未切换对话，因此不提供“与请求时同一会话”的判断。
    */
+  /** 诊断转移进行中（同一页面代次、开始后 2 分钟内）时返回用户指定的账号名，否则 null。 */
+  private transferProbeTarget(epoch: number): string | null {
+    const ctx = this.transferProbeCtx;
+    return ctx && ctx.epoch === epoch && Date.now() - ctx.startedAt < TRANSFER_PROBE_CTX_MS ? ctx.target : null;
+  }
+
+  /** 同一页面代次、10 分钟内读到的客服列表；否则 null。 */
+  private assignFor(epoch: number): AssignEntry[] | null {
+    const c = this.assignCache;
+    return c && c.epoch === epoch && Date.now() - c.at < 10 * 60_000 ? c.entries : null;
+  }
+
   private async freshActive(sentEpoch: number): Promise<string | null> {
     const scan = this.watchEpoch === sentEpoch ? await this.scanKeepingFresh() : null;
     // 同一对话可同时出现在“待回复”与“全部”列表并都带 active；按买家去重后仍须唯一。
@@ -2481,6 +2547,8 @@ export class PddPageAdapter implements PlatformAdapter {
     if (!target.trim()) return "not_executed:no_target";
     const page = this.window, epoch = this.watchEpoch;
     const log = (rec: Record<string, unknown>) => fs.appendFileSync(path.join(path.dirname(this.probeFile!), "transfer-test.jsonl"), JSON.stringify({ at: new Date().toISOString(), confirm, ...rec }) + "\n", { mode: 0o600 });
+    const ctx = { target, epoch, startedAt: Date.now(), attemptAt: null as number | null };
+    this.transferProbeCtx = ctx;
     const same = async () => this.watchEpoch === epoch && (await this.activeConvToken()) === conv && conv !== null;
     const gate = () => this.actionGate(epoch, conv, exp);
     const close = async () => {
@@ -2546,6 +2614,7 @@ export class PddPageAdapter implements PlatformAdapter {
         return `not_executed:${blocked}`;
       }
       log({ phase: "attempt" });
+      ctx.attemptAt = Date.now();
       const click = await this.nativeClick(ok[0], page, epoch);
       if (click.status !== "dispatched") {
         log({ phase: click.status, reason: click.reason });
