@@ -11,7 +11,7 @@
     instance_id: string;
     session_id: string | null;
     backend: { state: string; detail: string; client_id: string | null };
-    platform: { logged_in: boolean; identity: { platform_shop_id: string; display_name: string } | null; detail: string; identity_ok: boolean; expected: string };
+    platform: { logged_in: boolean; identity: { platform_shop_id: string; display_name: string } | null; detail: string; identity_ok: boolean; expected: string; login_expiry?: string };
     lease: { state: string; generation: number; seconds_left: number; detail: string };
     duplicates: number;
     conversations: Conv[];
@@ -278,7 +278,7 @@
     const leaseValue = v.lease.state === "held" ? `已持有（第 ${v.lease.generation} 代）` : v.lease.state === "busy" ? "被其他客户端占用" : v.lease.state === "error" ? "异常" : "未持有";
     return [
       ["后台连接", backendTone, backendValue, v.backend.state === "ok" ? `客户端 ${v.backend.client_id} · 协议 1.0` : v.backend.detail],
-      ["平台连接", v.platform.logged_in ? "ok" : "warn", v.platform.logged_in ? "已登录" : "未登录", v.platform.detail],
+      ["平台连接", v.platform.logged_in ? "ok" : "warn", v.platform.logged_in ? "已登录" : "未登录", [v.platform.detail, v.platform.login_expiry].filter(Boolean).join("\n")],
       ["店铺身份", idTone, idValue, identity ? `实际：${identity.display_name}（${identity.platform_shop_id}）\n期望：${v.platform.expected}` : `期望平台店铺：${v.platform.expected}`],
       ["发送归属", leaseTone, leaseValue, v.lease.state === "held" ? `剩余约 ${v.lease.seconds_left} 秒 · 每 15 秒续租` : v.lease.detail],
     ];
