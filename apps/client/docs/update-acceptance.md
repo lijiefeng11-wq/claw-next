@@ -34,7 +34,7 @@
 | tag 与提交 | `gh api repos/lijiefeng11-wq/claw-next/git/ref/tags/client-M-<SHA>` | 指向同一个完整 SHA |
 | release 状态 | `gh api repos/lijiefeng11-wq/claw-next/releases/tags/client-M-<SHA>` | 非草稿、预发布，资产恰好两个：`Claw-Next-Client-darwin-arm64.zip` 和同名 `.sha256` |
 | 产生它的 CI | Actions 中 run_number 为 M 的那次运行 | 是 main 的 push 运行，`head_sha` 等于该 SHA，所有 job 成功，Publish job 成功 |
-| 与 CI 产物一致 | 用 REST 接口下载该运行的 `Claw-Next-Client-macOS` 产物，与 release 的 zip 分别 `shasum -a 256` | 两个哈希一致，且等于 `.sha256` 里的值 |
+| 与 CI 产物一致 | 用 REST 接口下载该运行的 `Claw-Next-Client-macOS` 产物。下载到的是外层压缩包，先解开，取出其中的 `Claw-Next-Client-darwin-arm64.zip`，再与 release 的 zip 分别 `shasum -a 256`。不要直接对外层压缩包算哈希 | 两个哈希一致，且等于 `.sha256` 里的值 |
 | 包内构建信息 | 解压 zip，读 `Claw-Next-Client.app/Contents/Resources/build-info.json` | `{sha: 该SHA, run: M, platform: "darwin", arch: "arm64"}` |
 
 证据：上面每一项的命令输出（完整 SHA、run id、两个哈希）。
