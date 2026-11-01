@@ -49,20 +49,27 @@ app.whenReady().then(async () => {
     win.showInactive();
     {
       const { wc, page, adapter } = await pageWith(win);
+      // 从发出忙等的时刻计时：忙等在此之后才开始，持续 3000ms，所以正确实现结束等待时至少已过 3000ms；
+      // 只从清理开始计时会把“发出忙等 → 清理开始”之间的耗时（慢机器上可超过 500ms）算丢。
+      const busyAt = Date.now();
       busy(wc, 3000);
       await sleep(100);
       const epoch = adapter.watchEpoch;
       const sweep = adapter.sweepPopupsOnce(page, "auto");
       const started = Date.now();
       await adapter.yieldWarm();
-      const waited = Date.now() - started;
+      const released = Date.now();
+      const waited = released - started;
+      const sinceBusy = released - busyAt;
       // 发送准备开始：此后页面上不应再出现任何清理点击。
       adapter.sending = true;
       const sendStartedAt = Date.now();
       const r = await sweep;
       await sleep(1500);
       const clicks = await wc.executeJavaScript("window.clicks.slice()");
-      check("渲染进程忙：发送准备等到清理脚本真正结束（不按超时放行）", waited >= 2500 && adapter.popupSweep === null, { waited });
+      // 两条都要满足：忙等真正结束后才放行（距发出忙等≥2900ms，留 100ms 时钟误差）；
+      // 且明显晚于按超时放行的时刻（清理开始后 POPUP_SWEEP_START_MS），超时放行的错误实现两条都过不了。
+      check("渲染进程忙：发送准备等到清理脚本真正结束（不按超时放行）", sinceBusy >= 2900 && waited >= POPUP_SWEEP_START_MS + 300 && adapter.popupSweep === null, { waited, sinceBusy });
       check("迟到的清理脚本过了点击时限：不点击、返回 expired、页面代次不变", r && r.expired === true && r.dismissed.length === 0 && adapter.watchEpoch === epoch, r);
       check("发送准备开始后没有迟到的清理点击", clicks.length === 0 && clicks.every((t) => t < sendStartedAt), { clicks });
       adapter.sending = false;
