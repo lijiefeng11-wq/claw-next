@@ -16,7 +16,7 @@ import { dispatchPageClick, type PageClickResult } from "./pddClick.js";
 import { PddMessageWatcher } from "./pddMessageWatcher.js";
 import { popupSweepScript, type PopupSweepMode, type PopupSweepResult } from "./pddPopups.js";
 import { MARKED_LIST_PATH, MARK_REQUEST_PATH, markedListProbe, markRequestProbe, markResponseProbe, type MarkProbeRecord, UNMARK_REQUEST_PATH } from "./markProbe.js";
-import { type AssignEntry, closeRequestProbe, extractAssignEntries, moveRequestProbe, transferProbePath, type TransferProbePath, type TransferProbeRecord, transferResponseProbe } from "./transferProbe.js";
+import { type AssignCandidates, bindingOf, closeRequestProbe, combineBinding, extractAssignEntries, moveRequestProbe, type TransferBinding, transferProbePath, type TransferProbePath, type TransferProbeRecord, transferResponseProbe } from "./transferProbe.js";
 
 const LOGIN_URL = "https://mms.pinduoduo.com/chat-merchant/index.html";
 
@@ -892,10 +892,11 @@ export class PddPageAdapter implements PlatformAdapter {
   private markWatch: MarkWatch | null = null;
   /** 标星进行中：页面与登录归属是否仍是开始时那一个；失效返回原因。 */
   private markCheck: (() => string | null) | null = null;
-  /** 诊断转移（transferTest）的上下文：只供转移取证记录关联用（账号名只在内存里比较，不写盘）。 */
-  private transferProbeCtx: { target: string; epoch: number; startedAt: number; attemptAt: number | null } | null = null;
-  /** 诊断模式下最近一次客服列表（内存中，只用于与转移请求的 csid 比较，不写盘）。 */
-  private assignCache: { epoch: number; at: number; entries: AssignEntry[] } | null = null;
+  /** 诊断转移（transferTest）的上下文：seq 为本进程内递增的诊断批次序号；账号名只在内存里比较，不写盘。 */
+  private transferProbeCtx: { seq: number; target: string; epoch: number; startedAt: number; attemptAt: number | null } | null = null;
+  private transferDiagSeq = 0;
+  /** 诊断模式下最近一次客服列表候选（内存中，只用于与转移请求的 csid 比较，不写盘）。 */
+  private assignCache: { epoch: number; at: number; candidates: AssignCandidates } | null = null;
   /** 标星进行中的页面：只认这个页面监听到的标星请求。 */
   private markPage: PlatformPage | null = null;
   /** 页面最近一次发出标星 / 取消收藏请求的本机时间（毫秒），用于点击前静默。 */
@@ -956,15 +957,18 @@ export class PddPageAdapter implements PlatformAdapter {
       if (markedFile && rec) fs.appendFile(markedFile, JSON.stringify({ at: new Date().toISOString(), ...rec }) + "\n", { mode: 0o600 }, () => undefined);
     };
     const transferFile = this.probeFile?.replace(/requests\.jsonl$/, "transfer-probe.jsonl") ?? null;
-    const writeTransfer = (rec: TransferProbeRecord) => {
+    // 转移取证：转移、关闭会话、客服列表三类请求按 CDP requestId 配对（只在诊断模式下记录）。请求发出时冻结页面代次、
+    // 诊断批次与尝试时间；日志只写本进程内的匿名请求序号 req_seq（不写 CDP requestId）。
+    type TransferReq = { kind: TransferProbePath; postData: string | null; seq: number; at: number; epoch: number; diag: { seq: number; target: string; attemptAt: number | null } | null };
+    const transferReqs = new Map<string, TransferReq>();
+    let transferReqSeq = 0;
+    const bindingNow = (r: TransferReq): TransferBinding => bindingOf({ epoch: r.epoch, diag: r.diag?.seq ?? null }, { epoch: this.watchEpoch, diag: this.transferProbeCtx?.seq ?? null });
+    const writeTransfer = (r: TransferReq, binding: TransferBinding, rec: TransferProbeRecord) => {
       if (!transferFile) return;
-      const ctx = this.transferProbeCtx;
-      const live = ctx !== null && Date.now() - ctx.startedAt < TRANSFER_PROBE_CTX_MS && ctx.epoch === this.watchEpoch;
-      const extra = { test_running: live, ms_since_attempt: live && ctx.attemptAt !== null ? Date.now() - ctx.attemptAt : null };
+      const bound = binding === "bound" && r.diag !== null;
+      const extra = { req_seq: r.seq, binding, diag_seq: r.diag?.seq ?? null, ms_after_attempt: bound && r.diag!.attemptAt !== null ? r.at - r.diag!.attemptAt : null };
       fs.appendFile(transferFile, JSON.stringify({ at: new Date().toISOString(), ...rec, ...extra }) + "\n", { mode: 0o600 }, () => undefined);
     };
-    // 转移取证：转移、关闭会话、客服列表三类请求按 CDP requestId 配对（只在诊断模式下记录）。
-    const transferReqs = new Map<string, { kind: TransferProbePath; postData: string | null; epoch: number }>();
     const dbg = win.webContents.debugger;
     // 标星守护期间，页面收到的每条输入事件都须与前台自己的输入命令配对，否则视为人工介入（契约“来源绑定”）。
     win.webContents.on("input-event", (_e, input) => {
@@ -990,11 +994,20 @@ export class PddPageAdapter implements PlatformAdapter {
             if (tk) {
               const postData = typeof params.request.postData === "string" ? params.request.postData : null;
               const epoch = this.watchEpoch;
-              transferReqs.set(params.requestId, { kind: tk, postData, epoch });
+              const ctx = this.transferProbeCtx;
+              const live = ctx !== null && ctx.epoch === epoch && Date.now() - ctx.startedAt < TRANSFER_PROBE_CTX_MS;
+              const r: TransferReq = { kind: tk, postData, seq: ++transferReqSeq, at: Date.now(), epoch, diag: live ? { seq: ctx.seq, target: ctx.target, attemptAt: ctx.attemptAt } : null };
+              transferReqs.set(params.requestId, r);
               if (tk !== "assign") {
+                const assign = this.assignFor(epoch);
                 void this.freshActive(epoch)
                   .catch(() => null)
-                  .then((uid) => writeTransfer(tk === "move" ? moveRequestProbe(postData, uid, this.transferProbeTarget(epoch), this.assignFor(epoch)) : closeRequestProbe(postData, uid)))
+                  .then((uid) => {
+                    // 现场读取完成后再核对一次：页面或诊断批次变了，就不关联诊断目标。
+                    const binding = bindingNow(r);
+                    const target = binding === "bound" ? r.diag!.target : null;
+                    writeTransfer(r, binding, tk === "move" ? moveRequestProbe(postData, uid, target, assign) : closeRequestProbe(postData, uid));
+                  })
                   .catch(() => undefined);
               }
             }
@@ -1028,16 +1041,20 @@ export class PddPageAdapter implements PlatformAdapter {
         const tr = transferReqs.get(params.requestId);
         if (tr) {
           transferReqs.delete(params.requestId);
+          const before = bindingNow(tr);
           dbg
             .sendCommand("Network.getResponseBody", { requestId: params.requestId })
             .then((r: any) => {
               const body = r.base64Encoded ? null : (r.body as string);
-              if (tr.kind !== "assign") return writeTransfer(transferResponseProbe(tr.kind, body));
-              const entries = extractAssignEntries(body);
-              if (entries) this.assignCache = { epoch: tr.epoch, at: Date.now(), entries };
-              writeTransfer({ kind: "assign_response", parsed: entries !== null, entries: entries?.length ?? 0 });
+              const binding = combineBinding(before, bindingNow(tr));
+              if (tr.kind !== "assign") return writeTransfer(tr, binding, transferResponseProbe(tr.kind, body));
+              const candidates = extractAssignEntries(body);
+              // 只缓存仍属请求发出时页面代次的列表；页面已变则丢弃。
+              const samePage = tr.epoch === this.watchEpoch;
+              if (candidates && samePage) this.assignCache = { epoch: tr.epoch, at: Date.now(), candidates };
+              writeTransfer(tr, binding, { kind: "assign_response", parsed: candidates !== null, candidates: candidates?.entries.length ?? 0, candidates_complete: candidates ? candidates.complete : null, cached: candidates !== null && samePage });
             })
-            .catch(() => writeTransfer({ kind: `${tr.kind}_response`, body_unavailable: true }));
+            .catch(() => writeTransfer(tr, combineBinding(before, bindingNow(tr)), { kind: `${tr.kind}_response`, body_unavailable: true }));
         }
         const action = discovered.get(params.requestId);
         if (action) {
@@ -1093,7 +1110,7 @@ export class PddPageAdapter implements PlatformAdapter {
         const trFailed = transferReqs.get(params.requestId);
         if (trFailed) {
           transferReqs.delete(params.requestId);
-          writeTransfer({ kind: `${trFailed.kind}_response`, load_failed: true });
+          writeTransfer(trFailed, bindingNow(trFailed), { kind: `${trFailed.kind}_response`, load_failed: true });
         }
         discovered.delete(params.requestId);
         const failed = pending.get(params.requestId);
@@ -2294,16 +2311,10 @@ export class PddPageAdapter implements PlatformAdapter {
    * 页面代次已不是请求发出时的 sentEpoch（读取前或读取后）、或没有唯一打开的对话时返回 null（未知）。
    * 扫描只能看到读取时刻，不能证明两次读取之间未切换对话，因此不提供“与请求时同一会话”的判断。
    */
-  /** 诊断转移进行中（同一页面代次、开始后 2 分钟内）时返回用户指定的账号名，否则 null。 */
-  private transferProbeTarget(epoch: number): string | null {
-    const ctx = this.transferProbeCtx;
-    return ctx && ctx.epoch === epoch && Date.now() - ctx.startedAt < TRANSFER_PROBE_CTX_MS ? ctx.target : null;
-  }
-
-  /** 同一页面代次、10 分钟内读到的客服列表；否则 null。 */
-  private assignFor(epoch: number): AssignEntry[] | null {
+  /** 同一页面代次、10 分钟内读到的客服列表候选；否则 null。 */
+  private assignFor(epoch: number): AssignCandidates | null {
     const c = this.assignCache;
-    return c && c.epoch === epoch && Date.now() - c.at < 10 * 60_000 ? c.entries : null;
+    return c && c.epoch === epoch && Date.now() - c.at < 10 * 60_000 ? c.candidates : null;
   }
 
   private async freshActive(sentEpoch: number): Promise<string | null> {
@@ -2547,7 +2558,7 @@ export class PddPageAdapter implements PlatformAdapter {
     if (!target.trim()) return "not_executed:no_target";
     const page = this.window, epoch = this.watchEpoch;
     const log = (rec: Record<string, unknown>) => fs.appendFileSync(path.join(path.dirname(this.probeFile!), "transfer-test.jsonl"), JSON.stringify({ at: new Date().toISOString(), confirm, ...rec }) + "\n", { mode: 0o600 });
-    const ctx = { target, epoch, startedAt: Date.now(), attemptAt: null as number | null };
+    const ctx = { seq: ++this.transferDiagSeq, target, epoch, startedAt: Date.now(), attemptAt: null as number | null };
     this.transferProbeCtx = ctx;
     const same = async () => this.watchEpoch === epoch && (await this.activeConvToken()) === conv && conv !== null;
     const gate = () => this.actionGate(epoch, conv, exp);
