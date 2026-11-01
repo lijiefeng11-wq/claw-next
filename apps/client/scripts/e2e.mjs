@@ -179,12 +179,15 @@ try {
     await card("店铺身份").getByText("已核验").waitFor();
     await detail.locator(".banner.error", { hasText: "疑似串店" }).waitFor({ state: "detached" });
   });
-  await step("客户端设置：开发运行时两个勾选项不可用，并说明仅打包版可用", async () => {
+  await step("客户端设置：开发运行时两个勾选项不可用，并说明仅打包版可用；检查更新只显示说明", async () => {
     await page.locator("#app-settings summary").click();
     const boxes = page.locator("#app-settings input[type=checkbox]");
     if ((await boxes.count()) !== 2) throw new Error("勾选项数量不对");
     for (let i = 0; i < 2; i++) if (!(await boxes.nth(i).isDisabled())) throw new Error("开发运行时勾选项应不可用");
     await page.locator("#app-settings").getByText(/仅打包后的 Mac \/ Windows/).waitFor();
+    // 检查更新：开发运行没有版本信息，只显示说明，不显示“检查更新”按钮。
+    await page.locator("#app-settings").getByText(/当前版本：开发版（没有版本信息）。只有放在“应用程序”文件夹里的 Mac 正式版本可以检查更新/).waitFor();
+    if (await page.locator("#app-settings button", { hasText: "检查更新" }).count()) throw new Error("开发运行不应显示检查更新按钮");
     await page.locator("#app-settings summary").click();
   });
   await step("店铺栏可收起成窄条并恢复", async () => {

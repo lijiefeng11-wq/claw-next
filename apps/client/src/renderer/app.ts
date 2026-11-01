@@ -19,7 +19,8 @@
   type ShopConfig = { shop_id: string; display_name: string; backend_url: string; platform_shop_id: string; adapter: "mock" | "pdd"; mode: string };
   type ShopEntry = { config: ShopConfig; token_set: boolean; running: boolean; error: string | null; platform: { logged_in: boolean; detail: string; page?: { state: string; gave_up: boolean }; nav?: { on_chat: boolean; can_go_back: boolean } } | null; alert: { level: "error" | "warn"; text: string } | null; view: View | null };
   type Startup = { supported: boolean; platform: string; launch_at_login: boolean; restart_on_crash: boolean; managed: boolean; location_ok?: boolean };
-  type AppState = { app: { secure_storage: boolean; startup?: Startup }; shops: ShopEntry[] };
+  type UpdateView = { supported: boolean; state: string; current: { run: number; sha: string } | null; candidate: { run: number; sha: string } | null; detail: string };
+  type AppState = { app: { secure_storage: boolean; startup?: Startup; update?: UpdateView }; shops: ShopEntry[] };
   type Bridge = { invoke(channel: string, payload?: unknown): Promise<{ ok: boolean; data?: AppState; error?: string }>; onState(cb: (s: AppState) => void): () => void };
 
   const bridge = (window as unknown as { clawNext: Bridge }).clawNext;
@@ -49,6 +50,10 @@
     startup_unsupported: "开机自启与崩溃重启只在打包后的 Mac / Windows 应用中可用",
     startup_apply_failed: "保存启动设置失败，请查看客户端日志",
     startup_needs_applications: "请先把客户端拖到“应用程序”文件夹、从那里打开，再设置开机自启和崩溃重启",
+    update_not_supported: "只有放在“应用程序”文件夹里的 Mac 正式版本可以检查更新",
+    update_not_available: "请先点“检查更新”",
+    update_busy: "正在检查或安装更新，请稍候",
+    update_app_path_unexpected: "客户端安装位置异常，不能自动更新",
   };
 
   const MODES: [string, string, string][] = [
@@ -190,8 +195,26 @@
       option("开机自启", st.launch_at_login, (v) => save({ launch_at_login: v })),
       option("崩溃后自动重启", st.restart_on_crash, (v) => save({ restart_on_crash: v })),
       h("div", { class: misplaced ? "hint error-text" : "hint", text: note }),
+      updateSection(),
     );
     box.replaceChildren(details);
+  }
+
+  /** 检查更新：只在用户点击时检查；安装前再确认一次（主进程弹窗）。 */
+  function updateSection() {
+    const u = state.app.update;
+    if (!u) return null;
+    const current = u.current ? `当前版本：构建 ${u.current.run}（${u.current.sha}）` : "当前版本：开发版（没有版本信息）";
+    if (!u.supported) return h("div", { class: "hint", text: `${current}。只有放在“应用程序”文件夹里的 Mac 正式版本可以检查更新。` });
+    const busy = ["checking", "downloading", "waiting_tasks", "installing", "pending"].includes(u.state);
+    return h(
+      "div",
+      { class: "update-box" },
+      h("div", { class: "hint", text: current }),
+      h("button", { type: "button", disabled: busy, onclick: () => void call("app:checkUpdate") }, u.state === "checking" ? "正在检查…" : "检查更新"),
+      u.state === "available" ? h("button", { type: "button", class: "primary", disabled: busy, onclick: () => void call("app:installUpdate") }, "下载并安装") : null,
+      u.detail ? h("div", { class: u.state === "error" || u.state === "pending" ? "hint error-text" : "hint", text: u.detail }) : null,
+    );
   }
 
   let workspaceTab: "platform" | "records" = "records";

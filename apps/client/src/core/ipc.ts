@@ -19,6 +19,8 @@ export const IPC_CHANNELS = [
   "shop:platformNav",
   "shop:setMode",
   "app:setStartup",
+  "app:checkUpdate",
+  "app:installUpdate",
   "conv:takeover",
   "sim:message",
   "sim:action",
@@ -42,6 +44,7 @@ export type IpcPayload =
   | { channel: "shop:setToken"; shop_id: string; token: string }
   | { channel: "shop:setMode"; shop_id: string; mode: ShopMode }
   | { channel: "app:setStartup"; launch_at_login: boolean; restart_on_crash: boolean }
+  | { channel: "app:checkUpdate" | "app:installUpdate" }
   | { channel: "conv:takeover"; shop_id: string; conversation_id: string; on: boolean }
   | { channel: "sim:message"; shop_id: string; conversation_id: string; content: string; kind: "text" | "image" | "card"; stable_id: boolean }
   | { channel: "sim:action"; shop_id: string; action: SimAction; conversation_id: string | null; value: string | null };
@@ -98,6 +101,8 @@ export function validateIpc(channel: unknown, payload: unknown): IpcPayload {
   const ch = channel as IpcChannel;
   switch (ch) {
     case "state:get":
+    case "app:checkUpdate":
+    case "app:installUpdate":
       if (payload !== undefined && payload !== null) record(payload, []);
       return { channel: ch };
     case "workspace:present": {

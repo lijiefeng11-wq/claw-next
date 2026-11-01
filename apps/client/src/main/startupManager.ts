@@ -74,6 +74,12 @@ export class StartupManager {
     return where === "login" ? path.join(os.homedir(), "Library", "LaunchAgents", `${LAUNCH_AGENT_LABEL}.plist`) : path.join(this.userData, "launchd", `${LAUNCH_AGENT_LABEL}.plist`);
   }
 
+  /** 当前设置对应的任务文件路径（macOS）；不需要任务时为 null。客户端更新后据此重新加载任务。 */
+  agentPlist(): string | null {
+    const where = launchAgentLocation(this.store.get());
+    return where ? this.plistPath(where) : null;
+  }
+
   private domain() {
     return `gui/${os.userInfo().uid}`;
   }
