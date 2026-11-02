@@ -962,7 +962,7 @@
   function policyError(policy) {
     if (!["none", "handoff", "mark", "transfer"].includes(policy.action)) return "请选择处理方式。";
     if (policy.action === "mark" && !["red", "orange", "blue", "green"].includes(policy.color)) return "请选择星标颜色。";
-    if (policy.action === "transfer" && (typeof policy.account !== "string" || !policy.account.trim() || policy.account.trim().length > 40)) return "请填写 1–40 字的客服账号显示名。";
+    if (policy.action === "transfer" && (typeof policy.account !== "string" || !policy.account.trim() || policy.account.trim().length > 40)) return "请填写 1–40 字的接收人账号名。";
     return "";
   }
 
@@ -990,9 +990,9 @@
     } else if (policy.action === "transfer") {
       const account = document.createElement("input");
       account.type = "text";account.maxLength = 40;account.value = policy.account || "";
-      account.placeholder = "例如：主账号（须与平台显示名完全一致）";
+      account.placeholder = "例如：主账号（须与转移框第一列账号名完全一致）";
       account.addEventListener("input", function () { policy.account = account.value;onFormEdit(); });
-      field("接收客服账号", account);
+      field("接收人账号名", account);
       const allow = document.createElement("input");allow.type = "checkbox";allow.checked = policy.allow_unmark === true;
       allow.addEventListener("change", function () { policy.allow_unmark = allow.checked;onFormEdit(); });
       field("遇到已收藏的会话时，允许取消收藏后再转一次", allow);
