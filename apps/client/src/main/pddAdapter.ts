@@ -17,7 +17,7 @@ import { dispatchPageClick, type PageClickResult } from "./pddClick.js";
 import { PddMessageWatcher } from "./pddMessageWatcher.js";
 import { popupSweepScript, type PopupSweepMode, type PopupSweepResult } from "./pddPopups.js";
 import { MARKED_LIST_PATH, MARK_REQUEST_PATH, markedListProbe, markRequestProbe, markResponseProbe, type MarkProbeRecord, UNMARK_REQUEST_PATH } from "./markProbe.js";
-import { type AssignCandidates, bindingOf, closeRequestProbe, combineBinding, extractAssignEntries, moveRequestProbe, type TransferBinding, transferProbePath, type TransferProbePath, type TransferProbeRecord, transferResponseProbe } from "./transferProbe.js";
+import { type AssignCandidates, assignNameProbe, assignTokens, type AssignTokens, bindingOf, closeRequestProbe, combineBinding, extractAssignEntries, mergeAssignCandidates, mergeAssignTokens, moveRequestProbe, type TransferBinding, transferProbePath, type TransferProbePath, type TransferProbeRecord, transferResponseProbe } from "./transferProbe.js";
 
 const LOGIN_URL = "https://mms.pinduoduo.com/chat-merchant/index.html";
 
@@ -896,8 +896,13 @@ export class PddPageAdapter implements PlatformAdapter {
   /** 诊断转移（transferTest）的上下文：seq 为本进程内递增的诊断批次序号；账号名只在内存里比较，不写盘。 */
   private transferProbeCtx: { seq: number; target: string; epoch: number; startedAt: number; attemptAt: number | null } | null = null;
   private transferDiagSeq = 0;
-  /** 诊断模式下最近一次客服列表候选（内存中，只用于与转移请求的 csid 比较，不写盘）。 */
-  private assignCache: { epoch: number; at: number; candidates: AssignCandidates } | null = null;
+  /**
+   * 诊断模式下各客服列表类接口（/latitude/assign/*，按路径区分来源）最近一次结果：候选与键值，只在内存里与转移请求的 csid 比较，不写盘。
+   * at 为该响应对应请求的发出时间（迟到的响应不重新计时）；candidates/tokens 为 null 表示该来源最近一次无法解析或读取失败。
+   */
+  private assignSources = new Map<string, { ord: number; epoch: number; at: number; seq: number; candidates: AssignCandidates | null; tokens: AssignTokens | null }>();
+  /** 来源路径 → 本进程内匿名序号（日志只写序号，便于核对同一来源，不写路径）。 */
+  private assignSourceOrds = new Map<string, number>();
   /** 标星进行中的页面：只认这个页面监听到的标星请求。 */
   private markPage: PlatformPage | null = null;
   /** 页面最近一次发出标星 / 取消收藏请求的本机时间（毫秒），用于点击前静默。 */
@@ -960,7 +965,7 @@ export class PddPageAdapter implements PlatformAdapter {
     const transferFile = this.probeFile?.replace(/requests\.jsonl$/, "transfer-probe.jsonl") ?? null;
     // 转移取证：转移、关闭会话、客服列表三类请求按 CDP requestId 配对（只在诊断模式下记录）。请求发出时冻结页面代次、
     // 诊断批次与尝试时间；日志只写本进程内的匿名请求序号 req_seq（不写 CDP requestId）。
-    type TransferReq = { kind: TransferProbePath; postData: string | null; seq: number; at: number; epoch: number; diag: { seq: number; target: string; attemptAt: number | null } | null };
+    type TransferReq = { kind: TransferProbePath; source: string | null; postData: string | null; seq: number; at: number; epoch: number; diag: { seq: number; target: string; attemptAt: number | null } | null };
     const transferReqs = new Map<string, TransferReq>();
     let transferReqSeq = 0;
     const bindingNow = (r: TransferReq): TransferBinding => bindingOf({ epoch: r.epoch, diag: r.diag?.seq ?? null }, { epoch: this.watchEpoch, diag: this.transferProbeCtx?.seq ?? null });
@@ -997,17 +1002,20 @@ export class PddPageAdapter implements PlatformAdapter {
               const epoch = this.watchEpoch;
               const ctx = this.transferProbeCtx;
               const live = ctx !== null && ctx.epoch === epoch && Date.now() - ctx.startedAt < TRANSFER_PROBE_CTX_MS;
-              const r: TransferReq = { kind: tk, postData, seq: ++transferReqSeq, at: Date.now(), epoch, diag: live ? { seq: ctx.seq, target: ctx.target, attemptAt: ctx.attemptAt } : null };
+              const source = tk === "assign" ? new URL(params.request.url).pathname : null;
+              const r: TransferReq = { kind: tk, source, postData, seq: ++transferReqSeq, at: Date.now(), epoch, diag: live ? { seq: ctx.seq, target: ctx.target, attemptAt: ctx.attemptAt } : null };
               transferReqs.set(params.requestId, r);
               if (tk !== "assign") {
                 const assign = this.assignFor(epoch);
+                const tokens = this.assignTokensFor(epoch);
+                const sources = this.liveAssignSources(epoch).length;
                 void this.freshActive(epoch)
                   .catch(() => null)
                   .then((uid) => {
                     // 现场读取完成后再核对一次：页面或诊断批次变了，就不关联诊断目标。
                     const binding = bindingNow(r);
                     const target = binding === "bound" ? r.diag!.target : null;
-                    writeTransfer(r, binding, tk === "move" ? moveRequestProbe(postData, uid, target, assign) : closeRequestProbe(postData, uid));
+                    writeTransfer(r, binding, tk === "move" ? { ...moveRequestProbe(postData, uid, target, assign, tokens), assign_sources: sources } : closeRequestProbe(postData, uid));
                   })
                   .catch(() => undefined);
               }
@@ -1050,12 +1058,16 @@ export class PddPageAdapter implements PlatformAdapter {
               const binding = combineBinding(before, bindingNow(tr));
               if (tr.kind !== "assign") return writeTransfer(tr, binding, transferResponseProbe(tr.kind, body));
               const candidates = extractAssignEntries(body);
-              // 只缓存仍属请求发出时页面代次的列表；页面已变则丢弃。
-              const samePage = tr.epoch === this.watchEpoch;
-              if (candidates && samePage) this.assignCache = { epoch: tr.epoch, at: Date.now(), candidates };
-              writeTransfer(tr, binding, { kind: "assign_response", parsed: candidates !== null, candidates: candidates?.entries.length ?? 0, candidates_complete: candidates ? candidates.complete : null, cached: candidates !== null && samePage });
+              const tokens = assignTokens(body);
+              // 按来源记下最新结果：同一来源的空列表、无法解析的响应同样覆盖旧结果（旧的肯定结论随之失效）；页面已变或更旧的响应不采用。
+              const { cached, ord } = this.recordAssignSource(tr, candidates, tokens);
+              const target = binding === "bound" && tr.diag ? tr.diag.target : null;
+              writeTransfer(tr, binding, { kind: "assign_response", parsed: candidates !== null, candidates: candidates?.entries.length ?? 0, candidates_complete: candidates ? candidates.complete : null, cached, source_ord: ord, ...assignNameProbe(candidates, target) });
             })
-            .catch(() => writeTransfer(tr, combineBinding(before, bindingNow(tr)), { kind: `${tr.kind}_response`, body_unavailable: true }));
+            .catch(() => {
+              const src = tr.kind === "assign" ? this.recordAssignSource(tr, null, null) : null;
+              writeTransfer(tr, combineBinding(before, bindingNow(tr)), { kind: `${tr.kind}_response`, body_unavailable: true, ...(src ? { cached: src.cached, source_ord: src.ord } : {}) });
+            });
         }
         const action = discovered.get(params.requestId);
         if (action) {
@@ -1111,7 +1123,8 @@ export class PddPageAdapter implements PlatformAdapter {
         const trFailed = transferReqs.get(params.requestId);
         if (trFailed) {
           transferReqs.delete(params.requestId);
-          writeTransfer(trFailed, bindingNow(trFailed), { kind: `${trFailed.kind}_response`, load_failed: true });
+          const src = trFailed.kind === "assign" ? this.recordAssignSource(trFailed, null, null) : null;
+          writeTransfer(trFailed, bindingNow(trFailed), { kind: `${trFailed.kind}_response`, load_failed: true, ...(src ? { cached: src.cached, source_ord: src.ord } : {}) });
         }
         discovered.delete(params.requestId);
         const failed = pending.get(params.requestId);
@@ -2355,16 +2368,48 @@ export class PddPageAdapter implements PlatformAdapter {
   }
 
   /**
+   * 记下某个客服列表来源的最新结果。只采用仍属当前页面代次、且不比已记录的更旧（请求序号）的响应；
+   * 空列表、无法解析（null）或读取失败同样覆盖该来源的旧结果。返回是否采用与来源匿名序号。
+   */
+  private recordAssignSource(r: { source: string | null; epoch: number; at: number; seq: number }, candidates: AssignCandidates | null, tokens: AssignTokens | null): { cached: boolean; ord: number | null } {
+    if (r.source === null) return { cached: false, ord: null };
+    let ord = this.assignSourceOrds.get(r.source);
+    if (ord === undefined) {
+      ord = this.assignSourceOrds.size + 1;
+      this.assignSourceOrds.set(r.source, ord);
+    }
+    if (r.epoch !== this.watchEpoch) return { cached: false, ord };
+    const prev = this.assignSources.get(r.source);
+    if (prev && prev.epoch === r.epoch && prev.seq > r.seq) return { cached: false, ord };
+    for (const [k, v] of this.assignSources) if (v.epoch !== r.epoch) this.assignSources.delete(k);
+    this.assignSources.set(r.source, { ord, epoch: r.epoch, at: r.at, seq: r.seq, candidates, tokens });
+    return { cached: true, ord };
+  }
+
+  /** 同一页面代次、各自请求发出后 10 分钟内的来源（按各来源自己的时间过期，别的来源的新响应不给它续期）。 */
+  private liveAssignSources(epoch: number) {
+    const now = Date.now();
+    return [...this.assignSources.values()].filter((v) => v.epoch === epoch && now - v.at < 10 * 60_000);
+  }
+
+  /** 各有效来源的候选合并；任一来源不完整或无法解析则不完整；没有可解析的来源为 null。 */
+  private assignFor(epoch: number): AssignCandidates | null {
+    return mergeAssignCandidates(this.liveAssignSources(epoch).map((v) => v.candidates));
+  }
+
+  /** 各有效来源键值的并集；任一来源不完整或无法解析则不完整；没有可解析的来源为 null。 */
+  private assignTokensFor(epoch: number): AssignTokens | null {
+    const live = this.liveAssignSources(epoch);
+    const parsed = live.map((v) => v.tokens).filter((t): t is AssignTokens => t !== null);
+    const merged = parsed.reduce<AssignTokens | null>((acc, t) => mergeAssignTokens(acc, t), null);
+    return merged && parsed.length < live.length ? { ...merged, complete: false } : merged;
+  }
+
+  /**
    * 现场读取唯一打开对话的买家编号（不用扫描缓存 lastActiveUid）。
    * 页面代次已不是请求发出时的 sentEpoch（读取前或读取后）、或没有唯一打开的对话时返回 null（未知）。
    * 扫描只能看到读取时刻，不能证明两次读取之间未切换对话，因此不提供“与请求时同一会话”的判断。
    */
-  /** 同一页面代次、10 分钟内读到的客服列表候选；否则 null。 */
-  private assignFor(epoch: number): AssignCandidates | null {
-    const c = this.assignCache;
-    return c && c.epoch === epoch && Date.now() - c.at < 10 * 60_000 ? c.candidates : null;
-  }
-
   private async freshActive(sentEpoch: number): Promise<string | null> {
     const scan = this.watchEpoch === sentEpoch ? await this.scanKeepingFresh() : null;
     // 同一对话可同时出现在“待回复”与“全部”列表并都带 active；按买家去重后仍须唯一。

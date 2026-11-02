@@ -67,6 +67,7 @@ function harness(probe: boolean) {
     dbg.emit("message", {}, "Network.requestWillBeSent", { requestId: id, request: { url: URL_BASE + p, postData } });
   };
   const finish = (id: string) => dbg.emit("message", {}, "Network.loadingFinished", { requestId: id });
+  const fail = (id: string) => dbg.emit("message", {}, "Network.loadingFailed", { requestId: id });
   const lines = () => (fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
   const records = async (n: number) => (await wait(() => lines().length >= n), lines());
   const diag = (seq: number, attemptAgoMs: number | null = 50) => {
@@ -76,7 +77,7 @@ function harness(probe: boolean) {
     hold.delete(id);
     for (const r of held.get(id) ?? []) r();
   };
-  return { adapter, request, finish, records, file, scans, hold, release, diag, bodyReads: () => bodyReads };
+  return { adapter, request, finish, fail, records, file, scans, hold, release, diag, bodyReads: () => bodyReads };
 }
 
 test("对照：诊断进行中、页面未变——bound，关联账号名与尝试时间；日志只有匿名序号，不含编号与名称", async () => {
@@ -157,6 +158,133 @@ test("页面已变后才到的客服列表不缓存，后续转移请求不拿�
   h.request("m", MOVE, moveBody, okBody);
   const move = (await h.records(2)).find((r) => r.kind === "move_request");
   assert.deepEqual([move.candidates_known, move.candidates], [false, 0]);
+});
+
+test("csid 是客服列表映射的键：转移请求记录命中父级键与键值并集；另一个来源没有候选，不影响这个来源的候选", async () => {
+  const h = harness(true);
+  h.diag(1);
+  const mapBody = JSON.stringify({ success: true, result: { csMap: { [CSID]: { id: 7788, username: NAME, nickname: "小王" } }, total: 1 } });
+  const otherBody = JSON.stringify({ success: true, result: { groups: { g1: { id: 5, label: "分组甲" } } } });
+  h.request("a1", ASSIGN, "{}", mapBody);
+  h.finish("a1");
+  await h.records(1);
+  h.request("a2", "/latitude/assign/getCsGroup", "{}", otherBody);
+  h.finish("a2");
+  await h.records(2);
+  h.scans.push({ items: only(A) });
+  h.request("m", MOVE, moveBody, okBody);
+  h.finish("m");
+  const recs = await h.records(4);
+  const assigns = recs.filter((r) => r.kind === "assign_response");
+  const withList = assigns.find((r) => r.candidates === 1);
+  const without = assigns.find((r) => r.candidates === 0);
+  assert.deepEqual([withList.cached, withList.target_known, withList.candidate_name_eq_username, withList.candidate_name_eq_nickname], [true, true, 1, 0]);
+  assert.deepEqual([without.cached, without.candidate_name_eq_username], [true, 0]);
+  assert.deepEqual([withList.source_ord, without.source_ord], [1, 2]);
+  const move = recs.find((r) => r.kind === "move_request");
+  assert.deepEqual(
+    [move.binding, move.candidates, move.csid_eq_candidate_id_any, move.csid_eq_candidate_parent_key_any, move.csid_eq_parent_key_of_username_candidate, move.csid_other_field_names, move.assign_sources],
+    ["bound", 1, false, true, true, 0, 2],
+  );
+  assert.deepEqual([move.tokens_known, move.tokens_complete, move.csid_in_assign_keys, move.csid_in_assign_values], [true, true, true, false]);
+  const text = fs.readFileSync(h.file, "utf8");
+  for (const s of [A, CSID, NAME, "小王", "7788", "分组甲", "csMap", "g1"]) assert.ok(!text.includes(s), `日志不得含 ${s}`);
+});
+
+test("复审反例：同一来源先返回一个候选、再返回完整空列表——旧候选失效，不再给肯定比较", async () => {
+  const h = harness(true);
+  h.diag(1);
+  h.request("a1", ASSIGN, "{}", assignBody);
+  h.finish("a1");
+  await h.records(1);
+  h.request("a2", ASSIGN, "{}", JSON.stringify({ result: { list: [] } }));
+  h.finish("a2");
+  await h.records(2);
+  h.scans.push({ items: only(A) });
+  h.request("m", MOVE, moveBody, okBody);
+  const recs = await h.records(3);
+  const assigns = recs.filter((r) => r.kind === "assign_response");
+  assert.deepEqual(assigns.map((r) => [r.candidates, r.cached, r.source_ord]), [[1, true, 1], [0, true, 1]]);
+  const move = recs.find((r) => r.kind === "move_request");
+  assert.deepEqual([move.candidates, move.candidates_complete, move.csid_eq_candidate_id_any, move.csid_eq_id_of_username_candidate], [0, true, false, null]);
+});
+
+test("复审反例：同一来源较早的请求晚到，不覆盖较新的结果；读取失败使该来源的旧结果失效", async () => {
+  const h = harness(true);
+  h.diag(1);
+  h.hold.add("old");
+  h.request("old", ASSIGN, "{}", assignBody);
+  h.finish("old");
+  h.request("new", ASSIGN, "{}", JSON.stringify({ result: { list: [] } }));
+  h.finish("new");
+  await h.records(1);
+  h.release("old");
+  const assigns = (await h.records(2)).filter((r) => r.kind === "assign_response");
+  assert.deepEqual(assigns.find((r) => r.candidates === 1)?.cached, false);
+  h.scans.push({ items: only(A) });
+  h.request("m1", MOVE, moveBody, okBody);
+  const m1 = (await h.records(3)).find((r) => r.kind === "move_request");
+  assert.deepEqual([m1.candidates, m1.csid_eq_candidate_id_any], [0, false]);
+  h.request("a3", ASSIGN, "{}", assignBody);
+  h.finish("a3");
+  await h.records(4);
+  h.request("a4", ASSIGN, "{}", assignBody);
+  h.fail("a4");
+  const failed = (await h.records(5)).find((r) => r.load_failed);
+  assert.deepEqual([failed.cached, failed.source_ord], [true, 1]);
+  h.scans.push({ items: only(A) });
+  h.request("m2", MOVE, moveBody, okBody);
+  const m2 = (await h.records(6)).filter((r) => r.kind === "move_request")[1];
+  assert.deepEqual([m2.candidates_known, m2.csid_eq_candidate_id_any, m2.tokens_known, m2.csid_in_assign_values, m2.assign_sources], [false, null, false, null, 1]);
+});
+
+test("复审反例：键值按各来源自己的请求时间过期——别的来源的新响应、迟到的响应都不续期", async () => {
+  const realNow = Date.now;
+  let now = realNow();
+  Date.now = () => now;
+  try {
+    const withCsid = JSON.stringify({ result: { list: [{ id: 1, username: "其他", key: CSID }] } });
+    const unrelated = JSON.stringify({ result: { groups: { g1: { label: "分组甲" } } } });
+    // 1) 来源 A 含 csid；9 分钟后来源 B 只有无关值；11 分钟时转移：A 已过期，只剩 B，比较只看 B。
+    const h = harness(true);
+    h.request("a", ASSIGN, "{}", withCsid);
+    h.finish("a");
+    await h.records(1);
+    now += 9 * 60_000;
+    h.request("b", "/latitude/assign/getCsGroup", "{}", unrelated);
+    h.finish("b");
+    await h.records(2);
+    now += 2 * 60_000;
+    h.scans.push({ items: only(A) });
+    h.request("m", MOVE, moveBody, okBody);
+    const m = (await h.records(3)).find((r) => r.kind === "move_request");
+    assert.deepEqual([m.assign_sources, m.tokens_known, m.tokens_complete, m.csid_in_assign_values], [1, true, true, false]);
+    // 2) 对照：没有中间响应，11 分钟时全部过期为未知。
+    const c = harness(true);
+    c.request("a", ASSIGN, "{}", withCsid);
+    c.finish("a");
+    await c.records(1);
+    now += 11 * 60_000;
+    c.scans.push({ items: only(A) });
+    c.request("m", MOVE, moveBody, okBody);
+    const cm = (await c.records(2)).find((r) => r.kind === "move_request");
+    assert.deepEqual([cm.assign_sources, cm.tokens_known, cm.csid_in_assign_values, cm.candidates_known], [0, false, null, false]);
+    // 3) 迟到：请求发出 9 分钟后响应才到，按请求时间计时，再过 2 分钟即过期。
+    const l = harness(true);
+    l.hold.add("a");
+    l.request("a", ASSIGN, "{}", withCsid);
+    l.finish("a");
+    now += 9 * 60_000;
+    l.release("a");
+    await l.records(1);
+    now += 2 * 60_000;
+    l.scans.push({ items: only(A) });
+    l.request("m", MOVE, moveBody, okBody);
+    const lm = (await l.records(2)).find((r) => r.kind === "move_request");
+    assert.deepEqual([lm.assign_sources, lm.tokens_known, lm.csid_in_assign_values], [0, false, null]);
+  } finally {
+    Date.now = realNow;
+  }
 });
 
 test("诊断模式关闭：不写文件，读取与改动前完全相同（转移接口在原有 /plateau/chat/ 观察范围内本就读一次，客服列表不读）", async () => {

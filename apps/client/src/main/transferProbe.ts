@@ -7,6 +7,7 @@
  * 客服列表只在内存里用于比较，不写盘。本模块不参与任何收发或转移判定。
  * 客服列表接口的路径与结构都未核实：按前缀匹配、按字段名在整棵 JSON 里找到的对象一律只是“候选”，
  * 输出字段以 candidate 命名，只作取证观察，不能据此认定已核实的客服列表或接收人对应。
+ * 父级键、其他字段与 tokens 只在内存中用于比较，不写盘、不输出。
  */
 
 export const MOVE_PATH = "/plateau/chat/move_conversation";
@@ -42,21 +43,51 @@ function parse(text: string | null): unknown {
   }
 }
 
-/** 客服列表候选里的一项：只保留比较需要的四个字段（内存中，不写盘）。 */
-export type AssignEntry = { id: unknown; csid: unknown; username: unknown; nickname: unknown };
+/** 客服列表候选里的一项：编号与名称字段用于比较；parentKey、others 只在内存里用于比较，永不输出。 */
+export type AssignEntry = {
+  id: unknown;
+  csid: unknown;
+  username: unknown;
+  nickname: unknown;
+  /** 候选作为普通对象属性值时所在的键；在数组里或在根上为 null。 */
+  parentKey: string | null;
+  /** 候选自身的其他字段：键不在 ID_KEYS / NAME_KEYS 里、值为非空字符串或有限数字；每项最多 40 条。 */
+  others: Array<{ key: string; value: string }>;
+};
 /** complete=false：层数、节点或项数预算耗尽，列表可能不全，不能据此判断“唯一”或“不存在”。 */
 export type AssignCandidates = { entries: AssignEntry[]; complete: boolean };
 
 const ASSIGN_MAX_DEPTH = 8;
 const ASSIGN_MAX_NODES = 5000;
 const ASSIGN_MAX_ENTRIES = 500;
+/** 每个候选最多保留的其他字段数；超出即把整体记为不完整（与其它预算耗尽一致）。 */
+const ASSIGN_MAX_OTHERS = 40;
+/** tokens 里键与值各自的条目上限。 */
+const TOKENS_MAX = 5000;
+/** 只收集长度不超过该值的字符串值。 */
+const TOKEN_VALUE_MAX_LEN = 200;
 
 const ID_KEYS = ["id", "csid", "cs_id", "csId"];
 const NAME_KEYS = ["username", "user_name", "userName", "nickname", "nick_name", "nickName"];
 
+/** 候选自身直接字段里的其他字段：只收非空字符串与有限数字（数字转字符串）；只在内存里比较，不输出。 */
+function otherFieldsOf(v: Record<string, unknown>): Array<{ key: string; value: string }> {
+  const out: Array<{ key: string; value: string }> = [];
+  for (const [k, x] of Object.entries(v)) {
+    if (ID_KEYS.includes(k) || NAME_KEYS.includes(k)) continue;
+    if (typeof x === "string") {
+      if (x !== "") out.push({ key: k, value: x });
+    } else if (typeof x === "number" && Number.isFinite(x)) {
+      out.push({ key: k, value: String(x) });
+    }
+  }
+  return out;
+}
+
 /**
  * 从客服列表响应里找出候选对象：同时带编号字段（id/csid）与名称字段（username/nickname）。
  * 结构未核实，所以按字段名在整棵 JSON 里找；任一预算耗尽即记为不完整（不静默返回部分结果当作全部）。
+ * 同时记下候选所在的父级键（在数组里为 null）与自身的其他字段（只在内存里比较，永不输出）。
  */
 export function extractAssignEntries(text: string | null): AssignCandidates | null {
   const body = parse(text);
@@ -64,7 +95,7 @@ export function extractAssignEntries(text: string | null): AssignCandidates | nu
   const out: AssignEntry[] = [];
   let nodes = 0;
   let complete = true;
-  const walk = (v: unknown, depth: number) => {
+  const walk = (v: unknown, depth: number, key: string | null) => {
     if (!complete) return;
     if (v === null || typeof v !== "object") return;
     if (depth > ASSIGN_MAX_DEPTH || ++nodes > ASSIGN_MAX_NODES) {
@@ -72,7 +103,7 @@ export function extractAssignEntries(text: string | null): AssignCandidates | nu
       return;
     }
     if (Array.isArray(v)) {
-      for (const x of v) walk(x, depth + 1);
+      for (const x of v) walk(x, depth + 1, null);
       return;
     }
     if (!plain(v)) return;
@@ -81,17 +112,129 @@ export function extractAssignEntries(text: string | null): AssignCandidates | nu
         complete = false;
         return;
       }
+      const all = otherFieldsOf(v);
       out.push({
         id: v.id,
         csid: v.csid ?? v.cs_id ?? v.csId,
         username: v.username ?? v.user_name ?? v.userName,
         nickname: v.nickname ?? v.nick_name ?? v.nickName,
+        parentKey: key,
+        others: all.slice(0, ASSIGN_MAX_OTHERS),
       });
+      if (all.length > ASSIGN_MAX_OTHERS) {
+        complete = false;
+        return;
+      }
     }
-    for (const x of Object.values(v)) walk(x, depth + 1);
+    for (const [k, x] of Object.entries(v)) walk(x, depth + 1, k);
+  };
+  walk(body, 0, null);
+  return { entries: out, complete };
+}
+
+/** 客服列表响应里所有存在的键与字符串/数字值（只在内存里比较 csid 是否出现，不输出）。 */
+export type AssignTokens = { keys: Set<string>; values: Set<string>; complete: boolean };
+
+/**
+ * 收集整棵客服列表 JSON 里的键与非空字符串值（长度 ≤ 200）/有限数字值（转字符串）。
+ * 层数、节点、条目预算耗尽即 complete=false 并停止收集；解析失败返回 null。
+ */
+export function assignTokens(text: string | null): AssignTokens | null {
+  const body = parse(text);
+  if (body === undefined) return null;
+  const keys = new Set<string>();
+  const values = new Set<string>();
+  let nodes = 0;
+  let complete = true;
+  const addKey = (k: string) => {
+    if (k === "" || keys.has(k)) return;
+    if (keys.size >= TOKENS_MAX) {
+      complete = false;
+      return;
+    }
+    keys.add(k);
+  };
+  const addValue = (v: string) => {
+    if (v === "" || values.has(v)) return;
+    // 超长值不收集：明确记为不完整，避免把“没收集”当成“不存在”。
+    if (v.length > TOKEN_VALUE_MAX_LEN) {
+      complete = false;
+      return;
+    }
+    if (values.size >= TOKENS_MAX) {
+      complete = false;
+      return;
+    }
+    values.add(v);
+  };
+  const walk = (v: unknown, depth: number) => {
+    if (!complete) return;
+    if (typeof v === "string") {
+      addValue(v);
+      return;
+    }
+    if (typeof v === "number") {
+      if (Number.isFinite(v)) addValue(String(v));
+      return;
+    }
+    if (v === null || typeof v !== "object") return;
+    if (depth > ASSIGN_MAX_DEPTH || ++nodes > ASSIGN_MAX_NODES) {
+      complete = false;
+      return;
+    }
+    if (Array.isArray(v)) {
+      for (const x of v) {
+        if (!complete) return;
+        walk(x, depth + 1);
+      }
+      return;
+    }
+    if (!plain(v)) return;
+    for (const [k, x] of Object.entries(v)) {
+      if (!complete) return;
+      addKey(k);
+      if (!complete) return;
+      walk(x, depth + 1);
+    }
   };
   walk(body, 0);
-  return { entries: out, complete };
+  return { keys, values, complete };
+}
+
+/** 合并两份 tokens：一方为 null 返回另一方；否则返回并集新对象（不修改入参），并集超限记不完整。 */
+export function mergeAssignTokens(a: AssignTokens | null, b: AssignTokens | null): AssignTokens | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  const keys = new Set<string>(a.keys);
+  const values = new Set<string>(a.values);
+  let complete = a.complete && b.complete;
+  for (const k of b.keys) {
+    if (keys.has(k)) continue;
+    if (keys.size >= TOKENS_MAX) {
+      complete = false;
+      break;
+    }
+    keys.add(k);
+  }
+  for (const v of b.values) {
+    if (values.has(v)) continue;
+    if (values.size >= TOKENS_MAX) {
+      complete = false;
+      break;
+    }
+    values.add(v);
+  }
+  return { keys, values, complete };
+}
+
+/**
+ * 多个来源（不同客服列表接口）各自最新的候选合并：任一来源不完整或无法解析（null）则整体不完整；
+ * 没有任何可解析的来源返回 null。同名候选出现在多个来源时，“唯一命中”类比较自然给 null（不挑其中一个）。
+ */
+export function mergeAssignCandidates(sources: readonly (AssignCandidates | null)[]): AssignCandidates | null {
+  const parsed = sources.filter((c): c is AssignCandidates => c !== null);
+  if (!parsed.length) return null;
+  return { entries: parsed.flatMap((c) => c.entries), complete: parsed.length === sources.length && parsed.every((c) => c.complete) };
 }
 
 export type TransferProbeRecord = Record<string, boolean | number | string | null>;
@@ -110,11 +253,29 @@ const nameIs = (v: unknown, target: string) => typeof v === "string" && v.trim()
 const anyOrUnknown = (found: boolean, complete: boolean): boolean | null => (found ? true : complete ? false : null);
 
 /**
+ * 值等于 csid 的“其他字段”有几个不同键名：只输出个数（封闭分类），不输出键名——键名可能是动态的身份标识，
+ * 字母格式不能证明它是已核实的静态字段。没比较条件（无 csid / 无列表）为 null；没找到且列表不完整为 null。
+ */
+function otherFieldNamesOf(assign: AssignCandidates | null, csidStr: string | null): number | null {
+  if (assign === null || csidStr === null) return null;
+  const names = new Set<string>();
+  for (const e of assign.entries) for (const o of e.others) if (o.value === csidStr) names.add(o.key);
+  return names.size === 0 && !assign.complete ? null : names.size;
+}
+
+/**
  * 页面自己发出的转移请求：目标是否为当前会话；csid 与客服列表候选的对应关系。
  * target 为请求发出时已绑定的本次诊断转移的账号名（对话框第一列原文）；未绑定（店主手动转移、诊断已失效）为 null。
  * “唯一命中”类字段只在列表完整、且恰好命中一项时给出布尔，否则 null。
+ * tokens 为客服列表响应里出现过的键/值（可选）：只判 csid 是否作为键或值出现过，不输出任何原文。
  */
-export function moveRequestProbe(postData: string | null, active: string | null, target: string | null, assign: AssignCandidates | null): TransferProbeRecord {
+export function moveRequestProbe(
+  postData: string | null,
+  active: string | null,
+  target: string | null,
+  assign: AssignCandidates | null,
+  tokens: AssignTokens | null = null,
+): TransferProbeRecord {
   const body = parse(postData);
   const data = plain(body) && plain(body.data) ? body.data : null;
   const conv = data && plain(data.conversation) ? data.conversation : null;
@@ -125,6 +286,14 @@ export function moveRequestProbe(postData: string | null, active: string | null,
   const byNick = target === null ? [] : list.filter((e) => nameIs(e.nickname, target));
   const one = (xs: AssignEntry[], f: (e: AssignEntry) => boolean): boolean | null => (complete && xs.length === 1 ? f(xs[0]) : null);
   const any = (f: (e: AssignEntry) => boolean): boolean | null => (assign === null ? null : anyOrUnknown(list.some(f), complete));
+  const csidStr = typeof csid === "string" && csid !== "" ? csid : null;
+  const parentHit = (e: AssignEntry) => csidStr !== null && e.parentKey === csidStr;
+  const otherHit = (e: AssignEntry) => csidStr !== null && e.others.some((o) => o.value === csidStr);
+  const tokenIn = (pick: (t: AssignTokens) => Set<string>): boolean | null => {
+    if (tokens === null || csidStr === null) return null;
+    const set = pick(tokens);
+    return set.has(csidStr) ? true : tokens.complete ? false : null;
+  };
   return {
     kind: "move_request",
     parsed: conv !== null,
@@ -149,6 +318,17 @@ export function moveRequestProbe(postData: string | null, active: string | null,
     csid_loose_eq_id_of_username_candidate: one(byUser, (e) => looseEq(csid, e.id)),
     csid_eq_id_of_nickname_candidate: one(byNick, (e) => strictEq(csid, e.id)),
     csid_loose_eq_id_of_nickname_candidate: one(byNick, (e) => looseEq(csid, e.id)),
+    csid_eq_candidate_parent_key_any: any(parentHit),
+    csid_eq_candidate_other_field_any: any(otherHit),
+    csid_other_field_names: otherFieldNamesOf(assign, csidStr),
+    csid_eq_parent_key_of_username_candidate: one(byUser, parentHit),
+    csid_eq_parent_key_of_nickname_candidate: one(byNick, parentHit),
+    csid_eq_other_field_of_username_candidate: one(byUser, otherHit),
+    csid_eq_other_field_of_nickname_candidate: one(byNick, otherHit),
+    tokens_known: tokens !== null,
+    tokens_complete: tokens === null ? null : tokens.complete,
+    csid_in_assign_keys: tokenIn((t) => t.keys),
+    csid_in_assign_values: tokenIn((t) => t.values),
   };
 }
 
@@ -228,4 +408,38 @@ export function bindingOf(frozen: { epoch: number; diag: number | null }, now: {
 export function combineBinding(before: TransferBinding, after: TransferBinding): TransferBinding {
   if (before === "unbound" || after === "unbound") return "unbound";
   return before === "bound" && after === "bound" ? "bound" : "stale";
+}
+
+/**
+ * 诊断目标账号名在客服列表候选里的命中统计：username、nickname、其他字段分别计数。
+ * 目标或列表缺失时计数为 null；只输出计数与 complete，不含任何原文。
+ */
+export function assignNameProbe(assign: AssignCandidates | null, target: string | null): TransferProbeRecord {
+  if (assign === null) {
+    return {
+      target_known: target !== null,
+      candidate_name_eq_username: null,
+      candidate_name_eq_nickname: null,
+      candidate_name_eq_other_field: null,
+      candidate_names_complete: null,
+    };
+  }
+  if (target === null) {
+    return {
+      target_known: false,
+      candidate_name_eq_username: null,
+      candidate_name_eq_nickname: null,
+      candidate_name_eq_other_field: null,
+      candidate_names_complete: assign.complete,
+    };
+  }
+  const t = target;
+  const list = assign.entries;
+  return {
+    target_known: true,
+    candidate_name_eq_username: list.filter((e) => nameIs(e.username, t)).length,
+    candidate_name_eq_nickname: list.filter((e) => nameIs(e.nickname, t)).length,
+    candidate_name_eq_other_field: list.filter((e) => e.others.some((o) => o.value.trim() === t)).length,
+    candidate_names_complete: assign.complete,
+  };
 }
