@@ -155,7 +155,12 @@ export function assignTokens(text: string | null): AssignTokens | null {
     keys.add(k);
   };
   const addValue = (v: string) => {
-    if (v === "" || v.length > TOKEN_VALUE_MAX_LEN || values.has(v)) return;
+    if (v === "" || values.has(v)) return;
+    // 超长值不收集：明确记为不完整，避免把“没收集”当成“不存在”。
+    if (v.length > TOKEN_VALUE_MAX_LEN) {
+      complete = false;
+      return;
+    }
     if (values.size >= TOKENS_MAX) {
       complete = false;
       return;
@@ -222,6 +227,16 @@ export function mergeAssignTokens(a: AssignTokens | null, b: AssignTokens | null
   return { keys, values, complete };
 }
 
+/**
+ * 多个来源（不同客服列表接口）各自最新的候选合并：任一来源不完整或无法解析（null）则整体不完整；
+ * 没有任何可解析的来源返回 null。同名候选出现在多个来源时，“唯一命中”类比较自然给 null（不挑其中一个）。
+ */
+export function mergeAssignCandidates(sources: readonly (AssignCandidates | null)[]): AssignCandidates | null {
+  const parsed = sources.filter((c): c is AssignCandidates => c !== null);
+  if (!parsed.length) return null;
+  return { entries: parsed.flatMap((c) => c.entries), complete: parsed.length === sources.length && parsed.every((c) => c.complete) };
+}
+
 export type TransferProbeRecord = Record<string, boolean | number | string | null>;
 
 const kindOf = (v: unknown): string => (v === undefined ? "missing" : v === null ? "null" : Array.isArray(v) ? "array" : typeof v);
@@ -237,22 +252,15 @@ const nameIs = (v: unknown, target: string) => typeof v === "string" && v.trim()
 /** 找到即 true；没找到时只有列表完整才算 false，否则未知（null）。 */
 const anyOrUnknown = (found: boolean, complete: boolean): boolean | null => (found ? true : complete ? false : null);
 
-/** 可原样输出的字段名：纯字母开头的短标识符。 */
-const SAFE_FIELD_NAME = /^[A-Za-z][A-Za-z_]{1,29}$/;
-
-/** 值等于 csid 的 other 字段名：至多一个安全键名才原样输出，其余只给封闭字符串。 */
-function otherFieldNameOf(list: AssignEntry[], csidStr: string | null): string | null {
-  if (csidStr === null) return null;
+/**
+ * 值等于 csid 的“其他字段”有几个不同键名：只输出个数（封闭分类），不输出键名——键名可能是动态的身份标识，
+ * 字母格式不能证明它是已核实的静态字段。没比较条件（无 csid / 无列表）为 null；没找到且列表不完整为 null。
+ */
+function otherFieldNamesOf(assign: AssignCandidates | null, csidStr: string | null): number | null {
+  if (assign === null || csidStr === null) return null;
   const names = new Set<string>();
-  for (const e of list) for (const o of e.others) if (o.value === csidStr) names.add(o.key);
-  if (names.size === 0) return null;
-  if (names.size > 1) return "<multiple>";
-  const name = Array.from(names)[0];
-  if (!SAFE_FIELD_NAME.test(name)) return "<other>";
-  if (name === csidStr) return "<other>";
-  const isCandidateName = (v: unknown) => typeof v === "string" && v === name;
-  if (list.some((e) => isCandidateName(e.username) || isCandidateName(e.nickname))) return "<other>";
-  return name;
+  for (const e of assign.entries) for (const o of e.others) if (o.value === csidStr) names.add(o.key);
+  return names.size === 0 && !assign.complete ? null : names.size;
 }
 
 /**
@@ -312,7 +320,7 @@ export function moveRequestProbe(
     csid_loose_eq_id_of_nickname_candidate: one(byNick, (e) => looseEq(csid, e.id)),
     csid_eq_candidate_parent_key_any: any(parentHit),
     csid_eq_candidate_other_field_any: any(otherHit),
-    csid_other_field_name: otherFieldNameOf(list, csidStr),
+    csid_other_field_names: otherFieldNamesOf(assign, csidStr),
     csid_eq_parent_key_of_username_candidate: one(byUser, parentHit),
     csid_eq_parent_key_of_nickname_candidate: one(byNick, parentHit),
     csid_eq_other_field_of_username_candidate: one(byUser, otherHit),
