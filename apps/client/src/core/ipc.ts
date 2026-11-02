@@ -21,6 +21,9 @@ export const IPC_CHANNELS = [
   "app:setStartup",
   "app:checkUpdate",
   "app:installUpdate",
+  "app:openAdmin",
+  "app:setAdminGrant",
+  "app:clearAdminGrant",
   "conv:takeover",
   "sim:message",
   "sim:action",
@@ -45,6 +48,9 @@ export type IpcPayload =
   | { channel: "shop:setMode"; shop_id: string; mode: ShopMode }
   | { channel: "app:setStartup"; launch_at_login: boolean; restart_on_crash: boolean }
   | { channel: "app:checkUpdate" | "app:installUpdate" }
+  | { channel: "app:openAdmin"; shop_id: string | null }
+  | { channel: "app:setAdminGrant"; shop_id: string | null; grant: string }
+  | { channel: "app:clearAdminGrant"; shop_id: string | null }
   | { channel: "conv:takeover"; shop_id: string; conversation_id: string; on: boolean }
   | { channel: "sim:message"; shop_id: string; conversation_id: string; content: string; kind: "text" | "image" | "card"; stable_id: boolean }
   | { channel: "sim:action"; shop_id: string; action: SimAction; conversation_id: string | null; value: string | null };
@@ -96,6 +102,14 @@ export function validateToken(value: unknown): string {
   return value;
 }
 
+/** 后台快捷登录授权码：先去掉首尾空白，必须恰为 43 位 URL-safe 字符。 */
+export function validateAdminGrant(value: unknown): string {
+  if (typeof value !== "string") fail("invalid_admin_grant");
+  const grant = value.trim();
+  if (!/^[A-Za-z0-9_-]{43}$/.test(grant)) fail("invalid_admin_grant");
+  return grant;
+}
+
 export function validateIpc(channel: unknown, payload: unknown): IpcPayload {
   if (typeof channel !== "string" || !(IPC_CHANNELS as readonly string[]).includes(channel)) fail("unknown_channel");
   const ch = channel as IpcChannel;
@@ -105,6 +119,19 @@ export function validateIpc(channel: unknown, payload: unknown): IpcPayload {
     case "app:installUpdate":
       if (payload !== undefined && payload !== null) record(payload, []);
       return { channel: ch };
+    case "app:openAdmin":
+    case "app:clearAdminGrant": {
+      const v = record(payload ?? {}, ["shop_id"]);
+      return { channel: ch, shop_id: v.shop_id === undefined || v.shop_id === null ? null : id(v.shop_id, "shop_id") };
+    }
+    case "app:setAdminGrant": {
+      const v = record(payload, ["shop_id", "grant"]);
+      return {
+        channel: ch,
+        shop_id: v.shop_id === undefined || v.shop_id === null ? null : id(v.shop_id, "shop_id"),
+        grant: validateAdminGrant(v.grant),
+      };
+    }
     case "workspace:present": {
       const v = record(payload, ["shop_id", "bounds", "zoom"]);
       if (v.zoom !== undefined && !(PLATFORM_ZOOM_LEVELS as readonly unknown[]).includes(v.zoom)) fail("invalid_workspace_zoom");

@@ -14,6 +14,14 @@ body {
 .brand { font-size: 15px; font-weight: 600; }
 .brand span { font-weight: 400; opacity: .85; margin-left: 6px; }
 .topnote { font-size: 12px; opacity: .8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+/* 顶栏右侧“打开后台管理”：任何页面都看得到；没有可用店铺口令时禁用。 */
+.topbar-btn {
+  margin-left: auto; flex: none; align-self: center;
+  border: 1px solid rgba(255,255,255,.55); background: transparent; color: #fff;
+  border-radius: 6px; padding: 2px 10px; font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap;
+}
+.topbar-btn:hover:not(:disabled) { background: rgba(255,255,255,.15); }
+.topbar-btn:disabled { opacity: .45; cursor: not-allowed; }
 .layout { flex: 1; display: flex; min-height: 0; }
 .sidebar { width: 200px; flex: none; background: #fff; border-right: 1px solid #dde3ea; padding: 10px; overflow: auto; }
 .sidebar-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
