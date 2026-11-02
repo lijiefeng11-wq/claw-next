@@ -35,6 +35,8 @@ type Opts = {
   cancelClick?: Click;
   /** 收尾读完气泡后的那次会话核对期间，“取消”所在位置变成别的控件（核对改为遮挡）。 */
   changeDuringFinalGate?: boolean;
+  /** 最后一次页面快照期间：切到别的买家（快照自己核对出来），或时间越过期限（快照返回 ok 后才发现）。 */
+  duringFinalSnapshot?: "switch" | "expire";
 };
 
 function harness(opts: Opts) {
@@ -57,6 +59,8 @@ function harness(opts: Opts) {
     return gateValue;
   };
   a.activeConvToken = async () => "conv-1";
+  a.convTokenFor = (b: string) => (b === "9001" ? "conv-1" : `other-${b}`);
+  const checks: string[] = [];
   a.scanKeepingFresh = async () => ({ items: [{ key: "9001-x", active: true, unread: false }] });
   a.nativeClick = async (pt: Pt): Promise<Click> => {
     clicks.push({ x: pt.x, y: pt.y });
@@ -74,7 +78,12 @@ function harness(opts: Opts) {
         if (++listReads === 2 && opts.changeDuringFinalGate) armed = true;
         return [{ text: "无原因直接转移", ...CONFIRM }, { text: "取消", ...CANCEL }];
       }
-      if (script.includes('"text":"取消"')) return cancelCheck;
+      if (script.includes('"text":"取消"')) {
+        checks.push(script);
+        if (opts.duringFinalSnapshot === "switch") return "conversation_mismatch";
+        if (opts.duringFinalSnapshot === "expire") clock.offset += 200_000;
+        return cancelCheck;
+      }
       return "ok";
     }
     if (script.includes("target_button_not_unique") && script.includes("scrollIntoView")) {
@@ -87,10 +96,14 @@ function harness(opts: Opts) {
   };
   const logFile = path.join(dir, "transfer-test.jsonl");
   const logs = () => (fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
-  return { a, clicks, logs, logFile };
+  return { a, clicks, logs, logFile, checks };
 }
 
-const run = (h: ReturnType<typeof harness>, confirm = false) => h.a.transferTest(NAME, confirm, "conv-1", Date.now() / 1000 + 120) as Promise<string>;
+// 期限与 Date.now() 同为毫秒；“到期”用时钟偏移模拟。
+const clock = { offset: 0 };
+const realNow = Date.now;
+Date.now = () => realNow() + clock.offset;
+const run = (h: ReturnType<typeof harness>, confirm = false) => ((clock.offset = 0), h.a.transferTest(NAME, confirm, "conv-1", Date.now() + 120_000) as Promise<string>);
 const stable = { positions: [ROW, ROW], rect: ROW };
 const cancelResult = (h: ReturnType<typeof harness>) => h.logs().find((r) => r.phase === "inspect_cancel" || (r.phase === "cleanup" && "popover_cancel" in r));
 const cancelResultOf = (h: ReturnType<typeof harness>) => {
@@ -178,4 +191,26 @@ test("复审反例：读完气泡后的会话核对期间“取消”位置被�
   assert.equal(await run(h), "inspected:rows=1,confirm_buttons=1");
   assert.equal(h.clicks.some((c) => same(c, CANCEL) || same(c, CONFIRM)), false);
   assert.equal(cancelResultOf(h), "skipped:confirm_covered");
+});
+
+test("复审反例：最后一次页面快照期间切到别的买家——快照里同时核对买家，不点", async () => {
+  const h = harness({ ...stable, duringFinalSnapshot: "switch" });
+  assert.equal(await run(h), "inspected:rows=1,confirm_buttons=1");
+  assert.equal(h.clicks.some((c) => same(c, CANCEL) || same(c, CONFIRM)), false);
+  assert.equal(cancelResultOf(h), "skipped:conversation_mismatch");
+  assert.ok(h.checks.every((s) => s.includes('"buyer":"9001"')), "最后快照须带本次买家");
+});
+
+test("复审反例：最后一次页面快照期间到期——快照之后同步复核期限，不点", async () => {
+  const h = harness({ ...stable, duringFinalSnapshot: "expire" });
+  assert.equal(await run(h), "inspected:rows=1,confirm_buttons=1");
+  assert.equal(h.clicks.some((c) => same(c, CANCEL) || same(c, CONFIRM)), false);
+  assert.equal(cancelResultOf(h), "skipped:expired");
+});
+
+test("扫描读到的买家与请求携带的对话令牌不一致：一开始就不执行，不点任何东西", async () => {
+  const h = harness(stable);
+  h.a.convTokenFor = () => "conv-other";
+  assert.equal(await run(h), "not_executed:conversation_mismatch");
+  assert.deepEqual(h.clicks, []);
 });
