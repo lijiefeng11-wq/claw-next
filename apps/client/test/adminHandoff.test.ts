@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { adminOpenText, adminPageUrl, isHandoffTicket, isLoopbackBackend, pickAdminShop } from "../src/core/adminHandoff.js";
+import { adminFailureOf, adminOpenText, adminPageUrl, isHandoffTicket, isLoopbackBackend, pickAdminShop } from "../src/core/adminHandoff.js";
 import { BackendClient, BackendError, TransportError } from "../src/core/backend.js";
 import { validateIpc } from "../src/core/ipc.js";
 
@@ -39,14 +39,32 @@ test("选店铺：优先选中的且有口令的，其次第一个有口令的�
   assert.equal(pickAdminShop(configs, "a", has([])), null);
 });
 
-test("结果说明：失败时都提示改用密码登录，不含票据或口令", () => {
+test("结果说明：成功只说已打开链接、不声称已登录；失败都提示改用密码登录，不含票据或口令", () => {
   for (const r of ["ok", "not_local", "unsupported", "failed", "no_shop"] as const) {
     const text = adminOpenText(r, "timeout");
     assert.ok(text.length > 0);
     assert.ok(!text.includes(TICKET) && !text.includes(TOKEN));
   }
-  assert.match(adminOpenText("failed", "timeout"), /timeout/);
+  assert.equal(adminOpenText("ok"), "已打开后台登录链接，登录结果请在浏览器查看");
+  assert.doesNotMatch(adminOpenText("ok"), /已自动登录|已登录/);
+  assert.match(adminOpenText("failed", "timeout"), /超时/);
+  assert.match(adminOpenText("failed", "http_403"), /HTTP 403/);
   assert.match(adminOpenText("unsupported"), /密码/);
+});
+
+test("复审反例：后台返回的任意错误码（哪怕含口令样的字符串）不进日志和提示，只留封闭类别", async () => {
+  const evil = `leak-${TOKEN}`;
+  const reply = (status: number, body: unknown) => async () => new Response(JSON.stringify(body), { status });
+  const c = new BackendClient("http://127.0.0.1:8765", TOKEN, reply(500, { error: { code: evil, message: evil } }) as never);
+  const err = await c.adminHandoff().catch((e: unknown) => e);
+  const f = adminFailureOf(err);
+  assert.equal(f, "http_500");
+  const text = adminOpenText("failed", f);
+  assert.ok(!text.includes(evil) && !text.includes(TOKEN));
+  assert.equal(adminFailureOf(new TransportError("timeout")), "timeout");
+  assert.equal(adminFailureOf(new TransportError("network_error")), "network");
+  assert.equal(adminFailureOf(new TransportError("handoff_response_invalid")), "response_invalid");
+  assert.equal(adminFailureOf(new Error(evil)), "network");
 });
 
 test("IPC：shop_id 可为空；不接受多余字段或不安全的店铺编号", () => {
@@ -60,13 +78,17 @@ test("IPC：shop_id 可为空；不接受多余字段或不安全的店铺编号
 test("后台客户端：用客户端口令 POST 换票据；响应不合格按传输错误处理；后台错误带状态码", async () => {
   const calls: { url: string; init: RequestInit }[] = [];
   const reply = (status: number, body: unknown) => async (url: string, init: RequestInit) => (calls.push({ url, init }), new Response(JSON.stringify(body), { status }));
-  const ok = new BackendClient("http://127.0.0.1:8765", TOKEN, reply(200, { ticket: TICKET, expires_at: 1793600000 }) as never);
-  assert.deepEqual(await ok.adminHandoff(), { ticket: TICKET, expires_at: 1793600000 });
+  const future = Date.now() / 1000 + 60;
+  const ok = new BackendClient("http://127.0.0.1:8765", TOKEN, reply(200, { ticket: TICKET, expires_at: future }) as never);
+  assert.deepEqual(await ok.adminHandoff(), { ticket: TICKET, expires_at: future });
   assert.equal(calls[0].url, "http://127.0.0.1:8765/api/v1/admin/handoff");
   assert.equal(calls[0].init.method, "POST");
   assert.equal((calls[0].init.headers as Record<string, string>).Authorization, `Bearer ${TOKEN}`);
-  const bad = new BackendClient("http://127.0.0.1:8765", TOKEN, reply(200, { ticket: "x y", expires_at: 1 }) as never);
+  const bad = new BackendClient("http://127.0.0.1:8765", TOKEN, reply(200, { ticket: "x y", expires_at: future }) as never);
   await assert.rejects(bad.adminHandoff(), (e: unknown) => e instanceof TransportError);
+  // 复审反例：格式正确但已过期的票据不拿去打开。
+  const expired = new BackendClient("http://127.0.0.1:8765", TOKEN, reply(200, { ticket: TICKET, expires_at: Date.now() / 1000 - 1 }) as never);
+  await assert.rejects(expired.adminHandoff(), (e: unknown) => e instanceof TransportError && e.message === "handoff_response_invalid");
   const old = new BackendClient("http://127.0.0.1:8765", TOKEN, reply(403, { error: { code: "admin_required" } }) as never);
   await assert.rejects(old.adminHandoff(), (e: unknown) => e instanceof BackendError && e.status === 403 && e.code === "admin_required");
 });

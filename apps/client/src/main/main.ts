@@ -25,7 +25,7 @@ import { ARG_LAUNCHED_BY_AGENT, ARG_NO_HANDOVER, ARG_SUPERVISED, startupDecision
 import { StartupManager } from "./startupManager.js";
 import { Updater, readBuildInfo, writeReadyMarker } from "./updater.js";
 import { chromeLikeUserAgent } from "../core/userAgent.js";
-import { type AdminOpenResult, adminOpenText, adminPageUrl, isLoopbackBackend, pickAdminShop } from "../core/adminHandoff.js";
+import { type AdminFailure, adminFailureOf, type AdminOpenResult, adminOpenText, adminPageUrl, isLoopbackBackend, pickAdminShop } from "../core/adminHandoff.js";
 import { BackendClient, BackendError } from "../core/backend.js";
 
 const APP_NAME = "Claw-Next-Client";
@@ -133,7 +133,7 @@ class Controller {
     if (!config) return { result: "no_shop", text: adminOpenText("no_shop") };
     let result: AdminOpenResult = "not_local";
     let ticket: string | null = null;
-    let detail: string | undefined;
+    let failure: AdminFailure | undefined;
     if (isLoopbackBackend(config.backend_url)) {
       const token = this.slots.get(config.shop_id)?.ephemeralToken ?? this.secrets.get(config.shop_id);
       try {
@@ -142,12 +142,13 @@ class Controller {
       } catch (err) {
         // 还没有这个接口的旧后台：路径不存在（404），或按普通管理接口要求管理员身份（admin_required）。
         result = err instanceof BackendError && (err.status === 404 || err.code === "admin_required") ? "unsupported" : "failed";
-        detail = errorCode(err);
+        // 只记封闭类别，不输出后台返回的任意 code / message。
+        failure = adminFailureOf(err);
       }
     }
-    console.log(`admin open shop=${config.shop_id} result=${result}${detail ? ` detail=${detail}` : ""}`);
+    console.log(`admin open shop=${config.shop_id} result=${result}${failure ? ` failure=${failure}` : ""}`);
     await shell.openExternal(adminPageUrl(config.backend_url, ticket));
-    return { result, text: adminOpenText(result, detail) };
+    return { result, text: adminOpenText(result, failure) };
   }
 
   /** 店铺提醒（侧栏标红与系统通知）；只看平台页面与登录状态，不含买家内容。 */

@@ -78,7 +78,8 @@ export class BackendClient {
   /** #62：用客户端口令换一次性后台登录票据（后台只接受本机请求）。票据不写日志。 */
   async adminHandoff(): Promise<{ ticket: string; expires_at: number }> {
     const r = (await this.request("POST", "/api/v1/admin/handoff", "{}")) as { ticket?: unknown; expires_at?: unknown } | null;
-    if (!r || typeof r !== "object" || !isHandoffTicket(r.ticket) || typeof r.expires_at !== "number" || !Number.isFinite(r.expires_at)) throw new TransportError("handoff_response_invalid");
+    // 已过期的票据（按本机时间）也按响应不合格处理，不拿去打开。
+    if (!r || typeof r !== "object" || !isHandoffTicket(r.ticket) || typeof r.expires_at !== "number" || !Number.isFinite(r.expires_at) || r.expires_at <= Date.now() / 1000) throw new TransportError("handoff_response_invalid");
     return { ticket: r.ticket, expires_at: r.expires_at };
   }
 
