@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { bindingOf, closeRequestProbe, combineBinding, extractAssignEntries, moveRequestProbe, transferProbePath, transferResponseProbe } from "../src/main/transferProbe.js";
+import { assignNameProbe, assignTokens, bindingOf, closeRequestProbe, combineBinding, extractAssignEntries, mergeAssignTokens, moveRequestProbe, transferProbePath, transferResponseProbe } from "../src/main/transferProbe.js";
 
 // 转人工取证探针（诊断模式专用）：全部为虚构编号与名称；核对输出只有布尔、计数与封闭候选值，不含任何原文。
 
@@ -205,5 +205,202 @@ describe("请求与诊断转移的关联", () => {
     assert.equal(combineBinding("bound", "stale"), "stale");
     assert.equal(combineBinding("stale", "bound"), "stale");
     assert.equal(combineBinding("unbound", "bound"), "unbound");
+  });
+});
+
+describe("csid 对应字段扩展", () => {
+  test("父级映射键：候选挂在结果映射的键下时记 parentKey；数组里为 null", () => {
+    const c = extractAssignEntries(JSON.stringify({ success: true, result: { a: { [CSID]: { id: 7788, username: NAME, nickname: NICK } }, b: {} } }));
+    assert.equal(c?.complete, true);
+    assert.equal(c?.entries.length, 1);
+    assert.equal(c?.entries[0].parentKey, CSID);
+    const rec = moveRequestProbe(moveBody({ csid: CSID, uid: BUYER }), BUYER, NAME, c);
+    assert.equal(rec.csid_eq_candidate_parent_key_any, true);
+    assert.equal(rec.csid_eq_candidate_other_field_any, false);
+    assert.equal(rec.csid_other_field_name, null);
+    assert.equal(rec.csid_eq_parent_key_of_username_candidate, true);
+    assert.equal(rec.csid_eq_other_field_of_username_candidate, false);
+    assertNoLeak(rec);
+    const inArray = extractAssignEntries(JSON.stringify({ list: [{ id: 7788, username: NAME }] }));
+    assert.equal(inArray?.entries[0].parentKey, null);
+  });
+
+  test("others：只收非空字符串与有限数字，排除编号/名称字段、空串、布尔、对象；超过 40 项记不完整", () => {
+    const c = extractAssignEntries(JSON.stringify({ list: [{ id: 7788, username: NAME, nickname: NICK, empty: "", flag: true, obj: { x: 1 }, note: "note-value", num: 42 }] }));
+    assert.equal(c?.complete, true);
+    assert.deepEqual(c?.entries[0].others.map((o) => o.key).sort(), ["note", "num"]);
+    assert.deepEqual(c?.entries[0].others.map((o) => o.value).sort(), ["42", "note-value"]);
+    const many: Record<string, unknown> = { id: 1, username: NAME };
+    for (let i = 0; i < 41; i++) many[`f${i}`] = `v${i}`;
+    const over = extractAssignEntries(JSON.stringify({ list: [many] }));
+    assert.equal(over?.complete, false);
+    assert.equal(over?.entries.length, 1);
+    assert.equal(over?.entries[0].others.length, 40);
+  });
+
+  test("csid 等于候选对象某个其他字段的值：记 other_field_any 与原样字段名", () => {
+    const c = extractAssignEntries(JSON.stringify({ list: [{ id: 7788, username: NAME, nickname: NICK, cs_key: CSID }] }));
+    assert.equal(c?.complete, true);
+    assert.equal(c?.entries[0].others.length, 1);
+    assert.equal(c?.entries[0].others[0].key, "cs_key");
+    const rec = moveRequestProbe(moveBody({ csid: CSID, uid: BUYER }), BUYER, NAME, c);
+    assert.equal(rec.csid_eq_candidate_other_field_any, true);
+    assert.equal(rec.csid_eq_candidate_parent_key_any, false);
+    assert.equal(rec.csid_other_field_name, "cs_key");
+    assert.equal(rec.csid_eq_other_field_of_username_candidate, true);
+    assert.equal(rec.csid_eq_other_field_of_nickname_candidate, null);
+    assertNoLeak(rec);
+  });
+
+  test("字段名不安全或与候选名称相同：只给 <other>；两个不同键名都命中：<multiple>", () => {
+    const k9 = extractAssignEntries(JSON.stringify({ list: [{ id: 1, username: "u-1", k9: CSID }] }));
+    const r1 = moveRequestProbe(moveBody({ csid: CSID, uid: BUYER }), BUYER, NAME, k9);
+    assert.equal(r1.csid_eq_candidate_other_field_any, true);
+    assert.equal(r1.csid_other_field_name, "<other>");
+    assertNoLeak(r1);
+    const nameKey = extractAssignEntries(JSON.stringify({ list: [{ id: 1, username: "u-1", [NAME]: CSID }] }));
+    const r2 = moveRequestProbe(moveBody({ csid: CSID, uid: BUYER }), BUYER, NAME, nameKey);
+    assert.equal(r2.csid_other_field_name, "<other>");
+    assertNoLeak(r2);
+    const sameAsName = extractAssignEntries(JSON.stringify({ list: [{ id: 1, username: "u-1", nickname: "deputy_key", deputy_key: CSID }] }));
+    const r3 = moveRequestProbe(moveBody({ csid: CSID, uid: BUYER }), BUYER, NAME, sameAsName);
+    assert.equal(r3.csid_other_field_name, "<other>");
+    assertNoLeak(r3);
+    const multi = extractAssignEntries(JSON.stringify({ list: [{ id: 1, username: "u-1", cs_a: CSID, cs_b: CSID }] }));
+    const r4 = moveRequestProbe(moveBody({ csid: CSID, uid: BUYER }), BUYER, NAME, multi);
+    assert.equal(r4.csid_eq_candidate_other_field_any, true);
+    assert.equal(r4.csid_other_field_name, "<multiple>");
+    assertNoLeak(r4);
+  });
+
+  test("csid 是数字或空串：父级键/其他字段比较为 false，字段名与 tokens 比较为 null", () => {
+    const c = extractAssignEntries(JSON.stringify({ a: { [CSID]: { id: 7788, username: NAME, cs_key: CSID } } }));
+    const tokens = assignTokens(JSON.stringify({ a: { [CSID]: 1 } }));
+    for (const raw of [7788, ""]) {
+      const rec = moveRequestProbe(moveBody({ csid: raw, uid: BUYER }), BUYER, NAME, c, tokens);
+      assert.equal(rec.csid_eq_candidate_parent_key_any, false);
+      assert.equal(rec.csid_eq_candidate_other_field_any, false);
+      assert.equal(rec.csid_other_field_name, null);
+      assert.equal(rec.csid_in_assign_keys, null);
+      assert.equal(rec.csid_in_assign_values, null);
+      assertNoLeak(rec);
+    }
+  });
+
+  test("列表不完整且没找到：新增 any 类字段为 null，字段名仍为 null", () => {
+    const many = Array.from({ length: 501 }, (_, i) => ({ id: `cs-${i}`, username: `u-${i}`, f: `v-${i}` }));
+    const c = extractAssignEntries(JSON.stringify({ list: many }));
+    assert.equal(c?.complete, false);
+    const rec = moveRequestProbe(moveBody({ csid: "cs-zzz", uid: BUYER }), BUYER, "无人", c);
+    assert.equal(rec.csid_eq_candidate_parent_key_any, null);
+    assert.equal(rec.csid_eq_candidate_other_field_any, null);
+    assert.equal(rec.csid_eq_parent_key_of_username_candidate, null);
+    assert.equal(rec.csid_eq_other_field_of_username_candidate, null);
+    assert.equal(rec.csid_other_field_name, null);
+    assertNoLeak(rec);
+  });
+
+  test("assignTokens：收集所有键与非空字符串/有限数字值，数字转字符串", () => {
+    const t = assignTokens(JSON.stringify({ result: { abc: { id: 7788, note: "x", empty: "" } }, flag: true }));
+    assert.equal(t?.complete, true);
+    assert.equal(t?.keys.has("result"), true);
+    assert.equal(t?.keys.has("abc"), true);
+    assert.equal(t?.keys.has("id"), true);
+    assert.equal(t?.values.has("7788"), true);
+    assert.equal(t?.values.has("x"), true);
+    assert.equal(t?.values.has(""), false);
+    assert.equal(t?.values.has("true"), false);
+  });
+
+  test("assignTokens：非 JSON 为 null；节点预算或条目上限耗尽记不完整", () => {
+    assert.equal(assignTokens("<html>"), null);
+    assert.equal(assignTokens(null), null);
+    const wide = JSON.stringify({ list: Array.from({ length: 6000 }, () => ({ a: 1 })) });
+    assert.equal(assignTokens(wide)?.complete, false);
+    const huge: Record<string, string> = {};
+    for (let i = 0; i < 5001; i++) huge[`k${i}`] = `v${i}`;
+    const t = assignTokens(JSON.stringify(huge));
+    assert.equal(t?.complete, false);
+    assert.equal(t?.keys.size, 5000);
+  });
+
+  test("mergeAssignTokens：并集、不修改入参、null 处理", () => {
+    const a = { keys: new Set(["k1"]), values: new Set(["v1"]), complete: true };
+    const b = { keys: new Set(["k2"]), values: new Set(["v1", "v2"]), complete: true };
+    const m = mergeAssignTokens(a, b);
+    assert.deepEqual(Array.from(m?.keys ?? []).sort(), ["k1", "k2"]);
+    assert.deepEqual(Array.from(m?.values ?? []).sort(), ["v1", "v2"]);
+    assert.equal(m?.complete, true);
+    assert.deepEqual(Array.from(a.keys), ["k1"]);
+    assert.deepEqual(Array.from(a.values), ["v1"]);
+    assert.deepEqual(Array.from(b.keys), ["k2"]);
+    assert.equal(mergeAssignTokens(null, b), b);
+    assert.equal(mergeAssignTokens(a, null), a);
+    assert.equal(mergeAssignTokens(null, null), null);
+  });
+
+  test("tokens：csid 作为键或值出现分别记录；都不在且完整记 false，不完整记 null；省略 tokens 时未知", () => {
+    const c = extractAssignEntries(assignBody([{ id: 7788, username: NAME }]));
+    const asKey = assignTokens(JSON.stringify({ result: { [CSID]: { id: 7788 } } }));
+    const recKey = moveRequestProbe(moveBody({ csid: CSID, uid: BUYER }), BUYER, NAME, c, asKey);
+    assert.equal(recKey.tokens_known, true);
+    assert.equal(recKey.tokens_complete, true);
+    assert.equal(recKey.csid_in_assign_keys, true);
+    assert.equal(recKey.csid_in_assign_values, false);
+    assertNoLeak(recKey);
+    const asValue = assignTokens(JSON.stringify({ result: { other: CSID } }));
+    const recValue = moveRequestProbe(moveBody({ csid: CSID, uid: BUYER }), BUYER, NAME, c, asValue);
+    assert.equal(recValue.csid_in_assign_keys, false);
+    assert.equal(recValue.csid_in_assign_values, true);
+    assertNoLeak(recValue);
+    const none = assignTokens(JSON.stringify({ result: { other: "zzz" } }));
+    const recNone = moveRequestProbe(moveBody({ csid: CSID, uid: BUYER }), BUYER, NAME, c, none);
+    assert.equal(recNone.csid_in_assign_keys, false);
+    assert.equal(recNone.csid_in_assign_values, false);
+    const incomplete = { keys: new Set<string>(), values: new Set<string>(), complete: false };
+    const recBad = moveRequestProbe(moveBody({ csid: CSID, uid: BUYER }), BUYER, NAME, c, incomplete);
+    assert.equal(recBad.csid_in_assign_keys, null);
+    assert.equal(recBad.csid_in_assign_values, null);
+    const recOmitted = moveRequestProbe(moveBody({ csid: CSID, uid: BUYER }), BUYER, NAME, c);
+    assert.equal(recOmitted.tokens_known, false);
+    assert.equal(recOmitted.tokens_complete, null);
+    assert.equal(recOmitted.csid_in_assign_keys, null);
+    assert.equal(recOmitted.csid_in_assign_values, null);
+    assertNoLeak(recOmitted);
+  });
+
+  test("assignNameProbe：分别统计账号名命中 username / nickname / 其他字段", () => {
+    const c = extractAssignEntries(JSON.stringify({ list: [
+      { id: 1, username: NAME, nickname: "n-1" },
+      { id: 2, username: "u-2", nickname: NAME },
+      { id: 3, username: "u-3", nickname: "n-3", alias: NAME },
+      { id: 4, username: "u-4", nickname: "n-4" },
+    ] }));
+    assert.equal(c?.complete, true);
+    const rec = assignNameProbe(c, NAME);
+    assert.equal(rec.target_known, true);
+    assert.equal(rec.candidate_name_eq_username, 1);
+    assert.equal(rec.candidate_name_eq_nickname, 1);
+    assert.equal(rec.candidate_name_eq_other_field, 1);
+    assert.equal(rec.candidate_names_complete, true);
+    assertNoLeak(rec);
+  });
+
+  test("assignNameProbe：目标或列表缺失时计数为 null", () => {
+    const c = extractAssignEntries(assignBody([{ id: 1, username: NAME }]));
+    const noTarget = assignNameProbe(c, null);
+    assert.equal(noTarget.target_known, false);
+    assert.equal(noTarget.candidate_name_eq_username, null);
+    assert.equal(noTarget.candidate_name_eq_nickname, null);
+    assert.equal(noTarget.candidate_name_eq_other_field, null);
+    assert.equal(noTarget.candidate_names_complete, true);
+    assertNoLeak(noTarget);
+    const noList = assignNameProbe(null, NAME);
+    assert.equal(noList.target_known, true);
+    assert.equal(noList.candidate_name_eq_username, null);
+    assert.equal(noList.candidate_name_eq_nickname, null);
+    assert.equal(noList.candidate_name_eq_other_field, null);
+    assert.equal(noList.candidate_names_complete, null);
+    assertNoLeak(noList);
   });
 });

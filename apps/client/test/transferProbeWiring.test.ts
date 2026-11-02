@@ -159,6 +159,36 @@ test("页面已变后才到的客服列表不缓存，后续转移请求不拿�
   assert.deepEqual([move.candidates_known, move.candidates], [false, 0]);
 });
 
+test("csid 是客服列表映射的键：转移请求记录命中父级键与键值并集；另一个没有候选的客服接口响应不覆盖候选列表", async () => {
+  const h = harness(true);
+  h.diag(1);
+  const mapBody = JSON.stringify({ success: true, result: { csMap: { [CSID]: { id: 7788, username: NAME, nickname: "小王" } }, total: 1 } });
+  const otherBody = JSON.stringify({ success: true, result: { groups: { g1: { id: 5, label: "分组甲" } } } });
+  h.request("a1", ASSIGN, "{}", mapBody);
+  h.finish("a1");
+  await h.records(1);
+  h.request("a2", "/latitude/assign/getCsGroup", "{}", otherBody);
+  h.finish("a2");
+  await h.records(2);
+  h.scans.push({ items: only(A) });
+  h.request("m", MOVE, moveBody, okBody);
+  h.finish("m");
+  const recs = await h.records(4);
+  const assigns = recs.filter((r) => r.kind === "assign_response");
+  const withList = assigns.find((r) => r.candidates === 1);
+  const without = assigns.find((r) => r.candidates === 0);
+  assert.deepEqual([withList.cached, withList.target_known, withList.candidate_name_eq_username, withList.candidate_name_eq_nickname], [true, true, 1, 0]);
+  assert.deepEqual([without.cached, without.candidate_name_eq_username], [false, 0]);
+  const move = recs.find((r) => r.kind === "move_request");
+  assert.deepEqual(
+    [move.binding, move.candidates, move.csid_eq_candidate_id_any, move.csid_eq_candidate_parent_key_any, move.csid_eq_parent_key_of_username_candidate, move.csid_other_field_name],
+    ["bound", 1, false, true, true, null],
+  );
+  assert.deepEqual([move.tokens_known, move.tokens_complete, move.csid_in_assign_keys, move.csid_in_assign_values], [true, true, true, false]);
+  const text = fs.readFileSync(h.file, "utf8");
+  for (const s of [A, CSID, NAME, "小王", "7788", "分组甲", "csMap", "g1"]) assert.ok(!text.includes(s), `日志不得含 ${s}`);
+});
+
 test("诊断模式关闭：不写文件，读取与改动前完全相同（转移接口在原有 /plateau/chat/ 观察范围内本就读一次，客服列表不读）", async () => {
   const h = harness(false);
   h.request("m", MOVE, moveBody, okBody);

@@ -17,7 +17,7 @@ import { dispatchPageClick, type PageClickResult } from "./pddClick.js";
 import { PddMessageWatcher } from "./pddMessageWatcher.js";
 import { popupSweepScript, type PopupSweepMode, type PopupSweepResult } from "./pddPopups.js";
 import { MARKED_LIST_PATH, MARK_REQUEST_PATH, markedListProbe, markRequestProbe, markResponseProbe, type MarkProbeRecord, UNMARK_REQUEST_PATH } from "./markProbe.js";
-import { type AssignCandidates, bindingOf, closeRequestProbe, combineBinding, extractAssignEntries, moveRequestProbe, type TransferBinding, transferProbePath, type TransferProbePath, type TransferProbeRecord, transferResponseProbe } from "./transferProbe.js";
+import { type AssignCandidates, assignNameProbe, assignTokens, type AssignTokens, bindingOf, closeRequestProbe, combineBinding, extractAssignEntries, mergeAssignTokens, moveRequestProbe, type TransferBinding, transferProbePath, type TransferProbePath, type TransferProbeRecord, transferResponseProbe } from "./transferProbe.js";
 
 const LOGIN_URL = "https://mms.pinduoduo.com/chat-merchant/index.html";
 
@@ -898,6 +898,8 @@ export class PddPageAdapter implements PlatformAdapter {
   private transferDiagSeq = 0;
   /** 诊断模式下最近一次客服列表候选（内存中，只用于与转移请求的 csid 比较，不写盘）。 */
   private assignCache: { epoch: number; at: number; candidates: AssignCandidates } | null = null;
+  /** 诊断模式下同一页面各客服列表类接口（/latitude/assign/*）响应里出现过的键与值的并集（内存中，只用于与 csid 比较，不写盘）。 */
+  private assignTokensCache: { epoch: number; at: number; tokens: AssignTokens } | null = null;
   /** 标星进行中的页面：只认这个页面监听到的标星请求。 */
   private markPage: PlatformPage | null = null;
   /** 页面最近一次发出标星 / 取消收藏请求的本机时间（毫秒），用于点击前静默。 */
@@ -1001,13 +1003,14 @@ export class PddPageAdapter implements PlatformAdapter {
               transferReqs.set(params.requestId, r);
               if (tk !== "assign") {
                 const assign = this.assignFor(epoch);
+                const tokens = this.assignTokensFor(epoch);
                 void this.freshActive(epoch)
                   .catch(() => null)
                   .then((uid) => {
                     // 现场读取完成后再核对一次：页面或诊断批次变了，就不关联诊断目标。
                     const binding = bindingNow(r);
                     const target = binding === "bound" ? r.diag!.target : null;
-                    writeTransfer(r, binding, tk === "move" ? moveRequestProbe(postData, uid, target, assign) : closeRequestProbe(postData, uid));
+                    writeTransfer(r, binding, tk === "move" ? moveRequestProbe(postData, uid, target, assign, tokens) : closeRequestProbe(postData, uid));
                   })
                   .catch(() => undefined);
               }
@@ -1050,10 +1053,17 @@ export class PddPageAdapter implements PlatformAdapter {
               const binding = combineBinding(before, bindingNow(tr));
               if (tr.kind !== "assign") return writeTransfer(tr, binding, transferResponseProbe(tr.kind, body));
               const candidates = extractAssignEntries(body);
+              const tokens = assignTokens(body);
               // 只缓存仍属请求发出时页面代次的列表；页面已变则丢弃。
               const samePage = tr.epoch === this.watchEpoch;
-              if (candidates && samePage) this.assignCache = { epoch: tr.epoch, at: Date.now(), candidates };
-              writeTransfer(tr, binding, { kind: "assign_response", parsed: candidates !== null, candidates: candidates?.entries.length ?? 0, candidates_complete: candidates ? candidates.complete : null, cached: candidates !== null && samePage });
+              // 同一页面有多个 /latitude/assign/* 接口：没有候选对象的响应（多半是别的接口）不覆盖已有的非空候选列表。
+              const prev = this.assignFor(tr.epoch);
+              const cached = candidates !== null && samePage && (candidates.entries.length > 0 || prev === null || prev.entries.length === 0);
+              if (candidates && cached) this.assignCache = { epoch: tr.epoch, at: Date.now(), candidates };
+              const merged = tokens && samePage ? mergeAssignTokens(this.assignTokensFor(tr.epoch), tokens) : null;
+              if (merged) this.assignTokensCache = { epoch: tr.epoch, at: Date.now(), tokens: merged };
+              const target = binding === "bound" && tr.diag ? tr.diag.target : null;
+              writeTransfer(tr, binding, { kind: "assign_response", parsed: candidates !== null, candidates: candidates?.entries.length ?? 0, candidates_complete: candidates ? candidates.complete : null, cached, ...assignNameProbe(candidates, target) });
             })
             .catch(() => writeTransfer(tr, combineBinding(before, bindingNow(tr)), { kind: `${tr.kind}_response`, body_unavailable: true }));
         }
@@ -2363,6 +2373,12 @@ export class PddPageAdapter implements PlatformAdapter {
   private assignFor(epoch: number): AssignCandidates | null {
     const c = this.assignCache;
     return c && c.epoch === epoch && Date.now() - c.at < 10 * 60_000 ? c.candidates : null;
+  }
+
+  /** 同一页面代次、10 分钟内各客服列表类接口键值的并集；否则 null。 */
+  private assignTokensFor(epoch: number): AssignTokens | null {
+    const c = this.assignTokensCache;
+    return c && c.epoch === epoch && Date.now() - c.at < 10 * 60_000 ? c.tokens : null;
   }
 
   private async freshActive(sentEpoch: number): Promise<string | null> {
