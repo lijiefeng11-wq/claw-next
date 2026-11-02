@@ -24,6 +24,7 @@ import { SecretStore } from "./secrets.js";
 import { ARG_LAUNCHED_BY_AGENT, ARG_NO_HANDOVER, ARG_SUPERVISED, startupDecision, userDataFromArgv } from "../core/startup.js";
 import { StartupManager } from "./startupManager.js";
 import { Updater, readBuildInfo, writeReadyMarker } from "./updater.js";
+import { chromeLikeUserAgent } from "../core/userAgent.js";
 
 const APP_NAME = "Claw-Next-Client";
 app.setName(APP_NAME);
@@ -33,6 +34,9 @@ const userData = userDataOverride ? path.resolve(userDataOverride) : path.join(a
 app.setPath("userData", userData);
 app.enableSandbox();
 installFileLogging(userData);
+// 平台页面按正版 Chrome 的写法报浏览器身份（去掉应用名与 Electron 版本）；之后创建的所有会话与页面都用它。
+app.userAgentFallback = chromeLikeUserAgent(app.userAgentFallback);
+console.log(`user-agent ${app.userAgentFallback}`);
 app.on("render-process-gone", (_e, contents, details) => console.error(`render-process-gone reason=${details.reason} exit=${details.exitCode} url=${contents.getURL().split(/[?#]/)[0]}`));
 app.on("child-process-gone", (_e, details) => console.error(`child-process-gone type=${details.type} reason=${details.reason} exit=${details.exitCode}`));
 
