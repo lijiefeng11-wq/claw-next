@@ -19,6 +19,8 @@
     "app:checkUpdate",
     "app:installUpdate",
     "app:openAdmin",
+    "app:setAdminGrant",
+    "app:clearAdminGrant",
     "conv:takeover",
     "sim:message",
     "sim:action",

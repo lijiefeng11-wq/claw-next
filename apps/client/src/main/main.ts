@@ -25,7 +25,7 @@ import { ARG_LAUNCHED_BY_AGENT, ARG_NO_HANDOVER, ARG_SUPERVISED, startupDecision
 import { StartupManager } from "./startupManager.js";
 import { Updater, readBuildInfo, writeReadyMarker } from "./updater.js";
 import { chromeLikeUserAgent } from "../core/userAgent.js";
-import { type AdminFailure, adminFailureOf, type AdminOpenResult, adminOpenText, adminPageUrl, isLoopbackBackend, pickAdminShop } from "../core/adminHandoff.js";
+import { type AdminFailure, adminFailureOf, type AdminOpenResult, adminOpenText, adminPageUrl, adminGrantKey, adminOrigin, isLoopbackBackend, pickAdminShop } from "../core/adminHandoff.js";
 import { BackendClient, BackendError } from "../core/backend.js";
 
 const APP_NAME = "Claw-Next-Client";
@@ -70,6 +70,8 @@ function platformState(st: PlatformStatus | null) {
 class Controller {
   readonly configs = new ConfigStore(path.join(userData, "config"));
   readonly secrets = new SecretStore(path.join(userData, "secrets"));
+  /** 后台快捷登录授权码：按后台 origin 的 sha256 前 32 位作键，与店铺口令分开存放。 */
+  readonly adminGrants = new SecretStore(path.join(userData, "admin-grants"));
   /** 上次打开着的店铺（用户手动连接/打开平台页时记录），启动时恢复。 */
   readonly sessions = new SessionStore(path.join(userData, "config"));
   /** 恢复进行中被用户手动操作过的店铺：其待恢复步骤作废。 */
@@ -113,6 +115,7 @@ class Controller {
         return {
           config: c,
           token_set: this.secrets.has(c.shop_id) || !!s?.ephemeralToken,
+          admin_grant_set: this.adminGrants.has(adminGrantKey(c.backend_url)),
           running: !!s?.runtime,
           error: s?.error ?? null,
           platform: platformState(s?.adapter?.status() ?? null),
@@ -124,30 +127,38 @@ class Controller {
   }
 
   /**
-   * #62 一键打开后台管理：用选中店铺（没有就用第一个有口令的店铺）的客户端口令向本机后台换一次性票据，
-   * 再用系统浏览器打开管理页，票据放在 # 后面。后台不在本机、还不支持或换票失败时，只打开登录页（照常输入密码）。
-   * 票据和口令都不写日志。
+   * #63 一键打开后台管理：使用独立的本机后台授权码（按后台 origin 保存）向本机后台换一次性票据，
+   * 再用系统浏览器打开管理页，票据放在 # 后面。后台不在本机、没有授权码或换票失败时，只打开登录页。
+   * 授权码和票据都不写日志。
    */
   private async openAdmin(selected: string | null): Promise<{ result: AdminOpenResult; text: string }> {
-    const config = pickAdminShop(this.configs.list(), selected, (id) => !!(this.slots.get(id)?.ephemeralToken ?? this.secrets.get(id)));
+    const config = pickAdminShop(this.configs.list(), selected);
     if (!config) return { result: "no_shop", text: adminOpenText("no_shop") };
+    const origin = adminOrigin(config.backend_url);
     let result: AdminOpenResult = "not_local";
     let ticket: string | null = null;
     let failure: AdminFailure | undefined;
     if (isLoopbackBackend(config.backend_url)) {
-      const token = this.slots.get(config.shop_id)?.ephemeralToken ?? this.secrets.get(config.shop_id);
-      try {
-        ticket = (await new BackendClient(config.backend_url, token!).adminHandoff()).ticket;
-        result = "ok";
-      } catch (err) {
-        // 还没有这个接口的旧后台：路径不存在（404），或按普通管理接口要求管理员身份（admin_required）。
-        result = err instanceof BackendError && (err.status === 404 || err.code === "admin_required") ? "unsupported" : "failed";
-        // 只记封闭类别，不输出后台返回的任意 code / message。
-        failure = adminFailureOf(err);
+      const grant = this.adminGrants.get(adminGrantKey(origin));
+      if (!grant) {
+        result = "no_grant";
+      } else {
+        try {
+          ticket = (await new BackendClient(origin, grant).adminHandoff()).ticket;
+          result = "ok";
+        } catch (err) {
+          if (err instanceof BackendError && err.status === 404) result = "unsupported";
+          else if (err instanceof BackendError && err.status === 401 && err.code === "invalid_handoff_grant") result = "grant_invalid";
+          else {
+            result = "failed";
+            // 只记封闭类别，不输出后台返回的任意 code / message。
+            failure = adminFailureOf(err);
+          }
+        }
       }
     }
     console.log(`admin open shop=${config.shop_id} result=${result}${failure ? ` failure=${failure}` : ""}`);
-    await shell.openExternal(adminPageUrl(config.backend_url, ticket));
+    await shell.openExternal(adminPageUrl(origin, ticket));
     return { result, text: adminOpenText(result, failure) };
   }
 
@@ -425,6 +436,24 @@ class Controller {
         return this.state();
       case "app:openAdmin":
         return { open_admin: await this.openAdmin(p.shop_id) };
+      case "app:setAdminGrant": {
+        const list = this.configs.list();
+        const config = p.shop_id === null ? list[0] : list.find((c) => c.shop_id === p.shop_id);
+        if (!config) throw new IpcValidationError("shop_not_found");
+        try {
+          this.adminGrants.set(adminGrantKey(config.backend_url), p.grant);
+        } catch {
+          throw new IpcValidationError("secure_storage_unavailable");
+        }
+        return this.state();
+      }
+      case "app:clearAdminGrant": {
+        const list = this.configs.list();
+        const config = p.shop_id === null ? list[0] : list.find((c) => c.shop_id === p.shop_id);
+        if (!config) throw new IpcValidationError("shop_not_found");
+        this.adminGrants.remove(adminGrantKey(config.backend_url));
+        return this.state();
+      }
       case "app:installUpdate": {
         const choice = await dialog.showMessageBox({
           type: "question",
