@@ -25,7 +25,7 @@ import { ARG_LAUNCHED_BY_AGENT, ARG_NO_HANDOVER, ARG_SUPERVISED, startupDecision
 import { StartupManager } from "./startupManager.js";
 import { Updater, readBuildInfo, writeReadyMarker } from "./updater.js";
 import { chromeLikeUserAgent } from "../core/userAgent.js";
-import { type AdminFailure, adminFailureOf, type AdminOpenResult, adminOpenText, adminPageUrl, adminGrantKey, adminOrigin, isLoopbackBackend, pickAdminShop } from "../core/adminHandoff.js";
+import { type AdminFailure, adminFailureOf, type AdminOpenResult, adminOpenText, adminPageUrl, adminGrantKey, adminLocalTarget, resolveAdminTarget } from "../core/adminHandoff.js";
 import { BackendClient, BackendError } from "../core/backend.js";
 
 const APP_NAME = "Claw-Next-Client";
@@ -112,10 +112,12 @@ class Controller {
       app: { name: APP_NAME, secure_storage: this.secrets.available(), smoke: SMOKE, startup: startup.view(), update: this.updater.view() },
       shops: this.configs.list().map((c) => {
         const s = this.slots.get(c.shop_id);
+        const grantOrigin = adminLocalTarget(c.backend_url);
         return {
           config: c,
           token_set: this.secrets.has(c.shop_id) || !!s?.ephemeralToken,
-          admin_grant_set: this.adminGrants.has(adminGrantKey(c.backend_url)),
+          admin_grant_set: grantOrigin ? this.adminGrants.has(adminGrantKey(grantOrigin)) : false,
+          admin_grant_supported: grantOrigin !== null,
           running: !!s?.runtime,
           error: s?.error ?? null,
           platform: platformState(s?.adapter?.status() ?? null),
@@ -132,19 +134,22 @@ class Controller {
    * 授权码和票据都不写日志。
    */
   private async openAdmin(selected: string | null): Promise<{ result: AdminOpenResult; text: string }> {
-    const config = pickAdminShop(this.configs.list(), selected);
-    if (!config) return { result: "no_shop", text: adminOpenText("no_shop") };
-    const origin = adminOrigin(config.backend_url);
-    let result: AdminOpenResult = "not_local";
+    const target = resolveAdminTarget(this.configs.list(), selected);
+    const config = target ? this.configs.get(target.shop_id) : null;
+    if (!target || !config) return { result: "no_shop", text: adminOpenText("no_shop") };
+    let result: AdminOpenResult = "unsupported_target";
     let ticket: string | null = null;
     let failure: AdminFailure | undefined;
-    if (isLoopbackBackend(config.backend_url)) {
-      const grant = this.adminGrants.get(adminGrantKey(origin));
+    if (target.origin === null) {
+      // 非法目标：不读授权码、不换票，只打开登录页。
+      console.log(`admin open shop=${config.shop_id} result=unsupported_target`);
+    } else {
+      const grant = this.adminGrants.get(adminGrantKey(target.origin));
       if (!grant) {
         result = "no_grant";
       } else {
         try {
-          ticket = (await new BackendClient(origin, grant).adminHandoff()).ticket;
+          ticket = (await new BackendClient(target.origin, grant).adminHandoff()).ticket;
           result = "ok";
         } catch (err) {
           if (err instanceof BackendError && err.status === 404) result = "unsupported";
@@ -156,9 +161,9 @@ class Controller {
           }
         }
       }
+      console.log(`admin open shop=${config.shop_id} result=${result}${failure ? ` failure=${failure}` : ""}`);
     }
-    console.log(`admin open shop=${config.shop_id} result=${result}${failure ? ` failure=${failure}` : ""}`);
-    await shell.openExternal(adminPageUrl(origin, ticket));
+    await shell.openExternal(adminPageUrl(config.backend_url, ticket));
     return { result, text: adminOpenText(result, failure) };
   }
 
@@ -440,8 +445,10 @@ class Controller {
         const list = this.configs.list();
         const config = p.shop_id === null ? list[0] : list.find((c) => c.shop_id === p.shop_id);
         if (!config) throw new IpcValidationError("shop_not_found");
+        const origin = adminLocalTarget(config.backend_url);
+        if (!origin) throw new IpcValidationError("admin_target_unsupported");
         try {
-          this.adminGrants.set(adminGrantKey(config.backend_url), p.grant);
+          this.adminGrants.set(adminGrantKey(origin), p.grant);
         } catch {
           throw new IpcValidationError("secure_storage_unavailable");
         }
@@ -451,7 +458,9 @@ class Controller {
         const list = this.configs.list();
         const config = p.shop_id === null ? list[0] : list.find((c) => c.shop_id === p.shop_id);
         if (!config) throw new IpcValidationError("shop_not_found");
-        this.adminGrants.remove(adminGrantKey(config.backend_url));
+        const origin = adminLocalTarget(config.backend_url);
+        if (!origin) throw new IpcValidationError("admin_target_unsupported");
+        this.adminGrants.remove(adminGrantKey(origin));
         return this.state();
       }
       case "app:installUpdate": {

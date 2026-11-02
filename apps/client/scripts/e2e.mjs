@@ -190,6 +190,27 @@ try {
     if (await page.locator("#app-settings button", { hasText: "检查更新" }).count()) throw new Error("开发运行不应显示检查更新按钮");
     await page.locator("#app-settings summary").click();
   });
+  await step("客户端设置：授权码输入在普通刷新后保留；非本机根地址时禁用并说明", async () => {
+    const details = page.locator("#app-settings");
+    // 只在收起时点开，避免把已展开的设置收起。
+    if (!(await details.evaluate((d) => d.open))) await page.locator("#app-settings summary").click();
+    const box = page.locator("#app-settings .admin-grant");
+    const input = box.locator("input[type=password]");
+    await input.waitFor();
+    const unsupported = box.getByText("只有本机根地址（127.0.0.1 / [::1] / localhost，无路径）的后台才能使用快捷登录授权码");
+    if (await unsupported.count()) {
+      // 非本机根地址：输入禁用并说明。
+      if (!(await input.isDisabled())) throw new Error("非本机根地址时授权码输入应禁用");
+    } else if (await input.isDisabled()) {
+      // 本机根地址但系统安全存储不可用（CI 界面测试环境）：输入禁用，无法验证草稿保留，跳过。
+    } else {
+      const grant = "a".repeat(43);
+      await input.fill(grant);
+      await page.waitForTimeout(6000);
+      if ((await input.inputValue()) !== grant) throw new Error("授权码输入被普通状态刷新清空");
+    }
+    if (await details.evaluate((d) => d.open)) await page.locator("#app-settings summary").click();
+  });
   await step("店铺栏可收起成窄条并恢复", async () => {
     await page.locator("#sidebar-toggle").click();
     await page.locator(".layout.collapsed").waitFor();

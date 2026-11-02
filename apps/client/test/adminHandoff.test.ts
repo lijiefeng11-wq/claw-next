@@ -3,13 +3,13 @@ import { test } from "node:test";
 import {
   adminFailureOf,
   adminGrantKey,
+  adminLocalTarget,
   adminOpenText,
-  adminOrigin,
   adminPageUrl,
   isHandoffTicket,
-  isLoopbackBackend,
   normalizeAdminGrant,
   pickAdminShop,
+  resolveAdminTarget,
 } from "../src/core/adminHandoff.js";
 import { BackendClient, BackendError, TransportError } from "../src/core/backend.js";
 import { validateIpc } from "../src/core/ipc.js";
@@ -19,13 +19,60 @@ const TICKET = "ticket_" + "a".repeat(36);
 const GRANT = "g".repeat(43);
 const TOKEN = "fixture-client-token-0123456789abcdef0123456789";
 
-test("只有本机后台才换票据；地址不合法按非本机处理", () => {
-  assert.equal(isLoopbackBackend("http://127.0.0.1:8765"), true);
-  assert.equal(isLoopbackBackend("http://localhost:8765/"), true);
-  assert.equal(isLoopbackBackend("http://[::1]:8765"), true);
-  assert.equal(isLoopbackBackend("https://admin.example.com"), false);
-  assert.equal(isLoopbackBackend("http://192.168.1.5:8765"), false);
-  assert.equal(isLoopbackBackend("not a url"), false);
+test("adminLocalTarget：只接受本机根地址", () => {
+  assert.equal(adminLocalTarget("http://127.0.0.1:8765"), "http://127.0.0.1:8765");
+  assert.equal(adminLocalTarget("http://127.0.0.1:8765/"), "http://127.0.0.1:8765");
+  assert.equal(adminLocalTarget("https://localhost"), "https://localhost");
+  assert.equal(adminLocalTarget("http://[::1]:9000"), "http://[::1]:9000");
+  for (const bad of [
+    "http://127.0.0.1:8765/tenant-a",
+    "http://127.0.0.1:8765/?x=1",
+    "http://127.0.0.1:8765/#f",
+    "http://user:pw@127.0.0.1:8765",
+    "ftp://127.0.0.1",
+    "http://192.168.1.2:8765",
+    "http://example.com",
+    "http://127.0.0.2:8765",
+    "http://127.0.0.1:8765//",
+    "not a url",
+  ]) {
+    assert.equal(adminLocalTarget(bad), null, bad);
+  }
+});
+
+test("adminGrantKey：同一 origin 同一键，不同端口/协议/主机不同键", () => {
+  const key = adminGrantKey("http://127.0.0.1:8765");
+  assert.match(key, /^[a-f0-9]{32}$/);
+  assert.equal(key, adminGrantKey("http://127.0.0.1:8765"));
+  assert.notEqual(key, adminGrantKey("http://127.0.0.1:8766"));
+  assert.notEqual(key, adminGrantKey("https://127.0.0.1:8765"));
+  assert.equal(adminGrantKey("http://localhost:8765"), adminGrantKey("http://localhost:8765"));
+  assert.notEqual(adminGrantKey("http://localhost:8765"), adminGrantKey("http://127.0.0.1:8765"));
+});
+
+test("resolveAdminTarget：目标选择 + 严格校验，非法地址 origin 为 null", () => {
+  const configs = [
+    { shop_id: "a", backend_url: "http://127.0.0.1:1" },
+    { shop_id: "b", backend_url: "http://127.0.0.1:2/tenant" },
+    { shop_id: "c", backend_url: "https://localhost" },
+  ];
+  assert.deepEqual(resolveAdminTarget(configs, "c"), { shop_id: "c", origin: "https://localhost" });
+  assert.deepEqual(resolveAdminTarget(configs, "missing"), { shop_id: "a", origin: "http://127.0.0.1:1" });
+  assert.deepEqual(resolveAdminTarget(configs, null), { shop_id: "a", origin: "http://127.0.0.1:1" });
+  assert.deepEqual(resolveAdminTarget(configs, "b"), { shop_id: "b", origin: null });
+  assert.equal(resolveAdminTarget([], "a"), null);
+});
+
+test("选店铺：优先选中的，其次第一个；没有店铺为 null", () => {
+  const configs = [
+    { shop_id: "a", backend_url: "http://127.0.0.1:1" },
+    { shop_id: "b", backend_url: "http://127.0.0.1:2" },
+    { shop_id: "c", backend_url: "http://127.0.0.1:3" },
+  ];
+  assert.equal(pickAdminShop(configs, "c")?.shop_id, "c");
+  assert.equal(pickAdminShop(configs, "missing")?.shop_id, "a");
+  assert.equal(pickAdminShop(configs, null)?.shop_id, "a");
+  assert.equal(pickAdminShop([], "a"), null);
 });
 
 test("票据必须是精确 43 位；只放在 # 后面，格式不符不拼进地址", () => {
@@ -49,36 +96,15 @@ test("授权码：首尾空白先去掉，必须恰为 43 位字母、数字、_
   assert.equal(normalizeAdminGrant(undefined), null);
 });
 
-test("origin 键：同一 origin 不同路径/主机大小写得到同一键，不同端口不同键", () => {
-  assert.equal(adminOrigin("http://LOCALHOST:8765/a"), "http://localhost:8765");
-  assert.equal(adminOrigin("http://127.0.0.1:8765/a?x=1#y"), "http://127.0.0.1:8765");
-  const key = adminGrantKey("http://127.0.0.1:8765/a");
-  assert.match(key, /^[a-f0-9]{32}$/);
-  assert.equal(key, adminGrantKey("http://127.0.0.1:8765/b"));
-  assert.equal(adminGrantKey("http://LOCALHOST:8765/a"), adminGrantKey("http://localhost:8765/b"));
-  assert.notEqual(key, adminGrantKey("http://127.0.0.1:8766/a"));
-});
-
-test("选店铺：优先选中的，其次第一个；没有店铺为 null", () => {
-  const configs = [
-    { shop_id: "a", backend_url: "http://127.0.0.1:1" },
-    { shop_id: "b", backend_url: "http://127.0.0.1:2" },
-    { shop_id: "c", backend_url: "http://127.0.0.1:3" },
-  ];
-  assert.equal(pickAdminShop(configs, "c")?.shop_id, "c");
-  assert.equal(pickAdminShop(configs, "missing")?.shop_id, "a");
-  assert.equal(pickAdminShop(configs, null)?.shop_id, "a");
-  assert.equal(pickAdminShop([], "a"), null);
-});
-
-test("结果说明：成功只说已打开链接；无授权码、授权码无效、非本机各有文案，不含票据或授权码", () => {
-  for (const r of ["ok", "not_local", "unsupported", "failed", "no_shop", "no_grant", "grant_invalid"] as const) {
+test("结果说明：成功只说已打开链接；非法目标、无授权码、授权码无效各有文案，不含票据或授权码", () => {
+  for (const r of ["ok", "unsupported", "unsupported_target", "failed", "no_shop", "no_grant", "grant_invalid"] as const) {
     const text = adminOpenText(r, "timeout");
     assert.ok(text.length > 0);
     assert.ok(!text.includes(TICKET) && !text.includes(GRANT) && !text.includes(TOKEN));
   }
   assert.equal(adminOpenText("ok"), "已打开后台登录链接，登录结果请在浏览器查看");
   assert.doesNotMatch(adminOpenText("ok"), /已自动登录|已登录/);
+  assert.equal(adminOpenText("unsupported_target"), "后台地址不是本机根地址，不能快捷登录，已打开登录页");
   assert.match(adminOpenText("no_grant"), /授权码/);
   assert.match(adminOpenText("grant_invalid"), /撤销/);
   assert.match(adminOpenText("failed", "timeout"), /超时/);
@@ -101,7 +127,7 @@ test("后台返回的任意错误码（哪怕含授权码样的字符串）不�
   assert.equal(adminFailureOf(new Error(evil)), "network");
 });
 
-test("IPC：新增授权码通道接受合法输入，拒绝未知字段、格式不符和不安全店铺编号", () => {
+test("IPC：授权码通道接受合法输入，拒绝未知字段、格式不符和不安全店铺编号", () => {
   assert.deepEqual(validateIpc("app:setAdminGrant", { shop_id: null, grant: ` ${TICKET}\n` }), { channel: "app:setAdminGrant", shop_id: null, grant: TICKET });
   assert.deepEqual(validateIpc("app:setAdminGrant", { shop_id: "xiaoma", grant: GRANT }), { channel: "app:setAdminGrant", shop_id: "xiaoma", grant: GRANT });
   assert.deepEqual(validateIpc("app:clearAdminGrant", { shop_id: null }), { channel: "app:clearAdminGrant", shop_id: null });

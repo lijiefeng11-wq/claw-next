@@ -17,7 +17,7 @@
     conversations: Conv[];
   };
   type ShopConfig = { shop_id: string; display_name: string; backend_url: string; platform_shop_id: string; adapter: "mock" | "pdd"; mode: string };
-  type ShopEntry = { config: ShopConfig; token_set: boolean; admin_grant_set: boolean; running: boolean; error: string | null; platform: { logged_in: boolean; detail: string; login_expiry?: string; page?: { state: string; gave_up: boolean }; nav?: { on_chat: boolean; can_go_back: boolean } } | null; alert: { level: "error" | "warn"; text: string } | null; view: View | null };
+  type ShopEntry = { config: ShopConfig; token_set: boolean; admin_grant_set: boolean; admin_grant_supported: boolean; running: boolean; error: string | null; platform: { logged_in: boolean; detail: string; login_expiry?: string; page?: { state: string; gave_up: boolean }; nav?: { on_chat: boolean; can_go_back: boolean } } | null; alert: { level: "error" | "warn"; text: string } | null; view: View | null };
   type Startup = { supported: boolean; platform: string; launch_at_login: boolean; restart_on_crash: boolean; managed: boolean; location_ok?: boolean };
   type UpdateView = { supported: boolean; state: string; current: { run: number; sha: string } | null; candidate: { run: number; sha: string } | null; detail: string };
   type AppState = { app: { secure_storage: boolean; startup?: Startup; update?: UpdateView }; shops: ShopEntry[] };
@@ -29,6 +29,7 @@
     token_missing: "请先保存本店客户端口令",
     invalid_token: "口令格式不正确（至少 32 位可打印字符，不含空格）",
     invalid_admin_grant: "授权码格式不正确（应为 43 位字母、数字、_ 或 -）",
+    admin_target_unsupported: "只有本机根地址（127.0.0.1 / [::1] / localhost，无路径）的后台才能使用快捷登录授权码",
     backend_url_requires_https: "远程后台地址必须使用 HTTPS；只有本机回环地址可用 HTTP",
     backend_url_invalid: "后台地址无效（不能包含账号、查询参数或 # 片段）",
     invalid_shop_id: "店铺编号只能包含字母、数字和 _ . : -",
@@ -236,37 +237,92 @@
     }
   }
 
+  /** 授权码输入草稿：只在渲染进程内存中，按“店铺 + 后台 origin”区分；普通状态刷新不清空。 */
+  let adminGrantDraft: { key: string; value: string; start: number | null; end: number | null } | null = null;
+  let adminGrantInputEl: HTMLInputElement | null = null;
+  let adminGrantInputKey: string | null = null;
+
   function renderAdminGrant(): HTMLElement {
     const entry = current() ?? state.shops[0];
-    if (!entry) return h("div", { class: "admin-grant" }, h("div", { class: "hint", text: "后台快捷登录授权码：请先添加店铺。" }));
+    if (!entry) {
+      adminGrantDraft = null;
+      adminGrantInputEl = null;
+      adminGrantInputKey = null;
+      return h("div", { class: "admin-grant" }, h("div", { class: "hint", text: "后台快捷登录授权码：请先添加店铺。" }));
+    }
     const origin = backendOrigin(entry.config.backend_url);
+    const key = `${entry.config.shop_id}\n${origin}`;
+    // 切换目标时丢弃旧草稿；同一目标重建前先同步旧输入框内容（包括未触发 input 的粘贴）。
+    if (adminGrantDraft && adminGrantDraft.key !== key) adminGrantDraft = null;
+    if (adminGrantInputKey !== key) {
+      adminGrantInputEl = null;
+      adminGrantInputKey = null;
+    }
+    const previous = adminGrantInputEl && adminGrantInputKey === key ? adminGrantInputEl : null;
+    if (previous) {
+      adminGrantDraft = { key, value: previous.value, start: previous.selectionStart, end: previous.selectionEnd };
+    }
+    const hadFocus = !!previous && document.activeElement === previous;
+    const draft = adminGrantDraft && adminGrantDraft.key === key ? adminGrantDraft : null;
+    const supported = entry.admin_grant_supported;
     const input = h("input", {
       type: "password",
       autocomplete: "off",
+      disabled: !supported || !state.app.secure_storage,
       placeholder: entry.admin_grant_set ? "已设置（不会显示）；输入新授权码可替换" : "粘贴后台生成的授权码（43 位）",
       "aria-label": "后台快捷登录授权码",
     }) as HTMLInputElement;
+    if (draft) input.value = draft.value;
+    adminGrantInputEl = input;
+    adminGrantInputKey = key;
+    input.addEventListener("input", () => {
+      adminGrantDraft = { key, value: input.value, start: input.selectionStart, end: input.selectionEnd };
+    });
     const save = async () => {
       if (await call("app:setAdminGrant", { shop_id: entry.config.shop_id, grant: input.value })) {
         input.value = "";
+        adminGrantDraft = null;
+        adminGrantInputEl = null;
+        adminGrantInputKey = null;
+        render();
         toast("授权码已保存");
       }
     };
     const clear = async () => {
-      if (await call("app:clearAdminGrant", { shop_id: entry.config.shop_id })) toast("授权码已清除");
+      if (await call("app:clearAdminGrant", { shop_id: entry.config.shop_id })) {
+        input.value = "";
+        adminGrantDraft = null;
+        adminGrantInputEl = null;
+        adminGrantInputKey = null;
+        render();
+        toast("授权码已清除");
+      }
     };
-    return h(
+    const hint = supported
+      ? `后台快捷登录授权码（${origin}）：${entry.admin_grant_set ? "已设置" : "未设置"}。在后台生成授权码后填到这里，之后点“打开后台管理”可免输密码。`
+      : "只有本机根地址（127.0.0.1 / [::1] / localhost，无路径）的后台才能使用快捷登录授权码";
+    const box = h(
       "div",
       { class: "admin-grant" },
-      h("div", { class: "hint", text: `后台快捷登录授权码（${origin}）：${entry.admin_grant_set ? "已设置" : "未设置"}。在后台生成授权码后填到这里，之后点“打开后台管理”可免输密码。` }),
+      h("div", { class: supported ? "hint" : "hint error-text", text: hint }),
       h(
         "div",
         { class: "row" },
         input,
-        h("button", { class: "btn", type: "button", text: "保存", disabled: !state.app.secure_storage, onclick: save }),
-        h("button", { class: "btn secondary", type: "button", text: "清除", disabled: !entry.admin_grant_set, onclick: clear }),
+        h("button", { class: "btn", type: "button", text: "保存", disabled: !supported || !state.app.secure_storage, onclick: save }),
+        h("button", { class: "btn secondary", type: "button", text: "清除", disabled: !supported || !entry.admin_grant_set, onclick: clear }),
       ),
     );
+    if (hadFocus && draft) {
+      const start = draft.start ?? input.value.length;
+      const end = draft.end ?? input.value.length;
+      queueMicrotask(() => {
+        if (!input.isConnected) return;
+        input.focus();
+        input.setSelectionRange(start, end);
+      });
+    }
+    return box;
   }
 
   /** 检查更新：只在用户点击时检查；安装前再确认一次（主进程弹窗）。 */
@@ -755,7 +811,7 @@
     renderAdminButton();
   }
 
-  // 顶栏“打开后台管理”（#62）：用选中店铺的口令向本机后台换一次性票据并在浏览器打开，免输后台密码。
+  // 顶栏“打开后台管理”（#63）：用选中店铺对应的本机后台授权码换一次性票据并在浏览器打开，免输后台密码。
   const adminBtn = document.getElementById("open-admin") as HTMLButtonElement;
   let adminBusy = false;
   function renderAdminButton() {

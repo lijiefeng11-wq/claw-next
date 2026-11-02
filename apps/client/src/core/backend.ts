@@ -75,7 +75,7 @@ export class BackendClient {
     return parseMe(await this.request("GET", "/api/v1/me"));
   }
 
-  /** #62：用客户端口令换一次性后台登录票据（后台只接受本机请求）。票据不写日志。 */
+  /** #63/#67：用后台快捷登录授权码换一次性后台登录票据（后台只接受本机请求）。票据不写日志。 */
   async adminHandoff(): Promise<{ ticket: string; expires_at: number }> {
     const r = (await this.request("POST", "/api/v1/admin/handoff", "{}")) as { ticket?: unknown; expires_at?: unknown } | null;
     // 已过期的票据（按本机时间）也按响应不合格处理，不拿去打开。
