@@ -2631,12 +2631,25 @@ export class PddPageAdapter implements PlatformAdapter {
       const x = await this.run<Point | string>(TRANSFER_DIALOG_CLOSE).catch(() => "missing");
       if (typeof x !== "string") await this.nativeClick(x, page, epoch);
     };
-    // 点过行内“转移”后确认气泡可能还开着：提前返回时先点气泡里的“取消”，再关对话框（否则下次点“转移会话”只会关掉气泡）。
-    const cancelPopover = async () => {
+    // 点过行内“转移”后确认气泡可能还开着：提前返回时点一次气泡里的“取消”，再关对话框（否则下次点“转移会话”只会关掉气泡）。
+    // 只在原页面、原会话、有效期都仍成立时点；点前核对命中点属于目标行关联的唯一气泡里唯一的“取消”。
+    // 每次 transferTest 最多尝试一次，不论结果；返回实际点击状态或跳过原因（dispatched 只表示命令已被接受，是否关掉看收尾的残留观察）。
+    let cancelTried = false;
+    const cancelPopover = async (): Promise<string> => {
+      if (cancelTried) return "skipped:already_tried";
+      cancelTried = true;
+      let blocked = await gate();
+      if (blocked) return `skipped:${blocked}`;
       const list = await this.run<{ text: string; x: number; y: number }[] | string>(popoverButtonsScript(target)).catch(() => "script_failed");
-      const cancel = typeof list === "string" ? undefined : list.find((b) => b.text === "取消");
-      if (cancel) await this.nativeClick(cancel, page, epoch);
-      return cancel ? "cancelled" : typeof list === "string" ? list : "no_cancel_button";
+      if (typeof list === "string") return `skipped:${list}`;
+      const cancels = list.filter((b) => b.text === "取消");
+      if (cancels.length !== 1) return `skipped:cancel_${cancels.length ? "not_unique" : "missing"}`;
+      const owned = await this.run<string>(popoverButtonsScript(target, { x: cancels[0].x, y: cancels[0].y, text: "取消" })).catch(() => "script_failed");
+      if (owned !== "ok") return `skipped:${owned}`;
+      blocked = await gate();
+      if (blocked) return `skipped:${blocked}`;
+      const click = await this.nativeClick(cancels[0], page, epoch);
+      return click.status === "dispatched" ? "dispatched" : `${click.status}:${click.reason}`;
     };
     this.sending = true;
     let opened = false;
@@ -2703,11 +2716,7 @@ export class PddPageAdapter implements PlatformAdapter {
       // 气泡里另有转移原因和“发送”（可能向买家发消息），只认“无原因直接转移”。
       const ok = buttons.filter((b) => b.text === "无原因直接转移");
       if (!confirm) {
-        const cancel = buttons.find((b) => b.text === "取消");
-        if (cancel) {
-          await this.nativeClick(cancel, page, epoch);
-          popoverMaybe = false;
-        }
+        log({ phase: "inspect_cancel", result: await cancelPopover() });
         return `inspected:rows=${rows.length},confirm_buttons=${ok.length}`;
       }
       if (ok.length !== 1) return `not_executed:confirm_button_${ok.length ? "not_unique" : "missing"}`;
@@ -2734,9 +2743,8 @@ export class PddPageAdapter implements PlatformAdapter {
       return await this.settleTransfer(uid, page, epoch, same, gate, allowUnfavorite, log);
     } finally {
       if (opened) {
-        if (popoverMaybe) {
-          const r = await cancelPopover();
-          log({ phase: "cleanup", popover: r });
+        if (popoverMaybe && !cancelTried) {
+          log({ phase: "cleanup", popover_cancel: await cancelPopover() });
           await sleep(300);
         }
         await sleep(300);
