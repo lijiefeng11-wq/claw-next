@@ -131,6 +131,10 @@ class Handler(BaseHTTPRequestHandler):
                 return {"role": "client", "client_id": client["client_id"], "shop_id": client["shop_id"]}
         return self.server.auth.identity(token)
 
+    def _require_local_handoff(self):
+        # Proxy headers do not prove a local caller or replace its credential.
+        require(self.client_address[0] in ("127.0.0.1", "::1"), "local_only", 403)
+
     def _model_test(self, store):
         """Authorize and snapshot under the auth lock, then call the provider outside it."""
         with self.server.auth.lock:
@@ -273,6 +277,16 @@ class Handler(BaseHTTPRequestHandler):
             require(not identity["must_change_password"] or (path, method) in FIRST_LOGIN_ROUTES,
                     "admin_password_change_required", 403)
             token = self.headers["Authorization"][7:]
+            if path == "/api/v1/admin/handoff/grants" and method in ("GET", "POST"):
+                if method == "POST":
+                    require(self._json() == {}, "invalid_handoff_request")
+                    result = self.server.auth.create_handoff_grant(token)
+                else:
+                    result = self.server.auth.list_handoff_grants(token)
+                return self._send(200, {**result, "protocol_version": PROTOCOL_VERSION})
+            if len(parts) == 6 and parts[3:5] == ["handoff", "grants"] and method == "DELETE":
+                self.server.auth.revoke_handoff_grant(token, parts[5])
+                return self._send(200, {"ok": True, "protocol_version": PROTOCOL_VERSION})
             if path == "/api/v1/admin/model" and method in ("GET", "PUT"):
                 fallback = self.server.config.get("model", {})
                 if method == "PUT":
@@ -324,8 +338,20 @@ class Handler(BaseHTTPRequestHandler):
             require((STATIC / name).is_file(), "ui_not_installed", 503)
             return self._send(200, (STATIC / name).read_bytes(), mime)
         require(path.startswith("/api/v1/"), "not_found", 404)
+        if path == "/api/v1/admin/handoff" or path.startswith("/api/v1/admin/handoff/"):
+            self._require_local_handoff()
         if path == "/api/v1/admin/login" and method == "POST":
             result = self.server.auth.login(self._json(), self.client_address[0])
+            return self._send(200, {**result, "protocol_version": PROTOCOL_VERSION})
+        if method == "POST" and path in ("/api/v1/admin/handoff", "/api/v1/admin/handoff/redeem"):
+            payload = self._json()
+            if path.endswith("/redeem"):
+                result = self.server.auth.redeem_handoff_ticket(payload, self.client_address[0])
+            else:
+                require(payload == {}, "invalid_handoff_request")
+                header = self.headers.get("Authorization", "")
+                token = header[7:] if header.startswith("Bearer ") and len(header) <= 1024 and header.isascii() else None
+                result = self.server.auth.issue_handoff_ticket(token, self.client_address[0])
             return self._send(200, {**result, "protocol_version": PROTOCOL_VERSION})
         identity, store = self._identity(), self.server.store
         if path == "/api/v1/me" and method == "GET":

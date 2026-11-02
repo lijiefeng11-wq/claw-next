@@ -691,6 +691,28 @@
             </section>
           </div>
 
+          <section id="handoff-panel" class="card" aria-labelledby="handoff-title" hidden>
+            <div class="section-head">
+              <h3 id="handoff-title" class="section-title">本机快捷登录</h3>
+            </div>
+            <p class="field-help">生成一次授权码，填入本机客户端后，以后可从客户端免输密码打开后台。授权可进入完整管理后台，请勿分享。</p>
+            <p class="field-help">修改密码会撤销全部本机授权；退出当前页面只结束本次登录。</p>
+            <div class="form-actions">
+              <button id="handoff-create" class="btn" type="button">生成本机授权码</button>
+              <button id="handoff-refresh" class="btn btn-ghost" type="button">刷新授权列表</button>
+            </div>
+            <div id="handoff-secret" hidden>
+              <label class="field">
+                <span class="field-label">本次授权码（仅显示这一次）</span>
+                <input id="handoff-code" type="text" readonly autocomplete="off" spellcheck="false" aria-describedby="handoff-code-help">
+                <span id="handoff-code-help" class="field-help">点击框内全选后复制到客户端。离开本页即隐藏；遗失可撤销后重新生成。</span>
+              </label>
+              <button id="handoff-hide" class="btn btn-ghost btn-sm" type="button">隐藏授权码</button>
+            </div>
+            <p id="handoff-status" class="small muted" role="status" aria-live="polite"></p>
+            <div id="handoff-grants"></div>
+          </section>
+
           <section class="card" aria-labelledby="capability-title">
             <div class="section-head">
               <h3 id="capability-title" class="section-title">当前能力</h3>
