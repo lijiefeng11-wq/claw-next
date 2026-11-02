@@ -47,7 +47,7 @@ let checks=0;
   h.loadRules(Array.from({length:11},(_,i)=>({id:'r'+i,contains:'x',handling:{action:'mark',color:'green'}})));
   assert.equal(h.collectRules().value.length,11);h.state.rulesPage=1;h.loadRules([{id:'r',contains:'y',reply:'新店铺'}]);
   assert.equal(h.state.rulesPage,0);assert.ok(!('handling' in h.collectRules().value[0]));checks++;
-  assert.equal(h.policyError({action:'transfer',account:' '}),'请填写 1–40 字的客服账号显示名。');
+  assert.equal(h.policyError({action:'transfer',account:' '}),'请填写 1–40 字的接收人账号名。');
   assert.match(h.actionBadge('mark').textContent,/收藏/);assert.match(h.deliveryBadge('sent','transfer').textContent,/操作已确认/);checks++;
 }
 {

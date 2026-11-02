@@ -1,6 +1,7 @@
 """Local administrator credentials and revocable, memory-only login sessions."""
 import hashlib
 import hmac
+import re
 import secrets
 import sqlite3
 import threading
@@ -12,6 +13,12 @@ from .store import ApiError, require
 
 ITERATIONS = 600_000
 SESSION_SECONDS = 8 * 60 * 60
+SESSION_CAP = 64
+HANDOFF_GRANT_CAP = 8
+HANDOFF_TICKET_CAP = 8
+HANDOFF_TICKET_SECONDS = 60
+OPAQUE_SECRET = re.compile(r"[A-Za-z0-9_-]{43}")
+GRANT_IDENTIFIER = re.compile(r"[0-9a-f]{32}")
 # The seeded first-login credential. Only its salted hash is persisted; this
 # value is used once at startup to decide whether the account still needs a
 # password change.
@@ -30,12 +37,23 @@ def password_hash(value, salt, iterations=ITERATIONS):
     return hashlib.pbkdf2_hmac("sha256", password_bytes(value), salt, iterations)
 
 
+def opaque_secret(value):
+    """True only for a well formed opaque grant/ticket value."""
+    return isinstance(value, str) and OPAQUE_SECRET.fullmatch(value) is not None
+
+
+def grant_identifier(value):
+    """True only for a well formed lowercase hexadecimal grant id."""
+    return isinstance(value, str) and GRANT_IDENTIFIER.fullmatch(value) is not None
+
+
 class AdminAuth:
     # The service's data-directory lock must be held before opening this database.
     def __init__(self, data_dir):
         self.lock = threading.RLock()
         self.sessions = {}
         self.failures = {}
+        self.tickets = {}
         self.must_change_password = True
         self.db = sqlite3.connect(str(Path(data_dir) / "admin.sqlite3"), check_same_thread=False)
         self.db.row_factory = sqlite3.Row
@@ -45,6 +63,9 @@ class AdminAuth:
                 id INTEGER PRIMARY KEY CHECK(id=1), username TEXT NOT NULL,
                 algorithm TEXT NOT NULL, iterations INTEGER NOT NULL,
                 salt BLOB NOT NULL, password_hash BLOB NOT NULL)""")
+            self.db.execute("""CREATE TABLE IF NOT EXISTS admin_handoff_grants (
+                grant_id TEXT PRIMARY KEY, grant_hash BLOB NOT NULL UNIQUE,
+                created_at REAL NOT NULL)""")
             with self.db:
                 if self.db.execute("SELECT id FROM administrator").fetchone() is None:
                     salt = secrets.token_bytes(32)
@@ -79,6 +100,19 @@ class AdminAuth:
     def _failed(self, address, record):
         self.failures[address] = (record[0] + 1, record[1])
 
+    def _open_session(self, account):
+        """Minimal private session creator shared by login and handoff redeem."""
+        now = time.time()
+        self.sessions = {key: expiry for key, expiry in self.sessions.items() if expiry > now}
+        if len(self.sessions) >= SESSION_CAP:
+            del self.sessions[min(self.sessions, key=self.sessions.get)]
+        token = secrets.token_urlsafe(32)
+        expires_at = now + SESSION_SECONDS
+        self.sessions[self._session_key(token)] = expires_at
+        return {"role": "admin", "username": account["username"],
+                "must_change_password": self.must_change_password,
+                "session_token": token, "expires_at": expires_at}
+
     def login(self, payload, address):
         username, password = payload.get("username"), payload.get("password")
         require(isinstance(username, str) and 1 <= len(username) <= 128, "invalid_login")
@@ -91,16 +125,7 @@ class AdminAuth:
                 self._failed(address, record)
                 raise ApiError(401, "invalid_credentials")
             self.failures.pop(address, None)
-            now = time.time()
-            self.sessions = {key: expiry for key, expiry in self.sessions.items() if expiry > now}
-            if len(self.sessions) >= 64:
-                del self.sessions[min(self.sessions, key=self.sessions.get)]
-            token = secrets.token_urlsafe(32)
-            expires_at = now + SESSION_SECONDS
-            self.sessions[self._session_key(token)] = expires_at
-            return {"role": "admin", "username": account["username"],
-                    "must_change_password": self.must_change_password,
-                    "session_token": token, "expires_at": expires_at}
+            return self._open_session(account)
 
     @staticmethod
     def _session_key(token):
@@ -118,6 +143,89 @@ class AdminAuth:
             self.identity(token)
             del self.sessions[self._session_key(token)]
 
+    # Persistent grants authorize only short-lived, single-use handoff tickets.
+    def _handoff_admin(self, admin_token):
+        require(isinstance(admin_token, str) and admin_token.isascii() and len(admin_token) <= 1024,
+                "unauthorized", 401)
+        identity = self.identity(admin_token)
+        require(not identity["must_change_password"], "admin_password_change_required", 403)
+        return identity
+
+    def _grant_rows(self):
+        return self.db.execute("SELECT grant_id, grant_hash, created_at "
+                               "FROM admin_handoff_grants ORDER BY created_at, grant_id").fetchall()
+
+    def _grant_hook(self, grant_token):
+        """Match a presented grant against persisted hashes in constant time."""
+        if not opaque_secret(grant_token):
+            return None
+        presented = self._session_key(grant_token)
+        found = None
+        for row in self._grant_rows():
+            if hmac.compare_digest(row["grant_hash"], presented) and found is None:
+                found = row["grant_id"]
+        return found
+
+    def _prune_tickets(self, now):
+        self.tickets = {key: state for key, state in self.tickets.items() if state["expires_at"] > now}
+
+    def create_handoff_grant(self, admin_token):
+        with self.lock:
+            self._handoff_admin(admin_token)
+            require(len(self._grant_rows()) < HANDOFF_GRANT_CAP, "handoff_grant_limit", 409)
+            grant_id = secrets.token_hex(16)
+            grant_token = secrets.token_urlsafe(32)
+            created_at = time.time()
+            with self.db:
+                self.db.execute("INSERT INTO admin_handoff_grants (grant_id, grant_hash, created_at) "
+                                "VALUES (?,?,?)", (grant_id, self._session_key(grant_token), created_at))
+            return {"grant_id": grant_id, "grant_token": grant_token, "created_at": created_at}
+
+    def list_handoff_grants(self, admin_token):
+        with self.lock:
+            self._handoff_admin(admin_token)
+            return {"grants": [{"grant_id": row["grant_id"], "created_at": row["created_at"]}
+                               for row in self._grant_rows()]}
+
+    def revoke_handoff_grant(self, admin_token, grant_id):
+        with self.lock:
+            self._handoff_admin(admin_token)
+            require(grant_identifier(grant_id), "invalid_handoff_request")
+            with self.db:
+                self.db.execute("DELETE FROM admin_handoff_grants WHERE grant_id=?", (grant_id,))
+            self.tickets = {key: state for key, state in self.tickets.items()
+                            if state["grant_id"] != grant_id}
+
+    def issue_handoff_ticket(self, grant_token, address):
+        with self.lock:
+            record = self._check_limit(address)
+            now = time.time()
+            self._prune_tickets(now)
+            grant_id = self._grant_hook(grant_token)
+            if grant_id is None or self.must_change_password:
+                self._failed(address, record)
+                raise ApiError(401, "invalid_handoff_grant")
+            require(len(self.tickets) < HANDOFF_TICKET_CAP, "handoff_ticket_limit", 409)
+            ticket = secrets.token_urlsafe(32)
+            expires_at = now + HANDOFF_TICKET_SECONDS
+            self.tickets[self._session_key(ticket)] = {"grant_id": grant_id, "expires_at": expires_at}
+            self.failures.pop(address, None)
+            return {"ticket": ticket, "expires_at": expires_at}
+
+    def redeem_handoff_ticket(self, payload, address):
+        with self.lock:
+            record = self._check_limit(address)
+            valid = isinstance(payload, dict) and set(payload) == {"ticket"} and opaque_secret(payload["ticket"])
+            state = self.tickets.pop(self._session_key(payload["ticket"]), None) if valid else None
+            grant_id = state["grant_id"] if state else None
+            parent = (self.db.execute("SELECT 1 FROM admin_handoff_grants WHERE grant_id=?", (grant_id,)).fetchone()
+                      if grant_id is not None else None)
+            if state is None or state["expires_at"] <= time.time() or parent is None or self.must_change_password:
+                self._failed(address, record)
+                raise ApiError(401, "invalid_handoff")
+            self.failures.pop(address, None)
+            return self._open_session(self._account())
+
     def change_password(self, token, payload, address):
         with self.lock:
             self.identity(token)
@@ -134,15 +242,19 @@ class AdminAuth:
             require(new != current, "password_unchanged")
             salt = secrets.token_bytes(32)
             digest = password_hash(new, salt)
+            # Grants die in the same transaction as the credential update.
             with self.db:
                 self.db.execute("UPDATE administrator SET salt=?, password_hash=?, iterations=? WHERE id=1",
                                 (salt, digest, ITERATIONS))
-            # Clear the first-login flag only after the new hash is committed.
+                self.db.execute("DELETE FROM admin_handoff_grants")
+            # Only a committed change revokes memory-only state.
             self.must_change_password = False
+            self.tickets.clear()
             self.sessions.clear()
             self.failures.clear()
 
     def close(self):
         with self.lock:
             self.sessions.clear()
+            self.tickets.clear()
             self.db.close()
