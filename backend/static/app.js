@@ -34,6 +34,7 @@
     me: null,
     username: null,
     expiresAt: null,
+    handoff: { seq: 0, busy: false },
     route: "dashboard",
     shops: [],
     selectedShopId: null,
@@ -112,6 +113,8 @@
     "system-connection", "system-version", "system-checked", "system-shop-state",
     "system-user", "system-session", "system-role", "system-refresh-btn",
     "settings-password-btn", "settings-logout-btn",
+    "handoff-panel", "handoff-create", "handoff-refresh", "handoff-secret",
+    "handoff-code", "handoff-hide", "handoff-status", "handoff-grants",
     "verify-panel", "verify-form", "verify-identity-shop", "verify-identity-conversation",
     "verify-identity-event", "verify-outcome", "verify-note", "verify-note-count",
     "verify-error", "verify-status", "verify-submit", "verify-cancel", "verify-close"
@@ -171,7 +174,8 @@
       method: opts.method || "GET",
       headers: headers,
       credentials: "same-origin",
-      cache: "no-store"
+      cache: "no-store",
+      redirect: opts.redirect || "follow"
     };
     if (Object.prototype.hasOwnProperty.call(opts, "body")) {
       headers["Content-Type"] = "application/json";
@@ -441,6 +445,7 @@
   function applyRoute(route, options) {
     const opts = options || {};
     const target = Object.prototype.hasOwnProperty.call(ROUTES, route) ? route : "dashboard";
+    if (target !== "system") clearHandoff();
     state.route = target;
 
     ROUTE_KEYS.forEach(function (key) {
@@ -469,6 +474,7 @@
     }
     if (target === "system" && opts.refreshSystem !== false) {
       refreshSystemStatus(false);
+      loadHandoffGrants();
     }
     if (opts.scroll !== false) {
       window.scrollTo(0, 0);
@@ -1385,6 +1391,7 @@
   }
 
   function clearAllVisibleData() {
+    clearHandoff();
     state.shops = [];
     state.selectedShopId = null;
     state.loadedSettings = null;
@@ -1551,6 +1558,47 @@
     return "登录失败：发生未知错误，请重试。";
   }
 
+  async function acceptAdminSession(data, username, epoch) {
+    state.token = data.session_token;
+    state.username = typeof data.username === "string" && data.username ? data.username : username;
+    const expires = Number(data.expires_at);
+    state.expiresAt = Number.isFinite(expires) && expires > 0 ? expires : null;
+    state.me = {
+      role: data.role,
+      username: state.username,
+      protocol_version: data.protocol_version,
+      must_change_password: data.must_change_password === true
+    };
+    state.formDirty = false;
+    state.model.loaded = false;
+    state.model.dirty = false;
+    el["password-input"].value = "";
+    el["login-view"].hidden = true;
+    el["login-panel"].hidden = false;
+    el["dashboard"].hidden = passwordChangeRequired();
+    el["admin-badge"].hidden = false;
+    setText(el["admin-badge"], "管理员：" + state.username);
+    el["logout-btn"].hidden = false;
+    el["logout-btn"].disabled = false;
+    setText(el["logout-btn"], "退出登录");
+    clearChangePasswordForm();
+    setChangeBusy(false);
+    renderAccountMeta();
+    setSaveBusy(false);
+    setFormDisabled(true);
+    if (passwordChangeRequired()) {
+      openAccountDialog();
+      return;
+    }
+    applyRoute(routeFromHash(), { refreshSystem: false, scroll: false });
+    startShopPolling(epoch);
+
+    if (data.protocol_version && data.protocol_version !== PROTOCOL_VERSION) {
+      showAlert("服务端协议版本为 " + String(data.protocol_version) + "，本页面按 " + PROTOCOL_VERSION + " 构建，字段可能不兼容。", "warn");
+    }
+    await loadDashboard(epoch);
+  }
+
   async function login(username, password) {
     state.epoch += 1;
     const epoch = state.epoch;
@@ -1578,44 +1626,7 @@
         showLoginError("服务器没有返回有效的登录会话，请重试。");
         return;
       }
-      state.token = data.session_token;
-      state.username = typeof data.username === "string" && data.username ? data.username : username;
-      const expires = Number(data.expires_at);
-      state.expiresAt = Number.isFinite(expires) && expires > 0 ? expires : null;
-      state.me = {
-        role: data.role,
-        username: state.username,
-        protocol_version: data.protocol_version,
-        must_change_password: data.must_change_password === true
-      };
-      state.formDirty = false;
-      state.model.loaded = false;
-      state.model.dirty = false;
-      el["password-input"].value = "";
-      el["login-view"].hidden = true;
-      el["login-panel"].hidden = false;
-      el["dashboard"].hidden = passwordChangeRequired();
-      el["admin-badge"].hidden = false;
-      setText(el["admin-badge"], "管理员：" + state.username);
-      el["logout-btn"].hidden = false;
-      el["logout-btn"].disabled = false;
-      setText(el["logout-btn"], "退出登录");
-      clearChangePasswordForm();
-      setChangeBusy(false);
-      renderAccountMeta();
-      setSaveBusy(false);
-      setFormDisabled(true);
-      if (passwordChangeRequired()) {
-        openAccountDialog();
-        return;
-      }
-      applyRoute(routeFromHash(), { refreshSystem: false, scroll: false });
-      startShopPolling(epoch);
-
-      if (data.protocol_version && data.protocol_version !== PROTOCOL_VERSION) {
-        showAlert("服务端协议版本为 " + String(data.protocol_version) + "，本页面按 " + PROTOCOL_VERSION + " 构建，字段可能不兼容。", "warn");
-      }
-      await loadDashboard(epoch);
+      await acceptAdminSession(data, username, epoch);
     } catch (err) {
       if (isStale(epoch)) {
         return;
@@ -1637,6 +1648,177 @@
         setLoginBusy(false);
       }
     }
+  }
+
+  /* ---------- 本机快捷登录 ---------- */
+
+  function localHandoffOrigin() {
+    return ["http:", "https:"].includes(window.location.protocol)
+      && ["127.0.0.1", "localhost", "[::1]"].includes(window.location.hostname);
+  }
+
+  function takeHandoffTicket() {
+    const hash = window.location.hash;
+    if (!hash.startsWith("#handoff=")) return { present: false, ticket: null };
+    // Clear the secret before any network call. If this fails, do not redeem.
+    try {
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    } catch (_) {
+      return { present: true, ticket: null };
+    }
+    const match = /^#handoff=([A-Za-z0-9_-]{43})$/.exec(hash);
+    return { present: true, ticket: match ? match[1] : null };
+  }
+
+  async function redeemHandoff(ticket) {
+    if (!ticket || !localHandoffOrigin()) {
+      showLoginError("快捷登录链接无效，请使用管理员密码登录。");
+      return;
+    }
+    state.epoch += 1;
+    const epoch = state.epoch;
+    setLoginBusy(true);
+    try {
+      const data = await request("/api/v1/admin/handoff/redeem", {
+        method: "POST", body: { ticket: ticket }, token: null, redirect: "error"
+      });
+      ticket = null;
+      if (isStale(epoch)) return;
+      if (!data || data.protocol_version !== PROTOCOL_VERSION || data.role !== "admin"
+          || data.username !== "admin" || data.must_change_password !== false
+          || typeof data.session_token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(data.session_token)
+          || typeof data.expires_at !== "number" || !Number.isFinite(data.expires_at)
+          || data.expires_at * 1000 <= Date.now()) {
+        throw new ApiError(0, "bad_response", "");
+      }
+      await acceptAdminSession(data, "admin", epoch);
+    } catch (err) {
+      if (!isStale(epoch)) {
+        endSession("快捷登录未完成，请使用管理员密码登录。", { kind: "warn" });
+        if (err instanceof ApiError && err.status === 404) {
+          showLoginNotice("此后台尚不支持快捷登录，请使用管理员密码登录。", "info");
+        }
+      }
+    } finally {
+      ticket = null;
+      if (!isStale(epoch)) setLoginBusy(false);
+    }
+  }
+
+  function hideHandoffCode() {
+    el["handoff-code"].value = "";
+    el["handoff-secret"].hidden = true;
+  }
+
+  function clearHandoff() {
+    state.handoff.seq += 1;
+    state.handoff.busy = false;
+    hideHandoffCode();
+    setText(el["handoff-status"], "");
+    el["handoff-grants"].replaceChildren();
+    el["handoff-create"].disabled = false;
+    el["handoff-refresh"].disabled = false;
+  }
+
+  function handoffError(err) {
+    if (err instanceof ApiError) {
+      if (err.code === "handoff_grant_limit") return "授权已达上限，请先撤销不用的授权。";
+      if (err.code === "local_only") return "请从本机地址打开后台设置授权。";
+      if (err.status === 404) return "此后台尚不支持本机授权。";
+    }
+    // Do not surface arbitrary backend error codes, bodies or credential values.
+    return "操作结果未确认，请刷新授权列表核对，不要重复生成。";
+  }
+
+  function validGrant(item) {
+    return item && typeof item.grant_id === "string" && /^[0-9a-f]{32}$/.test(item.grant_id)
+      && typeof item.created_at === "number" && Number.isFinite(item.created_at) && item.created_at > 0;
+  }
+
+  function renderHandoffGrants(grants) {
+    const list = el["handoff-grants"];
+    list.replaceChildren();
+    if (!grants.length) {
+      setText(list, "尚无本机授权。");
+      return;
+    }
+    grants.forEach(function (grant) {
+      const row = document.createElement("p");
+      row.className = "form-actions";
+      const label = document.createElement("span");
+      setText(label, "授权 " + grant.grant_id.slice(0, 8) + " · " + formatTime(grant.created_at));
+      const revoke = document.createElement("button");
+      revoke.className = "btn btn-ghost btn-sm";
+      revoke.type = "button";
+      setText(revoke, "撤销");
+      revoke.addEventListener("click", function () {
+        if (window.confirm("撤销此本机授权？该客户端以后打开后台将需要重新授权；已打开的后台会话仍有效。")) {
+          manageHandoff("revoke", grant.grant_id);
+        }
+      });
+      row.appendChild(label);
+      row.appendChild(revoke);
+      list.appendChild(row);
+    });
+  }
+
+  async function manageHandoff(action, grantId) {
+    if (!state.token || passwordChangeRequired() || !localHandoffOrigin()
+        || state.route !== "system" || state.handoff.busy) return;
+    const epoch = state.epoch;
+    const seq = ++state.handoff.seq;
+    const current = function () { return !isStale(epoch) && seq === state.handoff.seq; };
+    state.handoff.busy = true;
+    el["handoff-create"].disabled = true;
+    el["handoff-refresh"].disabled = true;
+    setText(el["handoff-status"], "正在处理…");
+    if (action !== "list") hideHandoffCode();
+    try {
+      const base = "/api/v1/admin/handoff/grants";
+      if (action === "create") {
+        const data = await request(base, { method: "POST", body: {}, redirect: "error" });
+        if (!current()) return;
+        if (!validGrant(data) || data.protocol_version !== PROTOCOL_VERSION
+            || typeof data.grant_token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(data.grant_token)) {
+          throw new ApiError(0, "bad_response", "");
+        }
+        el["handoff-code"].value = data.grant_token;
+        el["handoff-secret"].hidden = false;
+      } else if (action === "revoke") {
+        const data = await request(base + "/" + grantId, { method: "DELETE", redirect: "error" });
+        if (!current()) return;
+        if (!data || data.ok !== true || data.protocol_version !== PROTOCOL_VERSION) {
+          throw new ApiError(0, "bad_response", "");
+        }
+      }
+      const data = await request(base, { redirect: "error" });
+      if (!current()) return;
+      if (!data || data.protocol_version !== PROTOCOL_VERSION || !Array.isArray(data.grants)
+          || data.grants.length > 8 || !data.grants.every(validGrant)
+          || new Set(data.grants.map(function (g) { return g.grant_id; })).size !== data.grants.length) {
+        throw new ApiError(0, "bad_response", "");
+      }
+      renderHandoffGrants(data.grants);
+      setText(el["handoff-status"], action === "create" ? "授权码已生成，请保存到本机客户端。"
+        : action === "revoke" ? "授权已撤销。" : "授权列表已刷新。");
+    } catch (err) {
+      if (!current()) return;
+      if (err instanceof ApiError && err.status === 401) {
+        endSession("登录已失效，请重新登录。", { kind: "warn" });
+      } else {
+        setText(el["handoff-status"], handoffError(err));
+      }
+    } finally {
+      if (current()) {
+        state.handoff.busy = false;
+        el["handoff-create"].disabled = false;
+        el["handoff-refresh"].disabled = false;
+      }
+    }
+  }
+
+  function loadHandoffGrants() {
+    return manageHandoff("list");
   }
 
   /* ---------- 修改密码 ---------- */
@@ -1766,6 +1948,7 @@
   /* ---------- 退出登录 ---------- */
 
   async function logout() {
+    clearHandoff();
     const epoch = state.epoch;
     const token = state.token;
     if (!token) {
@@ -3349,6 +3532,7 @@
   }
 
   function openAccountDialog() {
+    clearHandoff();
     if (!state.token) {
       return;
     }
@@ -3360,6 +3544,7 @@
   }
 
   function init() {
+    const handoff = takeHandoffTicket();
     IDS.forEach(function (id) {
       el[id] = byId(id);
     });
@@ -3450,6 +3635,11 @@
     el["account-panel"].addEventListener("close", clearChangePasswordForm);
 
     el["change-password-form"].addEventListener("submit", changePassword);
+    el["handoff-create"].addEventListener("click", function () { manageHandoff("create"); });
+    el["handoff-refresh"].addEventListener("click", loadHandoffGrants);
+    el["handoff-hide"].addEventListener("click", hideHandoffCode);
+    el["handoff-code"].addEventListener("click", function () { this.select(); });
+    el["handoff-panel"].hidden = !localHandoffOrigin();
 
     el["verify-form"].addEventListener("submit", submitVerify);
     el["verify-cancel"].addEventListener("click", function () {
@@ -3536,6 +3726,7 @@
 
     applyRoute("dashboard", { refreshSystem: false, scroll: false });
     el["username-input"].focus();
+    if (handoff.present) redeemHandoff(handoff.ticket);
   }
 
   if (document.readyState === "loading") {
