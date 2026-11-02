@@ -33,6 +33,8 @@ type Opts = {
   cancelCheck?: string;
   /** 点“取消”的结果。 */
   cancelClick?: Click;
+  /** 收尾读完气泡后的那次会话核对期间，“取消”所在位置变成别的控件（核对改为遮挡）。 */
+  changeDuringFinalGate?: boolean;
 };
 
 function harness(opts: Opts) {
@@ -42,9 +44,18 @@ function harness(opts: Opts) {
   const positions = [...opts.positions];
   let last: Pt | string = "missing";
   let gateValue: string | null = null;
+  let cancelCheck = opts.cancelCheck ?? "ok";
+  let listReads = 0;
+  let armed = false;
   a.window = { isDestroyed: () => false };
   a.tracker = { status: () => ({ logged_in: true }) };
-  a.actionGate = async () => gateValue;
+  a.actionGate = async () => {
+    if (armed) {
+      armed = false;
+      cancelCheck = "confirm_covered";
+    }
+    return gateValue;
+  };
   a.activeConvToken = async () => "conv-1";
   a.scanKeepingFresh = async () => ({ items: [{ key: "9001-x", active: true, unread: false }] });
   a.nativeClick = async (pt: Pt): Promise<Click> => {
@@ -58,8 +69,12 @@ function harness(opts: Opts) {
     if (script.includes("el-dialog__headerbtn")) return CLOSE;
     if (script.includes("cells")) return [{ cells: [NAME, "在线"], button: ROW }];
     if (script.includes("aria-describedby")) {
-      if (script.includes("const check = null")) return [{ text: "无原因直接转移", ...CONFIRM }, { text: "取消", ...CANCEL }];
-      if (script.includes('"text":"取消"')) return opts.cancelCheck ?? "ok";
+      if (script.includes("const check = null")) {
+        // 第 1 次是主流程读气泡，第 2 次是收尾“取消”读气泡；之后的那次会话核对期间页面发生变化。
+        if (++listReads === 2 && opts.changeDuringFinalGate) armed = true;
+        return [{ text: "无原因直接转移", ...CONFIRM }, { text: "取消", ...CANCEL }];
+      }
+      if (script.includes('"text":"取消"')) return cancelCheck;
       return "ok";
     }
     if (script.includes("target_button_not_unique") && script.includes("scrollIntoView")) {
@@ -156,4 +171,11 @@ test("复审反例：点“取消”没发出或结果不明——如实记录�
       assert.equal(JSON.stringify(h.logs()).includes("cancelled"), false);
     }
   }
+});
+
+test("复审反例：读完气泡后的会话核对期间“取消”位置被换成别的控件——命中核对在最后，不点", async () => {
+  const h = harness({ ...stable, changeDuringFinalGate: true });
+  assert.equal(await run(h), "inspected:rows=1,confirm_buttons=1");
+  assert.equal(h.clicks.some((c) => same(c, CANCEL) || same(c, CONFIRM)), false);
+  assert.equal(cancelResultOf(h), "skipped:confirm_covered");
 });

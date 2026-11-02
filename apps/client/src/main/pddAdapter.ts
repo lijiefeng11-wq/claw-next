@@ -2632,7 +2632,7 @@ export class PddPageAdapter implements PlatformAdapter {
       if (typeof x !== "string") await this.nativeClick(x, page, epoch);
     };
     // 点过行内“转移”后确认气泡可能还开着：提前返回时点一次气泡里的“取消”，再关对话框（否则下次点“转移会话”只会关掉气泡）。
-    // 只在原页面、原会话、有效期都仍成立时点；点前核对命中点属于目标行关联的唯一气泡里唯一的“取消”。
+    // 只在原页面、原会话、有效期都仍成立时点；点击前最后一步核对命中点属于目标行关联的唯一气泡里唯一的“取消”。
     // 每次 transferTest 最多尝试一次，不论结果；返回实际点击状态或跳过原因（dispatched 只表示命令已被接受，是否关掉看收尾的残留观察）。
     let cancelTried = false;
     const cancelPopover = async (): Promise<string> => {
@@ -2644,10 +2644,11 @@ export class PddPageAdapter implements PlatformAdapter {
       if (typeof list === "string") return `skipped:${list}`;
       const cancels = list.filter((b) => b.text === "取消");
       if (cancels.length !== 1) return `skipped:cancel_${cancels.length ? "not_unique" : "missing"}`;
-      const owned = await this.run<string>(popoverButtonsScript(target, { x: cancels[0].x, y: cancels[0].y, text: "取消" })).catch(() => "script_failed");
-      if (owned !== "ok") return `skipped:${owned}`;
       blocked = await gate();
       if (blocked) return `skipped:${blocked}`;
+      // 命中核对放在会话核对（会异步扫描页面）之后，作为点击前最后一次页面核对，避免核对后页面又变。
+      const owned = await this.run<string>(popoverButtonsScript(target, { x: cancels[0].x, y: cancels[0].y, text: "取消" })).catch(() => "script_failed");
+      if (owned !== "ok") return `skipped:${owned}`;
       const click = await this.nativeClick(cancels[0], page, epoch);
       return click.status === "dispatched" ? "dispatched" : `${click.status}:${click.reason}`;
     };
