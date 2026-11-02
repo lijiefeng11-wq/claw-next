@@ -61,11 +61,12 @@ describe("IPC 错误提示", () => {
     }
   });
 
-  test("app.ts 处理 unexpected_field: 前缀，两处调用都改用 errorText", () => {
+  test("app.ts 处理 unexpected_field: 前缀，各处调用都改用 errorText", () => {
     assert.match(renderer, /function errorText\(code: string \| undefined\): string/);
     assert.match(renderer, /code\?\.startsWith\("unexpected_field:"\)/);
     assert.ok(renderer.includes("请求格式不对（含不认识的字段），请更新客户端或查看日志"));
-    assert.equal((renderer.match(/errorText\(r\.error\)/g) ?? []).length, 2);
+    // 通用调用、清理弹窗，以及“打开后台管理”（#62）三处。
+    assert.equal((renderer.match(/errorText\(r\.error\)/g) ?? []).length, 3);
     assert.ok(!renderer.includes('ERRORS[r.error ?? ""]'), "两处调用应全部替换");
   });
 });

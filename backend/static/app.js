@@ -1520,6 +1520,17 @@
 
   /* ---------- 登录 ---------- */
 
+  function handoffErrorMessage(err) {
+    // 还没有兑换接口的旧后台：路径不存在，或按需要登录的接口拒绝（unauthorized）。
+    if (err && (err.status === 404 || err.code === "unauthorized")) {
+      return "后台还不支持一键登录，请输入密码登录。";
+    }
+    if (err && err.code === "invalid_handoff") {
+      return "一键登录已失效（只能用一次，60 秒内有效），请在客户端重新点“打开后台管理”，或输入密码登录。";
+    }
+    return "一键登录没成功：" + loginErrorMessage(err).replace(/^登录失败：/, "") + " 也可以输入密码登录。";
+  }
+
   function loginErrorMessage(err) {
     const codeSuffix = function (code) {
       return code ? "（" + code + "）" : "";
@@ -1551,7 +1562,23 @@
     return "登录失败：发生未知错误，请重试。";
   }
 
-  async function login(username, password) {
+  // 客户端“打开后台管理”（#62）带来的一次性票据：放在 #handoff= 后面。启动时先从地址栏和历史记录里去掉，再兑换。
+  function takeHandoffTicket() {
+    const hash = window.location.hash || "";
+    if (hash.indexOf("#handoff=") !== 0) {
+      return { present: false, ticket: null };
+    }
+    try {
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    } catch (_err) {
+      window.location.hash = "";
+    }
+    const m = /^#handoff=([A-Za-z0-9_-]{20,128})$/.exec(hash);
+    return { present: true, ticket: m ? m[1] : null };
+  }
+
+  // ticket 为字符串时用一次性票据换会话（不需要用户名和密码），否则按用户名密码登录。
+  async function login(username, password, ticket) {
     state.epoch += 1;
     const epoch = state.epoch;
     setLoginBusy(true);
@@ -1559,11 +1586,13 @@
     showLoginNotice("");
     showAlert("");
     try {
-      const data = await request("/api/v1/admin/login", {
-        method: "POST",
-        body: { username: username, password: password },
-        token: null
-      });
+      const data = typeof ticket === "string"
+        ? await request("/api/v1/admin/handoff/redeem", { method: "POST", body: { ticket: ticket }, token: null })
+        : await request("/api/v1/admin/login", {
+          method: "POST",
+          body: { username: username, password: password },
+          token: null
+        });
       if (isStale(epoch)) {
         return;
       }
@@ -1631,7 +1660,7 @@
       el["logout-btn"].hidden = true;
       el["password-input"].value = "";
       el["username-input"].value = username || "admin";
-      showLoginError(loginErrorMessage(err));
+      showLoginError(typeof ticket === "string" ? handoffErrorMessage(err) : loginErrorMessage(err));
     } finally {
       if (!isStale(epoch)) {
         setLoginBusy(false);
@@ -3360,6 +3389,8 @@
   }
 
   function init() {
+    // 先取走一键登录票据（在任何按地址路由的逻辑读取地址之前）。
+    const handoff = takeHandoffTicket();
     IDS.forEach(function (id) {
       el[id] = byId(id);
     });
@@ -3536,6 +3567,11 @@
 
     applyRoute("dashboard", { refreshSystem: false, scroll: false });
     el["username-input"].focus();
+    if (handoff.ticket) {
+      login(null, null, handoff.ticket);
+    } else if (handoff.present) {
+      showLoginError("一键登录链接格式不对，请在客户端重新点“打开后台管理”，或输入密码登录。");
+    }
   }
 
   if (document.readyState === "loading") {

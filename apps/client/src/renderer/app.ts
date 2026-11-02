@@ -705,7 +705,33 @@
     if (selected && !state.shops.some((s) => s.config.shop_id === selected)) selected = null;
     if (!selected && editing !== "new") selected = state.shops[0]?.config.shop_id ?? null;
     render();
+    renderAdminButton();
   }
+
+  // 顶栏“打开后台管理”（#62）：用选中店铺的口令向本机后台换一次性票据并在浏览器打开，免输后台密码。
+  const adminBtn = document.getElementById("open-admin") as HTMLButtonElement;
+  let adminBusy = false;
+  function renderAdminButton() {
+    const usable = state.shops.some((s) => s.token_set);
+    adminBtn.disabled = adminBusy || !usable;
+    adminBtn.textContent = adminBusy ? "正在打开…" : "打开后台管理 ↗";
+    adminBtn.title = usable ? "在浏览器打开后台管理（本机后台自动登录，不用输密码）" : "先给店铺设置后台口令，才能打开后台";
+  }
+  adminBtn.addEventListener("click", async () => {
+    if (adminBusy) return;
+    adminBusy = true;
+    renderAdminButton();
+    try {
+      const r = await bridge.invoke("app:openAdmin", { shop_id: selected });
+      const text = (r.data as unknown as { open_admin?: { text?: unknown } } | undefined)?.open_admin?.text;
+      toast(r.ok ? (typeof text === "string" ? text : "已在浏览器打开后台管理") : errorText(r.error));
+    } catch {
+      toast("打开后台管理失败");
+    } finally {
+      adminBusy = false;
+      renderAdminButton();
+    }
+  });
 
   // 店铺栏可收起成窄条（只显示店名前两个字与状态点），把宽度让给平台页面。
   const layoutEl = document.querySelector(".layout") as HTMLElement;

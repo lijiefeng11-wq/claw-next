@@ -18,6 +18,7 @@
     "app:setStartup",
     "app:checkUpdate",
     "app:installUpdate",
+    "app:openAdmin",
     "conv:takeover",
     "sim:message",
     "sim:action",

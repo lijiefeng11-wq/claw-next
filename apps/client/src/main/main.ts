@@ -25,6 +25,8 @@ import { ARG_LAUNCHED_BY_AGENT, ARG_NO_HANDOVER, ARG_SUPERVISED, startupDecision
 import { StartupManager } from "./startupManager.js";
 import { Updater, readBuildInfo, writeReadyMarker } from "./updater.js";
 import { chromeLikeUserAgent } from "../core/userAgent.js";
+import { type AdminOpenResult, adminOpenText, adminPageUrl, isLoopbackBackend, pickAdminShop } from "../core/adminHandoff.js";
+import { BackendClient, BackendError } from "../core/backend.js";
 
 const APP_NAME = "Claw-Next-Client";
 app.setName(APP_NAME);
@@ -119,6 +121,33 @@ class Controller {
         };
       }),
     };
+  }
+
+  /**
+   * #62 一键打开后台管理：用选中店铺（没有就用第一个有口令的店铺）的客户端口令向本机后台换一次性票据，
+   * 再用系统浏览器打开管理页，票据放在 # 后面。后台不在本机、还不支持或换票失败时，只打开登录页（照常输入密码）。
+   * 票据和口令都不写日志。
+   */
+  private async openAdmin(selected: string | null): Promise<{ result: AdminOpenResult; text: string }> {
+    const config = pickAdminShop(this.configs.list(), selected, (id) => !!(this.slots.get(id)?.ephemeralToken ?? this.secrets.get(id)));
+    if (!config) return { result: "no_shop", text: adminOpenText("no_shop") };
+    let result: AdminOpenResult = "not_local";
+    let ticket: string | null = null;
+    let detail: string | undefined;
+    if (isLoopbackBackend(config.backend_url)) {
+      const token = this.slots.get(config.shop_id)?.ephemeralToken ?? this.secrets.get(config.shop_id);
+      try {
+        ticket = (await new BackendClient(config.backend_url, token!).adminHandoff()).ticket;
+        result = "ok";
+      } catch (err) {
+        // 还没有这个接口的旧后台：路径不存在（404），或按普通管理接口要求管理员身份（admin_required）。
+        result = err instanceof BackendError && (err.status === 404 || err.code === "admin_required") ? "unsupported" : "failed";
+        detail = errorCode(err);
+      }
+    }
+    console.log(`admin open shop=${config.shop_id} result=${result}${detail ? ` detail=${detail}` : ""}`);
+    await shell.openExternal(adminPageUrl(config.backend_url, ticket));
+    return { result, text: adminOpenText(result, detail) };
   }
 
   /** 店铺提醒（侧栏标红与系统通知）；只看平台页面与登录状态，不含买家内容。 */
@@ -393,6 +422,8 @@ class Controller {
       case "app:checkUpdate":
         await this.updater.check();
         return this.state();
+      case "app:openAdmin":
+        return { open_admin: await this.openAdmin(p.shop_id) };
       case "app:installUpdate": {
         const choice = await dialog.showMessageBox({
           type: "question",
