@@ -1,0 +1,102 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import Module from "node:module";
+import os from "node:os";
+import path from "node:path";
+import { test } from "node:test";
+
+// 诊断转移（transferTest）的点击前后核对：全部用虚构页面替身，只驱动坐标读取与点击记录，不连真实页面。
+const req = Module.createRequire(__filename);
+const electronPath = req.resolve("electron");
+req.cache[electronPath] = { id: electronPath, filename: electronPath, loaded: true, exports: { BrowserWindow: class {}, session: {} } } as unknown as NodeModule;
+const { PddPageAdapter } = req("../src/main/pddAdapter.js") as typeof import("../src/main/pddAdapter.js");
+
+const NAME = "主账号";
+type Pt = { x: number; y: number };
+const OPEN: Pt = { x: 100, y: 100 };
+const CLOSE: Pt = { x: 900, y: 50 };
+const CANCEL: Pt = { x: 320, y: 260 };
+const CONFIRM: Pt = { x: 400, y: 260 };
+
+/** positions：每次读“转移”按钮（带滚动与遮挡核对）依次返回的坐标；rect：点行后只读位置的结果。 */
+function harness(opts: { leftovers?: { dialogs: number; popovers: number }; positions: (Pt | string)[]; rect?: Pt | string }) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "claw-transfer-test-"));
+  const a = new PddPageAdapter("fictional", "虚构", path.join(dir, "requests.jsonl")) as any;
+  const clicks: Pt[] = [];
+  const positions = [...opts.positions];
+  let last: Pt | string = "missing";
+  a.window = { isDestroyed: () => false };
+  a.tracker = { status: () => ({ logged_in: true }) };
+  a.actionGate = async () => null;
+  a.activeConvToken = async () => "conv-1";
+  a.scanKeepingFresh = async () => ({ items: [{ key: "9001-x", active: true, unread: false }] });
+  a.nativeClick = async (pt: Pt) => (clicks.push({ x: pt.x, y: pt.y }), { status: "dispatched" });
+  a.run = async (script: string) => {
+    if (script.includes("const popovers")) return opts.leftovers ?? { dialogs: 0, popovers: 0 };
+    if (script.includes("el-dialog__headerbtn")) return CLOSE;
+    if (script.includes("cells")) return [{ cells: [NAME, "在线"], button: { x: 300, y: 200 } }];
+    if (script.includes("aria-describedby")) {
+      if (script.includes('"text":"无原因直接转移"')) return "ok";
+      return [
+        { text: "无原因直接转移", ...CONFIRM },
+        { text: "取消", ...CANCEL },
+      ];
+    }
+    if (script.includes("target_button_not_unique") && script.includes("scrollIntoView")) {
+      if (positions.length) last = positions.shift()!;
+      return last;
+    }
+    if (script.includes("target_button_not_unique")) return opts.rect ?? last;
+    if (script.includes('"转移会话"')) return OPEN;
+    return "unexpected_script";
+  };
+  const logFile = path.join(dir, "transfer-test.jsonl");
+  const logs = () => (fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
+  return { a, clicks, logs, logFile };
+}
+
+const run = (h: ReturnType<typeof harness>, confirm = false) => h.a.transferTest(NAME, confirm, "conv-1", Date.now() / 1000 + 120) as Promise<string>;
+
+test("上次留下的转移对话框或确认气泡还开着：不开始、不点击", async () => {
+  for (const leftovers of [{ dialogs: 1, popovers: 0 }, { dialogs: 0, popovers: 1 }]) {
+    const h = harness({ leftovers, positions: [{ x: 300, y: 200 }] });
+    assert.equal(await run(h), "not_executed:leftover_popup");
+    assert.deepEqual(h.clicks, []);
+    assert.equal(h.logs().at(-1).reason, "leftover_popup");
+  }
+});
+
+test("对话框还在动画中、按钮位置一直在变：不点行内“转移”，关闭对话框", async () => {
+  const h = harness({ positions: [0, 1, 2, 3, 4, 5, 6, 7].map((i) => ({ x: 300, y: 260 - i * 10 })) });
+  assert.equal(await run(h), "not_executed:target_unstable");
+  assert.deepEqual(h.clicks, [OPEN, CLOSE]);
+});
+
+test("位置稳定后才点；点行后确认气泡盖住按钮也不误判为挪位（只读位置、不核对遮挡）", async () => {
+  const h = harness({ positions: [{ x: 300, y: 230 }, { x: 300, y: 200 }, { x: 300, y: 200 }], rect: { x: 300, y: 200 } });
+  assert.equal(await run(h), "inspected:rows=1,confirm_buttons=1");
+  // 打开、点行、点气泡“取消”、关对话框；气泡已取消，收尾不再点第二次“取消”。
+  assert.deepEqual(h.clicks, [OPEN, { x: 300, y: 200 }, CANCEL, CLOSE]);
+  const cleanup = h.logs().filter((r) => r.phase === "cleanup");
+  assert.equal(cleanup.some((r) => r.popover), false);
+  assert.deepEqual(cleanup.at(-1).leftover, { dialogs: 0, popovers: 0 });
+});
+
+test("点行后行真的挪了：不继续，记位移；收尾先点气泡“取消”再关对话框", async () => {
+  const h = harness({ positions: [{ x: 300, y: 200 }, { x: 300, y: 200 }], rect: { x: 300, y: 240 } });
+  assert.equal(await run(h), "not_executed:target_moved");
+  assert.deepEqual(h.clicks, [OPEN, { x: 300, y: 200 }, CANCEL, CLOSE]);
+  const moved = h.logs().find((r) => r.reason === "target_moved");
+  assert.deepEqual([moved.detail, moved.dx, moved.dy], ["moved", 0, 40]);
+  assert.equal(h.logs().find((r) => r.phase === "cleanup" && r.popover)?.popover, "cancelled");
+  const text = fs.readFileSync(h.logFile, "utf8");
+  assert.ok(!text.includes(NAME), "日志不得含账号名");
+});
+
+test("点行后读不到目标行：记具体原因，不点确认", async () => {
+  const h = harness({ positions: [{ x: 300, y: 200 }, { x: 300, y: 200 }], rect: "target_missing" });
+  assert.equal(await run(h, true), "not_executed:target_moved");
+  const moved = h.logs().find((r) => r.reason === "target_moved");
+  assert.deepEqual([moved.detail, moved.dx, moved.dy], ["target_missing", null, null]);
+  assert.equal(h.clicks.some((c) => c.x === CONFIRM.x && c.y === CONFIRM.y), false);
+});
