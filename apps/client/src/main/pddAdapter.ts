@@ -2719,7 +2719,8 @@ export class PddPageAdapter implements PlatformAdapter {
         left = await leftovers();
         steps.push({ step: "outside_click", result, left });
       }
-      if (typeof left !== "string" && left.dialogs) {
+      // 关闭按钮照旧总是尝试一次：脚本自己只在“转移会话”对话框可见时返回坐标，否则返回 missing、不点击。
+      {
         const result = await clickAt(TRANSFER_DIALOG_CLOSE);
         await sleep(400);
         left = await leftovers();
