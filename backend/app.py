@@ -108,9 +108,9 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(400, "invalid_content_length") from None
         limit = MAX_EVENT_BYTES if self.command == "POST" and urlsplit(self.path).path == "/api/v1/events" else 262144
         if self.command == "POST" and urlsplit(self.path).path == "/api/v1/admin/chat-import":
-            # JSON escaping can expand a 2 MiB text file. Only this authenticated
+            # JSON escaping can expand a 10 MiB text file. Only this authenticated
             # import endpoint accepts the larger envelope; decoded text is capped.
-            limit = 8 * 1024 * 1024
+            limit = 4 * chatrules.MAX_INPUT_BYTES
         elif self.command == "POST" and urlsplit(self.path).path == "/api/v1/admin/rule-draft":
             limit = 4 * 1024 * 1024
         require(0 < size <= limit, "body_too_large" if size > limit else "body_required", 413 if size > limit else 400)
@@ -222,7 +222,7 @@ class Handler(BaseHTTPRequestHandler):
                     text_size = len(payload["text"].encode("utf-8"))
                 except UnicodeError:
                     raise ApiError(400, "invalid_chat_import") from None
-                require(0 < text_size <= 2 * 1024 * 1024, "invalid_chat_import")
+                require(0 < text_size <= chatrules.MAX_INPUT_BYTES, "invalid_chat_import")
             elif merging:
                 for name, limit in (("current_prompt", 8000), ("supplement", 4000)):
                     require(isinstance(payload[name], str) and 1 <= len(payload[name].strip()) <= limit,

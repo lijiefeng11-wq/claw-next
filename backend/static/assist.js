@@ -118,8 +118,8 @@ window.setupAdminAssist = function (options) {
     const file = el["chat-file"].files[0], c = context();
     pairs = []; clearCandidates(); el["chat-confirm"].checked = false;
     el["chat-preview"].hidden = true; el["chat-pairs"].replaceChildren();
-    if (!file || file.size > 2 * 1024 * 1024 || !/\.(jsonl?|csv|txt)$/i.test(file.name)) {
-      say("chat-status", "请选择不超过 2 MB 的 JSON、JSONL、CSV 或 TXT 文件。"); sync(); return;
+    if (!file || file.size > 10 * 1024 * 1024 || !/\.(jsonl?|csv|txt)$/i.test(file.name)) {
+      say("chat-status", "请选择不超过 10 MB 的 JSON、JSONL、CSV 或 TXT 文件。"); sync(); return;
     }
     importing = true; sync(); say("chat-status", "正在整理问答和遮盖常见联系资料…");
     try {
