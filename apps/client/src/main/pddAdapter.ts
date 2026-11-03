@@ -855,6 +855,28 @@ const TRANSFER_DIALOG_CLOSE = `(() => {
   return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
 })()`;
 
+/**
+ * “转移会话”对话框标题文字的中心点：真实平台的确认气泡里没有“取消”，收尾时点对话框标题（气泡之外、无任何动作的位置）
+ * 让气泡按“点击外部”关闭。核对该点确实落在标题上（被气泡或别的层盖住时不点）。
+ */
+const TRANSFER_DIALOG_TITLE = `(() => {
+  const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
+  const dlg = [...document.querySelectorAll("div.el-dialog")].filter(vis).find((d) => (d.querySelector(".el-dialog__title")?.innerText ?? "").trim() === "转移会话");
+  const el = dlg?.querySelector(".el-dialog__title");
+  if (!el || !vis(el)) return "missing";
+  const r = el.getBoundingClientRect();
+  const x = Math.round(r.left + r.width / 2), y = Math.round(r.top + r.height / 2);
+  const hit = document.elementFromPoint(x, y);
+  return hit && (hit === el || el.contains(hit)) ? { x, y } : "covered";
+})()`;
+
+/** 确认气泡里各可点击项按固定类别计数（不记录文字原文：转移原因可能是店铺自填内容）。 */
+export function popoverButtonKinds(buttons: { text: string }[]): { cancel: number; direct: number; send: number; other: number } {
+  const n = (s: string) => buttons.filter((b) => b.text === s).length;
+  const cancel = n("取消"), direct = n("无原因直接转移"), send = n("发送");
+  return { cancel, direct, send, other: buttons.length - cancel - direct - send };
+}
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** 自动清理平台引导弹窗的间隔。 */
 export const POPUP_SWEEP_INTERVAL_MS = 2000;
@@ -2678,9 +2700,39 @@ export class PddPageAdapter implements PlatformAdapter {
     this.transferProbeCtx = ctx;
     const same = async () => this.watchEpoch === epoch && (await this.activeConvToken()) === conv && conv !== null;
     const gate = () => this.actionGate(epoch, conv, exp);
-    const close = async () => {
-      const x = await this.run<Point | string>(TRANSFER_DIALOG_CLOSE).catch(() => "missing");
-      if (typeof x !== "string") await this.nativeClick(x, page, epoch);
+    const leftovers = () => this.run<{ dialogs: number; popovers: number } | string>(TRANSFER_LEFTOVERS).catch(() => "script_failed");
+    const clickAt = async (script: string): Promise<string> => {
+      const pt = await this.run<Point | string>(script).catch(() => "script_failed");
+      if (typeof pt === "string") return pt;
+      const c = await this.nativeClick(pt, page, epoch);
+      return c.status === "dispatched" ? "dispatched" : `${c.status}:${c.reason}`;
+    };
+    // 收尾：逐步关掉确认气泡和对话框，每步之后重读残留并记录。真实平台的气泡里没有“取消”（只有转移原因、“发送”和
+    // “无原因直接转移”），先点对话框标题（气泡之外、无动作）让气泡按点击外部关闭；再点对话框右上角关闭；
+    // 仍有残留且页面未换代时按一次 Esc。都不碰气泡里的任何项，也不重试。
+    const dismiss = async (): Promise<Record<string, unknown>> => {
+      const steps: Record<string, unknown>[] = [];
+      let left = await leftovers();
+      if (typeof left !== "string" && left.popovers) {
+        const result = await clickAt(TRANSFER_DIALOG_TITLE);
+        await sleep(400);
+        left = await leftovers();
+        steps.push({ step: "outside_click", result, left });
+      }
+      if (typeof left !== "string" && left.dialogs) {
+        const result = await clickAt(TRANSFER_DIALOG_CLOSE);
+        await sleep(400);
+        left = await leftovers();
+        steps.push({ step: "close_button", result, left });
+      }
+      if (typeof left !== "string" && (left.dialogs || left.popovers) && this.watchEpoch === epoch && !page.isDestroyed()) {
+        const key = (type: string) => page.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type, key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+        const result = await key("keyDown").then(() => key("keyUp")).then(() => "dispatched", () => "failed");
+        await sleep(400);
+        left = await leftovers();
+        steps.push({ step: "escape", result, left });
+      }
+      return { steps, leftover: left };
     };
     // 点过行内“转移”后确认气泡可能还开着：提前返回时点一次气泡里的“取消”，再关对话框（否则下次点“转移会话”只会关掉气泡）。
     // 只在原页面、原会话、有效期都仍成立时点；点击前最后一步核对命中点属于目标行关联的唯一气泡里唯一的“取消”。
@@ -2771,7 +2823,7 @@ export class PddPageAdapter implements PlatformAdapter {
         return "not_executed:target_moved";
       }
       const buttons = await this.run<{ text: string; x: number; y: number }[] | string>(popoverButtonsScript(target)).catch(() => "script_failed");
-      log({ phase: "popover", buttons: typeof buttons === "string" ? buttons : buttons.length });
+      log({ phase: "popover", buttons: typeof buttons === "string" ? buttons : buttons.length, kinds: typeof buttons === "string" ? null : popoverButtonKinds(buttons) });
       if (typeof buttons === "string") return `not_executed:${buttons}`;
       // 气泡里另有转移原因和“发送”（可能向买家发消息），只认“无原因直接转移”。
       const ok = buttons.filter((b) => b.text === "无原因直接转移");
@@ -2808,9 +2860,7 @@ export class PddPageAdapter implements PlatformAdapter {
           await sleep(300);
         }
         await sleep(300);
-        await close();
-        const left = await this.run<{ dialogs: number; popovers: number } | string>(TRANSFER_LEFTOVERS).catch(() => "script_failed");
-        log({ phase: "cleanup", leftover: left });
+        log({ phase: "cleanup", ...(await dismiss()) });
       }
       this.sending = false;
     }
