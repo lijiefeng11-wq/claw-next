@@ -64,6 +64,10 @@
           <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h16v11H9l-5 4z"/><path d="M8 9.5h8M8 12.5h5"/></svg>
           <span>话术配置</span>
         </button>
+        <button class="nav-link" type="button" data-route="chat-import">
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v12H9l-5 4zM8 8h8M8 12h5"/></svg>
+          <span>聊天记录整理</span>
+        </button>
         <button class="nav-link" type="button" data-route="records">
           <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3.5h12v17H6z"/><path d="M9.5 8h5M9.5 11.5h5M9.5 15h3"/></svg>
           <span>处理记录</span>
@@ -376,28 +380,7 @@
                     <div><dt>序号与顺序</dt><dd>规则编号由页面自动生成；新增规则排在最后。发送条目来自当前会话候选，名称筛选应使用前台已有的名称。</dd></div>
                   </dl>
                 </details>
-                <section class="assist-panel" aria-labelledby="chat-import-title">
-                  <h3 id="chat-import-title">从聊天记录整理规则</h3>
-                  <p class="field-help">先导入这家店的记录，再核对问答，最后生成最多 30 条高频问题草稿。历史回答可能过时，不会直接成为当前规则。</p>
-                  <label class="field"><span class="field-label">聊天记录文件（UTF-8，最多 10 MB）</span><input id="chat-file" type="file" accept=".json,.jsonl,.csv,.txt"></label>
-                  <div class="assist-actions">
-                    <button id="chat-import" class="btn btn-sm" type="button" disabled>导入聊天记录</button>
-                    <button id="chat-clear" class="btn btn-sm btn-ghost" type="button">清除导入</button>
-                    <button id="rules-generate" class="btn btn-primary btn-sm" type="button" disabled>一键生成规则</button>
-                  </div>
-                  <p id="chat-status" class="field-help" role="status" aria-live="polite">尚未导入聊天记录。</p>
-                  <details class="help-box"><summary>支持什么文件，资料会发到哪里？</summary>
-                    <p>JSON / JSONL：每段对话包含 messages，消息用 role（买家 / 客服）、type（文本）、content（内容）。CSV：第一行为 question,answer 或 问题,回答。TXT：每行以“买家：”或“客服：”开头，空行分隔对话。不读取链接、图片或附件。</p>
-                    <p>导入只把所选文件交给后台整理，不调用模型。自动遮盖常见联系方式不保证完整，请先移除昵称、地址等个人信息，再核对下方预览。点击生成后，预览问答和当前规则才会发给主模型；若主模型为云端服务，这些文字会离开本机。</p>
-                    <p>最多处理 20000 条消息，均匀选取最多 200 个问答、24000 字用于分析；超出时会提示抽样。频次只指本次分析来源，不是全部聊天统计。每条问题至少有两个独立来源，不足时不会凑满 30 条。</p>
-                  </details>
-                  <details id="chat-preview" hidden><summary>核对本次用于分析的问答</summary><div id="chat-pairs" class="assist-source-list"></div></details>
-                  <label class="assist-check"><input id="chat-confirm" type="checkbox" disabled>已核对店铺、脱敏内容和问答来源，允许交给当前主模型分析</label>
-                  <p id="rule-draft-status" class="field-help" role="status" aria-live="polite"></p>
-                  <div id="rule-candidates" class="assist-candidates"></div>
-                  <button id="rules-apply" class="btn btn-sm" type="button" disabled>把选中的草稿填入规则</button>
-                  <p class="field-help">默认全部跳过。可能冲突会并排显示；你可以保留旧规则，或明确选择替换。填入后仍需“保存设置”，不会打开店铺开关。冲突检测可能遗漏，请人工核对。</p>
-                </section>
+                <p class="field-help">已有聊天记录？到左侧“聊天记录整理”导入，核对草稿后再填入这里。</p>
                 <div id="rules-list" class="rules-list"></div>
                 <p id="rules-empty" class="empty-hint" hidden>还没有规则。纯规则方式没有规则时转人工；混合方式可交模型判断。</p>
                 <div class="rules-actions">
@@ -420,6 +403,49 @@
                 <span id="save-status" class="small muted" role="status" aria-live="polite"></span>
               </div>
             </form>
+          </section>
+        </section>
+
+        <section id="page-chat-import" class="page-section" data-page="chat-import" aria-labelledby="chat-import-title" hidden>
+          <div class="page-head">
+            <div>
+              <h2 id="chat-import-title" class="page-title">聊天记录整理</h2>
+              <p class="page-sub">完整文件去重后分批分析，整理前 30 个高频问题。历史回答先核对，再成为规则。</p>
+            </div>
+          </div>
+          <div class="chat-shop-bar">
+            <label class="field"><span class="field-label">当前店铺</span><select id="chat-shop-select" aria-describedby="chat-shop-note"></select></label>
+            <p id="chat-shop-note" class="field-help">仅为 <strong id="chat-shop-name">请先选择店铺</strong> 整理。切换店铺会清除本页资料。</p>
+          </div>
+          <section class="card chat-workspace" aria-label="聊天记录整理流程">
+            <h3>1. 导入聊天记录</h3>
+            <p class="field-help">自动分批整理完整文件；完全相同的问答只保留一份，保留原会话频次和不同回答。</p>
+            <label class="field"><span class="field-label">聊天记录文件（UTF-8，最多 10 MB）</span><input id="chat-file" type="file" accept=".json,.jsonl,.csv,.txt"></label>
+            <div class="assist-actions">
+              <button id="chat-import" class="btn btn-sm" type="button" disabled>导入聊天记录</button>
+              <button id="chat-clear" class="btn btn-sm btn-ghost" type="button">清除 / 停止处理</button>
+            </div>
+            <progress id="chat-import-progress" class="chat-progress" max="100" aria-label="聊天记录导入进度" hidden></progress>
+            <p id="chat-status" class="field-help" role="status" aria-live="polite">尚未导入聊天记录。</p>
+            <details class="help-box"><summary>支持什么文件，资料会发到哪里？</summary>
+              <p>JSON / JSONL：每段对话包含 messages，消息用 role（买家 / 客服）、type（文本）、content（内容）。CSV：第一行为 question,answer 或 问题,回答。TXT：每行以“买家：”或“客服：”开头，空行分隔对话。不读取链接、图片或附件。</p>
+              <p>导入只交给后台整理，不调用模型。后台临时内存中的导入结果约 15 分钟后过期，不保存原文件。自动遮盖常见联系方式不保证完整，请先移除昵称、地址等个人信息，再逐页核对预览。</p>
+              <p>确认并点击生成后，全部有效独立问答和当前规则会分批交给已保存的主模型；主模型失败时尝试已配置的备用 API 一次。使用云端模型时，分析资料会发送到该服务。每个模型单批最多等待 60 秒，整份文件用时取决于批次数。</p>
+              <p>超长、未回答、媒体间隔或包含联系资料的问答会整条跳过并说明，不截断条件或答案。最终频次按原文件的不同来源会话数统计；模型归类和历史业务事实仍需人工核对。</p>
+            </details>
+            <div id="chat-preview" hidden>
+              <h3>2. 核对去重后的问答</h3>
+              <div id="chat-pairs" class="assist-sources"></div>
+              <p id="chat-analysis-plan" class="field-help"></p>
+              <label class="assist-check"><input id="chat-confirm" type="checkbox" disabled>已核对店铺、脱敏内容和来源，允许交给主模型或备用 API 分析</label>
+              <h3>3. 生成高频问题草稿</h3>
+              <button id="rules-generate" class="btn btn-primary btn-sm" type="button" disabled>分批分析并生成前 30 条</button>
+            </div>
+            <progress id="chat-analysis-progress" class="chat-progress" max="100" aria-label="问答分析进度" hidden></progress>
+            <p id="rule-draft-status" class="field-help" role="status" aria-live="polite"></p>
+            <div id="rule-candidates" class="assist-candidates"></div>
+            <button id="rules-apply" class="btn btn-sm" type="button" disabled>把选中的草稿填入话术配置</button>
+            <p class="field-help">默认跳过全部草稿。核对回复和来源后再新增或替换；填入后仍需到“话术配置”保存设置，不会自动启用店铺。</p>
           </section>
         </section>
 

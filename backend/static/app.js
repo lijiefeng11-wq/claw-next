@@ -22,11 +22,12 @@
   const ROUTES = {
     dashboard: "工作台",
     scripts: "话术配置",
+    "chat-import": "聊天记录整理",
     records: "处理记录",
     model: "模型配置",
     system: "系统设置"
   };
-  const ROUTE_KEYS = ["dashboard", "scripts", "records", "model", "system"];
+  const ROUTE_KEYS = ["dashboard", "scripts", "chat-import", "records", "model", "system"];
 
   const state = {
     epoch: 0,
@@ -94,7 +95,7 @@
     "change-password-form", "current-password-input", "new-password-input",
     "confirm-password-input", "change-password-btn", "change-password-status",
     "change-password-error",
-    "page-dashboard", "page-scripts", "page-records", "page-model", "page-system",
+    "page-dashboard", "page-scripts", "page-chat-import", "page-records", "page-model", "page-system",
     "shop-connection-list", "shop-connection-summary", "shop-connection-meta",
     "shop-select", "shop-meta", "settings-version", "lease-status", "lease-details",
     "lease-instance", "lease-session", "lease-generation", "lease-expires",
@@ -3550,7 +3551,11 @@
     });
     assist = window.setupAdminAssist({ state: state, request: request, onEdit: onFormEdit,
       renderRules: renderRules, newRuleId: generateRuleId, nextUid: nextUid,
-      validateRules: collectRules, handleError: handleError });
+      validateRules: collectRules, handleError: handleError, onShopChange: function (id) {
+        el["shop-select"].value = id; onShopChange();
+      }, onApply: function () {
+        navigateTo("scripts"); showAlert("草稿已填入当前店铺，请核对后保存设置。", "warn");
+      } });
 
     el["login-form"].addEventListener("submit", function (event) {
       event.preventDefault();

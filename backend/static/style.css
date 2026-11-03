@@ -1840,3 +1840,15 @@ button:disabled {
   gap: 12px;
   margin-top: 8px;
 }
+
+/* Separate chat import workspace; progress values come from file/job counters. */
+.chat-workspace { padding: 24px; }
+.chat-shop-bar { max-width: 440px; margin-bottom: 20px; }
+.chat-workspace > h3, .chat-workspace #chat-preview > h3 { margin-top: 24px; }
+.chat-workspace > h3:first-child { margin-top: 0; }
+.chat-progress { display: block; width: 100%; height: 14px; margin-top: 20px; accent-color: var(--primary); }
+.chat-source-pages { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
+.chat-source-rows { max-height: 320px; overflow-y: auto; }
+.chat-workspace .assist-source { overflow-wrap: anywhere; }
+.chat-workspace .assist-candidate > summary { cursor: pointer; font-weight: 600; overflow-wrap: anywhere; }
+.chat-workspace .assist-candidate[open] > summary { margin-bottom: 16px; }
