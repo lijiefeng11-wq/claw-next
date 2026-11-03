@@ -181,6 +181,7 @@ try {
   });
   await step("客户端设置：开发运行时两个勾选项不可用，并说明仅打包版可用；检查更新只显示说明", async () => {
     await page.locator("#app-settings summary").click();
+    await page.locator("#app-settings > details[open]").waitFor();
     const boxes = page.locator("#app-settings input[type=checkbox]");
     if ((await boxes.count()) !== 2) throw new Error("勾选项数量不对");
     for (let i = 0; i < 2; i++) if (!(await boxes.nth(i).isDisabled())) throw new Error("开发运行时勾选项应不可用");
@@ -189,11 +190,15 @@ try {
     await page.locator("#app-settings").getByText(/当前版本：开发版（没有版本信息）。只有放在“应用程序”文件夹里的 Mac 正式版本可以检查更新/).waitFor();
     if (await page.locator("#app-settings button", { hasText: "检查更新" }).count()) throw new Error("开发运行不应显示检查更新按钮");
     await page.locator("#app-settings summary").click();
+    // 收起后经过若干次状态刷新仍保持收起（toggle 事件晚于刷新时曾被翻回）。
+    await page.waitForTimeout(3000);
+    if (await page.locator("#app-settings > details[open]").count()) throw new Error("收起的客户端设置被状态刷新重新展开");
   });
   await step("客户端设置：授权码输入在普通刷新后保留；非本机根地址时禁用并说明", async () => {
-    const details = page.locator("#app-settings");
+    const details = page.locator("#app-settings > details");
     // 只在收起时点开，避免把已展开的设置收起。
     if (!(await details.evaluate((d) => d.open))) await page.locator("#app-settings summary").click();
+    await page.locator("#app-settings > details[open]").waitFor();
     const box = page.locator("#app-settings .admin-grant");
     const input = box.locator("input[type=password]");
     await input.waitFor();

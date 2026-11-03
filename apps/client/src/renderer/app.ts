@@ -200,6 +200,9 @@
 
   function renderAppSettings() {
     const box = document.getElementById("app-settings") as HTMLElement;
+    // 以页面上实际显示的展开状态为准：点击后 toggle 事件异步触发，若刷新先到，只看变量会把刚展开/收起的设置翻回去。
+    const shown = box.querySelector(":scope > details") as HTMLDetailsElement | null;
+    if (shown) settingsOpen = shown.open;
     const st = state.app.startup;
     if (!st) {
       box.replaceChildren(renderAdminGrant());
@@ -217,7 +220,14 @@
         : `开机自启：登录${st.platform === "win32" ? " Windows" : "系统"}后自动打开客户端。崩溃后自动重启：异常退出后约 30 秒重新打开；正常退出不会重启；5 分钟内最多自动启动 3 次；只勾这一项不会开机启动。重新打开后恢复上次打开着的店铺，运行模式不变。${st.managed ? "当前由系统托管运行：修改的设置在本次正常退出后、下次打开或下次登录时生效。" : ""}`;
     const details = h(
       "details",
-      { open: settingsOpen ? true : undefined, ontoggle: (e: Event) => (settingsOpen = (e.target as HTMLDetailsElement).open) },
+      {
+        open: settingsOpen ? true : undefined,
+        // 已被刷新替换掉的旧节点迟到的 toggle 事件不再改写状态。
+        ontoggle: (e: Event) => {
+          const d = e.target as HTMLDetailsElement;
+          if (d.isConnected) settingsOpen = d.open;
+        },
+      },
       h("summary", { text: "客户端设置" }),
       option("开机自启", st.launch_at_login, (v) => save({ launch_at_login: v })),
       option("崩溃后自动重启", st.restart_on_crash, (v) => save({ restart_on_crash: v })),
