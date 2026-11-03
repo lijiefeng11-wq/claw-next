@@ -5,6 +5,10 @@ from .engine import ProviderFailure
 BACKUP_NOTE = "主模型未完成的批次已尝试已配置的备用模型；请核对预览。"
 VARIANT_NOTE = "同一主题存在不同回答，已保留全部来源；当前回复仅为草稿，请核对条件和事实。"
 NOTES_LIMIT = "警告较多，仅保留前面的核对提示；请同时核对全部来源问答。"
+# The model can return at most 30 topics. Supplying at most 30 distinct QAs
+# makes that response bound non-lossy: one QA belongs to one primary topic.
+# Ranking larger input batches to 30 here would lose a shared 31st topic.
+MAX_BATCH_PAIRS = 30
 
 
 def merge_notes(previous, incoming):
@@ -17,7 +21,7 @@ def batches(pairs):
     # Frequency first is deterministic; no item is sampled out or truncated.
     for pair in sorted(pairs, key=lambda p: (-p["count"], int(p["id"][1:]))):
         size = len(pair["question"]) + len(pair["answer"])
-        if batch and (len(batch) >= chatrules.MAX_PAIRS or chars + size > chatrules.MAX_PAIRS_CHARS):
+        if batch and (len(batch) >= min(MAX_BATCH_PAIRS, chatrules.MAX_PAIRS) or chars + size > chatrules.MAX_PAIRS_CHARS):
             result.append(batch)
             batch, chars = [], 0
         batch.append(pair)

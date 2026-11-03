@@ -47,9 +47,9 @@ class ChatBatchTests(unittest.TestCase):
             result=chatbatch.analyze(pairs,[],CONFIG,progress=progress.append)
         self.assertEqual(len(seen),450)
         self.assertEqual(len(set(seen)),450)
-        self.assertEqual(post.call_count,3)
-        self.assertEqual([p["processed_pairs"] for p in progress],[0,200,400,450])
-        self.assertEqual(progress[-1]["total_batches"],3)
+        self.assertEqual(post.call_count,15)
+        self.assertEqual([p["processed_pairs"] for p in progress],list(range(0,451,30)))
+        self.assertEqual(progress[-1]["total_batches"],15)
         self.assertEqual(result["candidates"],[])
 
     def test_character_bound_does_not_drop_or_truncate_any_pair(self):
@@ -72,7 +72,8 @@ class ChatBatchTests(unittest.TestCase):
         calls=[]
         def provider(spec,body):
             calls.append(body)
-            return wire(candidate(["p1"],reply="请用软布。" if len(calls)==1 else "不用溶剂。"))
+            return wire(*(candidate([p["id"]],reply="请用软布。" if p["question"]=="问题1" else "不用溶剂。")
+                          for p in model_input(body) if p["question"] in ("问题1","问题201")))
         with patch.object(chatrules,"_post",side_effect=provider):
             result=chatbatch.analyze(pairs,[],CONFIG)
         item=result["candidates"][0]
@@ -151,9 +152,11 @@ class ChatBatchTests(unittest.TestCase):
 
     def test_single_source_topics_can_merge_across_batches_before_frequency_filter(self):
         pairs=[pair(i) for i in range(1,202)]
-        with patch.object(chatrules,"_post",return_value=wire(candidate(["p1"]))) as post:
+        def provider(spec,body):
+            return wire(*(candidate([p["id"]]) for p in model_input(body) if p["question"] in ("问题1","问题201")))
+        with patch.object(chatrules,"_post",side_effect=provider) as post:
             result=chatbatch.analyze(pairs,[],CONFIG)
-        self.assertEqual(post.call_count,2)
+        self.assertEqual(post.call_count,7)
         self.assertEqual(result["candidates"][0]["evidence_ids"],["p1","p201"])
         self.assertEqual(result["candidates"][0]["count"],2)
 
@@ -176,6 +179,31 @@ class ChatBatchTests(unittest.TestCase):
             result=chatbatch.analyze([pair(i) for i in range(1,11)],[],CONFIG)
         self.assertLessEqual(len(result["warnings"]),21)
         self.assertIn(chatbatch.NOTES_LIMIT,result["warnings"])
+
+    def test_batch_local_rank31_can_be_the_global_top_topic(self):
+        pairs=[]
+        for block in range(3):
+            for topic in range(30):
+                for source in range(6):
+                    pairs.append(pair(len(pairs)+1,question="批"+str(block)+"主题"+str(topic),answer="条件"+str(source)))
+            for source in range(5):
+                pairs.append(pair(len(pairs)+1,question="共享高频",answer="共同条件"+str(block)+str(source)))
+            for single in range(15):
+                pairs.append(pair(len(pairs)+1,question="单次"+str(block)+"问题"+str(single)))
+        self.assertEqual(len(pairs),600)
+        def provider(spec,body):
+            groups={}
+            for p in model_input(body):groups.setdefault(p["question"],[]).append(p["id"])
+            ranked=sorted(groups.items(),key=lambda entry:-len(entry[1]))[:30]
+            return wire(*(candidate(ids,keyword=question) for question,ids in ranked))
+        with patch.object(chatbatch,"MAX_BATCH_PAIRS",200),patch.object(chatrules,"_post",side_effect=provider):
+            old=chatbatch.analyze(pairs,[],CONFIG)
+        self.assertNotIn("共享高频",[p["contains"] for p in old["candidates"]])
+        with patch.object(chatrules,"_post",side_effect=provider) as post:
+            fixed=chatbatch.analyze(pairs,[],CONFIG)
+        self.assertEqual(post.call_count,20)
+        self.assertEqual(fixed["candidates"][0]["contains"],"共享高频")
+        self.assertEqual(fixed["candidates"][0]["count"],15)
 
 
 if __name__=="__main__":unittest.main()

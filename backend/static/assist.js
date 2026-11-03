@@ -82,7 +82,7 @@ window.setupAdminAssist = function (options) {
     [...list].sort((a, b) => b.count - a.count || Number(a.id.slice(1)) - Number(b.id.slice(1))).forEach(pair => {
       // Count Unicode code points as the server does, rather than UTF-16 units.
       const size = [...pair.question].length + [...pair.answer].length;
-      if (count && (count >= 200 || chars + size > 24000)) { total++; count = 0; chars = 0; }
+      if (count && (count >= 30 || chars + size > 24000)) { total++; count = 0; chars = 0; }
       count++; chars += size;
     });
     return total + (count ? 1 : 0);

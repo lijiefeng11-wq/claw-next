@@ -50,7 +50,7 @@ async function importDone(f){f.select();await f.ids['chat-import'].fire('click')
   const rows=f.ids['chat-pairs'].querySelectorAll('.assist-source');assert.equal(rows.length,20);
   const next=f.ids['chat-pairs'].querySelectorAll('button')[1];next.fire('click');assert.match(f.ids['chat-pairs'].querySelectorAll('.assist-source')[0].textContent,/p21/);next.fire('click');assert.equal(f.ids['chat-pairs'].querySelectorAll('.assist-source').length,5);checks++;
   assert(!f.calls.some(c=>c.url.includes('rule-draft')));assert.equal(f.ids['rules-generate'].disabled,true);checks++;
-  assert.match(f.ids['chat-analysis-plan'].textContent,/全部 45 组独立问答，预计 1 批/);assert.match(f.ids['chat-analysis-plan'].textContent,/备用模型/);checks++;
+  assert.match(f.ids['chat-analysis-plan'].textContent,/全部 45 组独立问答，预计 2 批/);assert.match(f.ids['chat-analysis-plan'].textContent,/备用模型/);checks++;
  }
  {
   const f=fixture(async(url,o)=>o.method==='POST'?base:snapshot());
@@ -79,11 +79,11 @@ async function importDone(f){f.select();await f.ids['chat-import'].fire('click')
    if(url==='/api/v1/admin/chat-import/jobs')return base;
    if(url==='/api/v1/admin/chat-import/jobs/import1')return snapshot();
    if(url==='/api/v1/admin/rule-draft/jobs'){assert.equal(o.body.import_job_id,'import1');assert(!('pairs' in o.body));return rules;}
-   if(url==='/api/v1/admin/rule-draft/jobs/rules1')return {...rules,status:++ruleGets===1?'running':'completed',processed_pairs:ruleGets===1?20:45,total_pairs:45,processed_batches:ruleGets===1?1:3,total_batches:3,failed_batches:0,result:{candidates:[candidate],warnings:[]}};
+   if(url==='/api/v1/admin/rule-draft/jobs/rules1')return {...rules,status:++ruleGets===1?'running':'completed',processed_pairs:ruleGets===1?30:45,total_pairs:45,processed_batches:ruleGets===1?1:2,total_batches:2,failed_batches:0,result:{candidates:[candidate],warnings:[]}};
    throw Error('unexpected route');
   });
   await importDone(f);f.ids['chat-confirm'].checked=true;f.ids['chat-confirm'].fire('change');
-  const pending=f.ids['rules-generate'].fire('click');await flush();assert.match(f.ids['rule-draft-status'].textContent,/20 \/ 45/);assert.equal(f.ids['chat-analysis-progress'].value,20);checks++;
+  const pending=f.ids['rules-generate'].fire('click');await flush();assert.match(f.ids['rule-draft-status'].textContent,/30 \/ 45/);assert.equal(f.ids['chat-analysis-progress'].value,30);checks++;
   f.timers.shift()();await pending;
   assert.equal(f.ids['rule-candidates'].children.length,1);
   const select=f.ids['rule-candidates'].querySelectorAll('select')[0];assert.equal(select.value,'skip');select.value='add';select.fire('change');f.ids['rules-apply'].fire('click');
