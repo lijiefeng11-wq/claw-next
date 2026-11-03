@@ -5,7 +5,7 @@
 window.setupAdminAssist = function (options) {
   const {state, request, onEdit, renderRules, newRuleId, nextUid, validateRules, handleError} = options;
   const ids = ["chat-file", "chat-import", "chat-clear", "chat-status", "chat-preview", "chat-pairs", "chat-confirm",
-    "chat-import-progress", "chat-analysis-progress", "chat-shop-name", "chat-shop-select",
+    "chat-import-progress", "chat-analysis-progress", "chat-shop-name", "chat-shop-select", "chat-analysis-plan",
     "rules-generate", "rule-draft-status", "rule-candidates", "rules-apply", "merge-brief", "merge-generate",
     "merge-status", "merge-preview", "merge-before", "merge-result", "merge-notes", "merge-confirm",
     "merge-confirm-label", "merge-apply", "prompt-input"];
@@ -30,7 +30,7 @@ window.setupAdminAssist = function (options) {
       handleError(err, "操作未完成", c.epoch, c.token);
       return;
     }
-    const text = err.code === "prompt_draft_busy" ? "已有导入或草稿生成任务正在处理，请等它结束后重试。" :
+    const text = err.code === "prompt_draft_busy" ? "已有聊天导入、分析或其他草稿任务正在处理，本次未开始，请等它结束后重试。" :
       err.code === "invalid_encoding" ? "文件不是 UTF-8 编码，请另存为 UTF-8 后重试。文件尚未上传。" :
       ["shop_settings_changed", "model_config_changed"].includes(err.code) ? "设置已改变，请重新加载后生成，旧结果未应用。" :
       err.code === "invalid_chat_import" ? "未能识别有效问答，请查看格式说明。超长、非文字或含联系资料的问答不会被截断采用。" :
@@ -76,6 +76,16 @@ window.setupAdminAssist = function (options) {
     const bar = el[id]; bar.hidden = false;
     if (Number.isFinite(total) && total > 0) { bar.max = total; bar.value = done; }
     else bar.removeAttribute("value");
+  }
+  function batchCount(list) {
+    let total = 0, count = 0, chars = 0;
+    [...list].sort((a, b) => b.count - a.count || Number(a.id.slice(1)) - Number(b.id.slice(1))).forEach(pair => {
+      // Count Unicode code points as the server does, rather than UTF-16 units.
+      const size = [...pair.question].length + [...pair.answer].length;
+      if (count && (count >= 200 || chars + size > 24000)) { total++; count = 0; chars = 0; }
+      count++; chars += size;
+    });
+    return total + (count ? 1 : 0);
   }
   function cancelJob(job) {
     if (job.cancelled) return;
@@ -143,6 +153,7 @@ window.setupAdminAssist = function (options) {
     jobs.forEach(cancelJob); jobs = []; imported = null; importContext = null;
     pairs = []; if (keepFile !== true) el["chat-file"].value = ""; el["chat-confirm"].checked = false;
     el["chat-import-progress"].hidden = true; el["chat-analysis-progress"].hidden = true;
+    say("chat-analysis-plan", "");
     el["chat-pairs"].replaceChildren(); el["chat-preview"].hidden = true;
     el["merge-brief"].value = "";
     clearCandidates(); clearMerge(); say("chat-status", wasBusy ? "已停止本页处理；已发出的模型请求可能还在结束中，之后不会再开始下一批。" : "尚未导入聊天记录。"); sync();
@@ -229,6 +240,10 @@ window.setupAdminAssist = function (options) {
       if (!data || !Array.isArray(data.pairs) || !data.pairs.length) throw new Error("invalid_response");
       imported = finished.job;
       pairs = data.pairs; el["chat-pairs"].replaceChildren(sourceView(pairs)); el["chat-preview"].hidden = false;
+      const planned = batchCount(pairs);
+      say("chat-analysis-plan", "将发送全部 " + pairs.length + " 组独立问答，预计 " + planned +
+        " 批。每批主模型失败时最多再调用已保存的备用模型一次，总计最多 " + planned * 2 +
+        " 次模型请求；使用云端服务时可能产生费用。请确认后再开始。");
       say("chat-status", "导入完成：" + data.stats.messages + " 条消息，" + data.stats.eligible + " 组有效问答；合并 " + data.stats.duplicates + " 组重复后保留 " + pairs.length + " 组，将全部分批分析。" + (data.warnings || []).join(" "));
     } catch (err) { error(err, "chat-status", c); }
     finally { if (c.seq === seq) {

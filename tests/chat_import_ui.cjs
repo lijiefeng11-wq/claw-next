@@ -50,6 +50,7 @@ async function importDone(f){f.select();await f.ids['chat-import'].fire('click')
   const rows=f.ids['chat-pairs'].querySelectorAll('.assist-source');assert.equal(rows.length,20);
   const next=f.ids['chat-pairs'].querySelectorAll('button')[1];next.fire('click');assert.match(f.ids['chat-pairs'].querySelectorAll('.assist-source')[0].textContent,/p21/);next.fire('click');assert.equal(f.ids['chat-pairs'].querySelectorAll('.assist-source').length,5);checks++;
   assert(!f.calls.some(c=>c.url.includes('rule-draft')));assert.equal(f.ids['rules-generate'].disabled,true);checks++;
+  assert.match(f.ids['chat-analysis-plan'].textContent,/全部 45 组独立问答，预计 1 批/);assert.match(f.ids['chat-analysis-plan'].textContent,/备用模型/);checks++;
  }
  {
   const f=fixture(async(url,o)=>o.method==='POST'?base:snapshot());
@@ -99,6 +100,11 @@ async function importDone(f){f.select();await f.ids['chat-import'].fire('click')
  }
  {
   const f=fixture(()=>{throw Error('no upload')});f.select({name:'big.json',size:10*1024*1024+1});await f.ids['chat-import'].fire('click');assert.equal(f.calls.length,0);assert.match(f.ids['chat-status'].textContent,/10 MB/);checks++;
+ }
+ {
+  const data=result(51);data.pairs.forEach(p=>{p.question='😀'.repeat(500);p.answer='答'.repeat(1000);});
+  const f=fixture(async(url,o)=>o.method==='POST'?base:snapshot({result:data}));
+  await importDone(f);assert.match(f.ids['chat-analysis-plan'].textContent,/51 组独立问答，预计 4 批/);assert(!f.calls.some(c=>c.url.includes('rule-draft')));checks++;
  }
  {
   const html=fs.readFileSync(path.join(__dirname,'../backend/static/index.html'),'utf8');
