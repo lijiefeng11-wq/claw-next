@@ -8,9 +8,9 @@ from . import diagnostics, modelconfig, promptdraft
 from .engine import ProviderFailure, _completion_text, _post, _slot_spec
 
 MAX_INPUT_BYTES = 10 * 1024 * 1024
-MAX_MESSAGES = 20000
 MAX_PAIRS = 200
 MAX_PAIRS_CHARS = 24000
+IMPORT_BATCH = 1000
 ROLES = {"买家": "buyer", "buyer": "buyer", "客户": "buyer",
          "客服": "agent", "agent": "agent", "seller": "agent", "staff": "agent"}
 CONTACT = re.compile(r"收件人|收货人|联系人|详细地址|收货地址|退货地址|身份证|银行卡|微信号|联系电话|手机号|姓名[：:]|昵称[：:]|[省市区县镇村路街道].*\d+号")
@@ -36,7 +36,21 @@ def _pair(question, answer, number, conversation):
             "conversation": "c" + str(conversation)}
 
 
-def parse_import(filename, text):
+class ImportCancelled(Exception):
+    """Cooperative stop; never contains uploaded text."""
+
+
+def parse_import(filename, text, *, full=False, progress=None, cancelled=None):
+    def report(processed=0, total=None):
+        if cancelled and cancelled():
+            raise ImportCancelled()
+        if progress:
+            progress({"phase": "parsing" if total is None else "extracting",
+                      "processed_messages": processed, "total_messages": total,
+                      "processed_batches": (processed + IMPORT_BATCH - 1) // IMPORT_BATCH,
+                      "total_batches": None if total is None else (total + IMPORT_BATCH - 1) // IMPORT_BATCH})
+
+    report()
     if (not isinstance(filename, str) or not isinstance(text, str)
             or not 0 < len(text.encode("utf-8")) <= MAX_INPUT_BYTES):
         raise ValueError("invalid_chat_import")
@@ -90,12 +104,16 @@ def parse_import(filename, text):
     else:
         raise ValueError("invalid_chat_import")
     message_count = sum(len(messages) for messages in sessions)
-    if message_count > MAX_MESSAGES:
-        raise ValueError("invalid_chat_import")
-    pairs, parsed, skipped = [], 0, 0
+    report(0, message_count)
+    pairs, unique, parsed, skipped, eligible, processed = [], {}, 0, 0, 0, 0
     for conversation, messages in enumerate(sessions, 1):
+        if cancelled and cancelled():
+            raise ImportCancelled()
         groups = []
         for message in messages:
+            processed += 1
+            if processed % IMPORT_BATCH == 0 and processed < message_count:
+                report(processed, message_count)
             role, content = None, ""
             if isinstance(message, dict):
                 raw_role = message.get("role")
@@ -118,15 +136,30 @@ def parse_import(filename, text):
             parsed += 1
             pair = _pair(question, groups[index + 1][1], parsed, conversation)
             if pair:
-                pairs.append(pair)
+                eligible += 1
+                if full:
+                    # Exact scrubbed QA duplicates only: differing conditions or
+                    # answers stay separate. Frequency counts distinct sessions.
+                    key = (pair["question"], pair["answer"])
+                    if key not in unique:
+                        unique[key] = {**pair, "conversations": set()}
+                    unique[key]["conversations"].add(pair["conversation"])
+                else:
+                    pairs.append(pair)
             else:
                 skipped += 1
+    if full:
+        for pair in unique.values():
+            pair["conversations"] = sorted(pair["conversations"], key=lambda item: int(item[1:]))
+            pair["count"] = len(pair["conversations"])
+        pairs = list(unique.values())
     if not pairs:
         raise ValueError("invalid_chat_import")
     # Evenly spread samples over the whole file. Reduce count until all selected
     # questions and answers fit; never silently trim an individual answer.
-    count = min(MAX_PAIRS, len(pairs))
-    while count:
+    count = len(pairs) if full else min(MAX_PAIRS, len(pairs))
+    selected = pairs
+    while count and not full:
         selected = [pairs[i * len(pairs) // count] for i in range(count)]
         if sum(len(p["question"]) + len(p["answer"]) for p in selected) <= MAX_PAIRS_CHARS:
             break
@@ -136,9 +169,13 @@ def parse_import(filename, text):
         warnings.append("已跳过未回答、媒体间隔、过长或含联系资料的问答。")
     if count < len(pairs):
         warnings.append("文件较大，已均匀抽样；出现次数仅针对本次分析样本。")
-    return {"pairs": selected, "stats": {"messages": message_count, "parsed": parsed,
-            "eligible": len(pairs), "selected": count, "skipped": skipped,
-            "sampled_out": len(pairs) - count}, "warnings": warnings}
+    stats = {"messages": message_count, "parsed": parsed, "eligible": eligible,
+             "selected": count, "skipped": skipped, "sampled_out": len(pairs) - count}
+    if full:
+        stats.update(unique=count, duplicates=eligible - count)
+        warnings.append("已合并完全相同的问答，保留不同回答；频次按原文件的不同来源会话统计，所有有效独立问答均参与分批分析。")
+    report(message_count, message_count)
+    return {"pairs": selected, "stats": stats, "warnings": warnings}
 
 
 def validate_pairs(value):
@@ -148,8 +185,8 @@ def validate_pairs(value):
     for raw in value:
         if (not isinstance(raw, dict) or set(raw) != {"id", "question", "answer", "conversation"}
                 or not all(isinstance(v, str) for v in raw.values())
-                or not re.fullmatch(r"p[0-9]{1,6}", raw["id"])
-                or not re.fullmatch(r"c[0-9]{1,6}", raw["conversation"])
+                or not re.fullmatch(r"p[0-9]{1,9}", raw["id"])
+                or not re.fullmatch(r"c[0-9]{1,9}", raw["conversation"])
                 or raw["id"] in seen):
             raise ValueError("invalid_pairs")
         pair = _pair(raw["question"], raw["answer"], int(raw["id"][1:]), int(raw["conversation"][1:]))
@@ -219,9 +256,9 @@ def _notes(value):
     return [scrub(s) for s in value]
 
 
-def generate(pairs, existing_rules, config):
+def generate(pairs, existing_rules, config, *, slot="primary", conversations=None):
     pairs = validate_pairs(pairs)
-    if not modelconfig.slot_configured(config.get("primary") or {}):
+    if slot not in modelconfig.SLOTS or not modelconfig.slot_configured(config.get(slot) or {}):
         raise ProviderFailure("not_configured")
     # Settings rules have already been validated by the caller. Send only fields
     # relevant to comparing answers, never unrelated shop settings.
@@ -231,10 +268,21 @@ def generate(pairs, existing_rules, config):
         raise ValueError("rules_too_large")
     source = {"p" + str(i): pair for i, pair in enumerate(pairs, 1)}
     model_pairs = [{**pair, "id": alias} for alias, pair in source.items()]
-    spec = _slot_spec(config, "primary")
+    if conversations is not None:
+        # Only the server-held import may supply this mapping. Do not send the
+        # original conversation list to the provider or trust model counts.
+        for pair, original in zip(model_pairs, pairs):
+            pair["frequency"] = len(set(conversations[original["id"]]))
+    spec = _slot_spec(config, slot)
     spec["timeout_seconds"] = 60
+    instruction = SYSTEM
+    if conversations is not None:
+        instruction = instruction.replace("被多个独立会话询问过的重点问题", "本批次的问题").replace(
+            "每组至少引用两个独立conversation的真实问答id，禁止伪造或跨组重复引用。按独立会话数从多到少排列；不足两次的跳过。",
+            "每组至少引用一个真实问答id，禁止伪造或跨组重复引用。本批次允许单来源主题，程序会在所有批次完成后合并并筛出至少两个独立来源的主题。")
+        instruction += "\n输入问答已去重，frequency 是原文件中不同来源会话数。引用仍只用本批次提供的问答 id，不编造来源或次数。"
     body = {"model": spec["model"], "temperature": 0, "stream": False, "max_tokens": 8192,
-            "messages": [{"role": "system", "content": SYSTEM},
+            "messages": [{"role": "system", "content": instruction},
                          {"role": "user", "content": json.dumps({"pairs": model_pairs, "existing_rules": rules}, ensure_ascii=False)}]}
     if promptdraft._local_qwen_draft(spec["base_url"], spec["model"]):
         body["chat_template_kwargs"] = {"enable_thinking": False}
@@ -270,8 +318,11 @@ def generate(pairs, existing_rules, config):
                     _reject("evidence_duplicate")
                 if used.intersection(evidence):
                     _reject("evidence_reused")
-                count = len({source[i]["conversation"] for i in evidence})
-                if count < 2:
+                if conversations is None:
+                    count = len({source[i]["conversation"] for i in evidence})
+                else:
+                    count = len(set().union(*(set(conversations[source[i]["id"]]) for i in evidence)))
+                if count < (1 if conversations is not None else 2):
                     # Models sometimes include a singleton despite the instruction.
                     # Drop that topic, not the other source-backed drafts.
                     infrequent += 1

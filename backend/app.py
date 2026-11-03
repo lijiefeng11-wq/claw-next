@@ -12,7 +12,7 @@ from pathlib import Path
 from socketserver import TCPServer
 from urllib.parse import parse_qs, urlsplit
 
-from . import chatrules, diagnostics, modelconfig, modelworker, promptdraft, promptmerge, vehicle_knowledge
+from . import chatbatch, chatrules, diagnostics, importjobs, modelconfig, modelworker, promptdraft, promptmerge, vehicle_knowledge
 from .auth import AdminAuth
 from .backups import BackupManager
 from .operations import Operations
@@ -107,11 +107,13 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             raise ApiError(400, "invalid_content_length") from None
         limit = MAX_EVENT_BYTES if self.command == "POST" and urlsplit(self.path).path == "/api/v1/events" else 262144
-        if self.command == "POST" and urlsplit(self.path).path == "/api/v1/admin/chat-import":
+        if self.command == "POST" and urlsplit(self.path).path in (
+                "/api/v1/admin/chat-import", "/api/v1/admin/chat-import/jobs"):
             # JSON escaping can expand a 10 MiB text file. Only this authenticated
             # import endpoint accepts the larger envelope; decoded text is capped.
             limit = 4 * chatrules.MAX_INPUT_BYTES
-        elif self.command == "POST" and urlsplit(self.path).path == "/api/v1/admin/rule-draft":
+        elif self.command == "POST" and urlsplit(self.path).path in (
+                "/api/v1/admin/rule-draft", "/api/v1/admin/rule-draft/jobs"):
             limit = 4 * 1024 * 1024
         require(0 < size <= limit, "body_too_large" if size > limit else "body_required", 413 if size > limit else 400)
         try:
@@ -259,7 +261,95 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             self.server.prompt_draft_slot.release()
 
+    def _assist_job(self, kind, method, job_id, store):
+        manager = self.server.assist_jobs
+        with self.server.auth.lock:
+            identity = self._identity()
+            require(identity["role"] == "admin", "admin_required", 403)
+            require(not identity["must_change_password"], "admin_password_change_required", 403)
+            token = self.headers["Authorization"][7:]
+            owner = manager.owner(token)
+            if job_id is not None:
+                require(method in ("GET", "DELETE"), "not_found", 404)
+                value = manager.get(job_id, owner, kind)
+                require(value is not None, "chat_import_not_found", 404)
+                shop = next((s for s in store.shops() if s["shop_id"] == value["shop_id"]), None)
+                if shop is None or shop["settings"]["version"] != value["shop_version"]:
+                    manager.cancel(job_id, owner, kind)
+                    raise ApiError(409, "shop_settings_changed")
+                if kind == "rules" and store.model_config(self.server.config.get("model", {}))["version"] != value["version"]:
+                    manager.cancel(job_id, owner, kind)
+                    raise ApiError(409, "model_config_changed")
+                if method == "DELETE":
+                    value = manager.cancel(job_id, owner, kind)
+                return self._send(200, value)
+            require(method == "POST", "not_found", 404)
+            payload = self._json()
+            expected = {"shop_id", "filename", "text"} if kind == "import" else {
+                "shop_id", "shop_version", "version", "import_job_id", "existing_rules"}
+            require(set(payload) == expected, "invalid_assist_request")
+            require(identifier(payload["shop_id"]), "invalid_shop_id")
+            shop = next((s for s in store.shops() if s["shop_id"] == payload["shop_id"]), None)
+            require(shop is not None, "shop_not_found", 404)
+            shop_id, shop_version = payload["shop_id"], shop["settings"]["version"]
+            config = None
+            if kind == "import":
+                require(isinstance(payload["filename"], str) and 0 < len(payload["filename"]) <= 255,
+                        "invalid_chat_import")
+                require(isinstance(payload["text"], str), "invalid_chat_import")
+                try:
+                    size = len(payload["text"].encode("utf-8"))
+                except UnicodeError:
+                    raise ApiError(400, "invalid_chat_import") from None
+                require(0 < size <= chatrules.MAX_INPUT_BYTES, "invalid_chat_import")
+            else:
+                require(type(payload["shop_version"]) is int and payload["shop_version"] == shop_version,
+                        "shop_settings_changed", 409)
+                config = copy.deepcopy(store.model_config(self.server.config.get("model", {})))
+                require(type(payload["version"]) is int and payload["version"] == config["version"],
+                        "model_config_changed", 409)
+                require(isinstance(payload["import_job_id"], str), "invalid_assist_request")
+                imported = manager.get(payload["import_job_id"], owner, "import")
+                require(imported is not None, "chat_import_not_found", 404)
+                require(imported["shop_id"] == shop_id and imported["shop_version"] == shop_version,
+                        "shop_settings_changed", 409)
+                require(imported["status"] == "completed", "chat_import_not_ready", 409)
+                rules = validate_settings({"enabled": False, "mode": "rules", "system_prompt": "",
+                                           "rules": payload["existing_rules"]})["rules"]
+
+            def current():
+                # Called between local batches and BEFORE every subsequent model
+                # call, so revoked/stale work cannot keep starting API requests.
+                with self.server.auth.lock:
+                    try:
+                        auth = self.server.auth.identity(token)
+                    except ApiError:
+                        return False
+                    live = next((s for s in store.shops() if s["shop_id"] == shop_id), None)
+                    return (not auth["must_change_password"] and live is not None
+                            and live["settings"]["version"] == shop_version
+                            and (config is None or store.model_config(self.server.config.get("model", {}))["version"] == config["version"]))
+
+            def run(progress, cancelled):
+                stop = lambda: cancelled() or not current()
+                if kind == "import":
+                    return chatrules.parse_import(payload["filename"], payload["text"], full=True,
+                                                  progress=progress, cancelled=stop)
+                return chatbatch.analyze(imported["result"]["pairs"], rules, config,
+                                         progress=progress, cancelled=stop)
+            try:
+                value = manager.start(kind, owner, shop_id, shop_version, run,
+                                      version=None if config is None else config["version"])
+            except ValueError as exc:
+                code = str(exc)
+                raise ApiError(429 if code == "prompt_draft_busy" else 503,
+                               code if code in ("prompt_draft_busy", "assist_cancelled") else "assist_failed") from None
+            return self._send(202, value)
+
     def _admin_route(self, path, method, parts, store):
+        if len(parts) in (5, 6) and parts[3] in ("chat-import", "rule-draft") and parts[4] == "jobs":
+            return self._assist_job("import" if parts[3] == "chat-import" else "rules", method,
+                                    parts[5] if len(parts) == 6 else None, store)
         if method == "POST" and path in ("/api/v1/admin/chat-import", "/api/v1/admin/rule-draft",
                                          "/api/v1/admin/prompt-merge"):
             return self._admin_assist(path, store)
@@ -439,6 +529,7 @@ class Server(ThreadingHTTPServer):
             raise
         self.stop, self.wake = threading.Event(), threading.Event()
         self.prompt_draft_slot = threading.BoundedSemaphore(1)
+        self.assist_jobs = importjobs.JobManager(self.prompt_draft_slot)
         self.model_workers = {}
         self.operations = Operations()
         self.backups = BackupManager(data_dir)
@@ -457,6 +548,7 @@ class Server(ThreadingHTTPServer):
         last_shop = ""
         while not self.stop.is_set():
             self.wake.clear()
+            self.assist_jobs.purge()
             self.store.expire_deadlines()
             for shop, (worker, future, job, started) in list(self.model_workers.items()):
                 if not worker.is_alive():
@@ -536,6 +628,7 @@ class Server(ThreadingHTTPServer):
     def server_close(self):
         super().server_close()
         if hasattr(self, "stop"):
+            self.assist_jobs.close()
             self.backups.close()
             self.stop.set()
             self.wake.set()
