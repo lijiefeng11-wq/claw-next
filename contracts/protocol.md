@@ -800,4 +800,4 @@ conflicts 为可能冲突的现有规则 ID，不能保证发现所有语义冲�
 
 返回 `{shop_id, version, shop_version, draft, changes, conflicts}`。draft 为 1–8000 字，changes/conflicts 各最多 20 条纯文本，每条最多 500 字。模型被要求保留原有事实和限制，将明确补充按主题合并；矛盾要求只列入待核对点，合并草稿默认保留旧要求，管理员可在预览中编辑决定。输出仍可能遗漏或误解，页面须并排显示原文与合并稿；存在冲突时须人工核对确认，才能填回提示词框。填回不自动保存。
 
-通用失败：无权限/初始密码未改为 401/403；输入不符为 400；店铺不存在 404；`shop_settings_changed` 或 `model_config_changed` 为 409；并发占用 `prompt_draft_busy` 为 429；模型无完整合格输出 `assist_unavailable` 为 502。错误不返回上传正文、模型原始响应或凭据。生成中退出、换店、重置、输入改动及版本变化后旧结果不得填回，也不得再次应用已处理的同一批草稿。
+通用失败：无权限/初始密码未改为 401/403；输入不符为 400；店铺不存在 404；`shop_settings_changed` 或 `model_config_changed` 为 409；并发占用 `prompt_draft_busy` 为 429；同步模型接口无完整合格输出 `assist_unavailable` 为 502；异步任务执行失败通过查询中的 `status:failed` 与固定 `error.code` 表达，HTTP 200 仅代表查询成功，不代表分析成功。异步规则上下文不符为 `invalid_rule_context`，不得误报为文件导入失败。错误不返回上传正文、模型原始响应或凭据。生成中退出、换店、重置、输入改动及版本变化后旧结果不得填回，也不得再次应用已处理的同一批草稿。
