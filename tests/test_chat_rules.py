@@ -29,6 +29,17 @@ def labelled(result, label):
 
 
 class ChatImportTests(unittest.TestCase):
+    def test_import_limit_counts_utf8_bytes_at_10_mib_boundary(self):
+        base = json.dumps({"question": "怎么清洁？", "answer": "使用软布。", "metadata": ""}, ensure_ascii=False)
+        remaining = 10 * 1024 * 1024 - len(base.encode("utf-8"))
+        record = json.loads(base)
+        record["metadata"] = "汉" * (remaining // 3) + " " * (remaining % 3)
+        text = json.dumps(record, ensure_ascii=False)
+        self.assertEqual(len(text.encode("utf-8")), 10 * 1024 * 1024)
+        self.assertEqual(rules.parse_import("test.json", text)["pairs"][0]["answer"], "使用软布。")
+        with self.assertRaisesRegex(ValueError, "invalid_chat_import"):
+            rules.parse_import("test.json", text + " ")
+
     def test_jsonl_and_json_preserve_anonymous_distinct_conversations(self):
         for filename, text in (("a.json", json.dumps([session(), session()])),
                                ("a.jsonl", "\n".join(json.dumps(session()) for _ in range(2)))):

@@ -7,7 +7,7 @@ import re
 from . import diagnostics, modelconfig, promptdraft
 from .engine import ProviderFailure, _completion_text, _post, _slot_spec
 
-MAX_INPUT_BYTES = 2 * 1024 * 1024
+MAX_INPUT_BYTES = 10 * 1024 * 1024
 MAX_MESSAGES = 20000
 MAX_PAIRS = 200
 MAX_PAIRS_CHARS = 24000

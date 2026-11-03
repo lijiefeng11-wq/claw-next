@@ -1,5 +1,6 @@
 """Administrative previews use fictional shops and local synthetic providers."""
 import copy
+import http.client
 import json
 import pathlib
 import sys
@@ -80,6 +81,37 @@ class AdminAssistTests(unittest.TestCase):
         self.assertEqual(self.primary.count(), 0)
         self.assertEqual(self.server.store.shops(), before)
 
+    def test_import_accepts_10_mib_including_json_escaping_but_rejects_one_more_byte(self):
+        before = copy.deepcopy(self.server.store.shops())
+        base = json.dumps({"question": "怎么清洁？", "answer": "使用软布。"}, ensure_ascii=False)
+        text = "\t" * (10 * 1024 * 1024 - len(base.encode("utf-8"))) + base
+        payload = {"shop_id": "demo", "filename": "test.json", "text": text}
+        self.assertGreater(len(json.dumps(payload).encode("utf-8")), 8 * 1024 * 1024)
+        status, value = self.call("chat-import", payload)
+        self.assertEqual(status, 200, value)
+        self.assertEqual(value["pairs"][0]["answer"], "使用软布。")
+        status, value = self.call("chat-import", {**payload, "text": text + " "})
+        self.assertEqual(status, 400, value)
+        self.assertEqual(value["error"]["code"], "invalid_chat_import")
+        self.assertEqual(self.primary.count(), 0)
+        self.assertEqual(self.backup.count(), 0)
+        self.assertEqual(self.server.store.shops(), before)
+        self.assertEqual(self.server.store.events(), [])
+
+    def test_import_http_envelope_remains_bounded(self):
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        try:
+            connection.putrequest("POST", "/api/v1/admin/chat-import")
+            connection.putheader("Content-Type", "application/json")
+            connection.putheader("Content-Length", str(40 * 1024 * 1024 + 1))
+            connection.putheader("Authorization", "Bearer " + self.token)
+            connection.endheaders()
+            response = connection.getresponse()
+            self.assertEqual(response.status, 413)
+            self.assertEqual(json.load(response)["error"]["code"], "body_too_large")
+        finally:
+            connection.close()
+
     def test_all_preview_routes_enforce_admin_and_changed_password(self):
         for endpoint in ("chat-import", "rule-draft", "prompt-merge"):
             self.assertEqual(self.call(endpoint, token=None)[0], 401)
@@ -99,7 +131,7 @@ class AdminAssistTests(unittest.TestCase):
         self.assertEqual(self.primary.count(), 0)
 
     def test_invalid_import_and_rules_are_safe_errors(self):
-        for text in ("not-json", "[]", "x" * (2 * 1024 * 1024 + 1)):
+        for text in ("not-json", "[]", "x" * (10 * 1024 * 1024 + 1)):
             status, value = self.call("chat-import", {"shop_id": "demo", "filename": "test.json", "text": text})
             self.assertEqual(status, 400, value)
             self.assertEqual(value["error"]["code"], "invalid_chat_import")
