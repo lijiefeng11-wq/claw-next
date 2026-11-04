@@ -4,7 +4,10 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const temp = fs.mkdtempSync(path.join(os.tmpdir(), "claw-send-location-"));
+// e2e 父进程在 Electron 退出后清理目录，避免 Windows 仍持有会话文件时删除。
+const parentOwned = process.env.CLAW_NEXT_SEND_LOCATION_DATA;
+const temp = parentOwned || fs.mkdtempSync(path.join(os.tmpdir(), "claw-send-location-"));
+fs.mkdirSync(temp, { recursive: true });
 app.setPath("userData", temp);
 const { PddPageAdapter } = require("../dist/src/main/pddAdapter.js");
 const results = [];
@@ -92,9 +95,13 @@ app.whenReady().then(async () => {
   } finally {
     win.destroy();
     clearTimeout(watchdog);
-    fs.rmSync(temp, { recursive: true, force: true });
+    if (!parentOwned) fs.rmSync(temp, { recursive: true, force: true });
   }
   const ok = results.length === scenarios.length && results.every(r => r.ok);
   console.log(JSON.stringify({ ok, fictional_data_page_only: true, real_adapter_and_native_hit_test: true, platform_receipt_stubbed: true, results }));
   app.exit(ok ? 0 : 1);
+}).catch(error => {
+  clearTimeout(watchdog);
+  console.log(JSON.stringify({ ok: false, results, error: String(error.stack || error) }));
+  app.exit(1);
 });
