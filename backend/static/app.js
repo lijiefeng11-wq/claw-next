@@ -91,6 +91,7 @@
 
   const el = {};
   let assist = null;
+  let productLearning = null;
   const IDS = [
     "login-view", "login-panel", "login-form", "username-input", "password-input", "login-btn",
     "login-notice", "login-error",
@@ -1595,6 +1596,7 @@
     clearTimer();
     stopShopPolling();
     state.token = null;
+    if (productLearning) productLearning.reset();
     state.me = null;
     state.username = null;
     state.expiresAt = null;
@@ -2151,6 +2153,7 @@
   }
 
   function renderShopHeader() {
+    if (productLearning) productLearning.refresh();
     const shop = currentShop();
     if (!shop) {
       setText(el["shop-meta"], "未选择店铺。");
@@ -3681,6 +3684,7 @@
 
   function init() {
     const handoff = takeHandoffTicket();
+    if (window.setupProductLearning) productLearning = window.setupProductLearning({state: state, request: request, handleError: handleError});
     IDS.forEach(function (id) {
       el[id] = byId(id);
     });

@@ -1,6 +1,7 @@
 import type { Card, ImageMime, Kind, MarkColor, PageObserved, Role } from "./protocol.js";
 import type { PlatformOrder } from "./pddOrders.js";
 import type { PageHealthView } from "./pageHealth.js";
+import type { ProductDoc } from "./productLearning.js";
 
 export type PlatformIdentity = { platform_shop_id: string; display_name: string };
 
@@ -116,6 +117,8 @@ export interface PlatformAdapter {
   login(): Promise<void>;
   logout(): Promise<void>;
   fetchHistory(conversationId: string): Promise<HistoryResult>;
+  /** Read-only store product collection; no sending, cart, order or product edits. */
+  collectProducts?(selection: { goods_id?: string; mall_id?: string }, batch: (products: ProductDoc[], total: number) => Promise<void>, check: () => void): Promise<{ total: number; complete: boolean }>;
   send(request: SendRequest): Promise<SendResult>;
   /** 在本店已登录的平台会话中读取买家图片原文件；只允许平台图片域名。 */
   fetchImage?(ref: string): Promise<ImageFetchResult>;

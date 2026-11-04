@@ -1,6 +1,7 @@
 import type { PlatformMessage } from "./adapter.js";
 import type { Card, Kind, Role } from "./protocol.js";
 import { isIdentifier } from "./protocol.js";
+import { productKey } from "./productLearning.js";
 
 // 拼多多商家后台客服页面响应解析。字段依据：用户测试店铺登录后，
 // 页面自身请求的响应结构诊断（只记录字段名/类型与类别标签，未记录任何值）。
@@ -143,7 +144,7 @@ export type ParsedList = { buyer_uid: string; messages: PlatformMessage[]; has_m
  * POST /plateau/chat/list 响应：{ success, result: { has_more, messages: [{ from:{role,uid}, to:{role,uid}, type, content, ts, msg_id, template_name }] } }
  * buyerUid 取自页面请求体 data.list.with.id（role=user）。
  */
-export function parseChatList(requestBody: unknown, responseBody: unknown): ParsedList | null {
+export function parseChatList(requestBody: unknown, responseBody: unknown, shopId?: string): ParsedList | null {
   const withObj = obj(obj(obj(obj(requestBody)?.data)?.list)?.with);
   const buyer = withObj?.role === "user" ? idString(withObj.id) : null;
   const b = obj(responseBody);
@@ -169,6 +170,12 @@ export function parseChatList(requestBody: unknown, responseBody: unknown): Pars
     const { kind, placeholder } = source ? { kind: "card" as const, placeholder: source } : kindOf(m);
     const goods = source ? null : goodsCard(m);
     const card: Card | null = source ? { type: m.type === 31 ? "system" : "source", title: source } : goods;
+    if (card && shopId && (goods || card.type === "source")) {
+      const info = obj(m.info), nested = obj(info?.goods_info);
+      const ids = [info?.goodsID, info?.goodsId, nested?.goods_id].filter(v => v !== undefined && v !== null);
+      const keys = ids.map(v => { try { return productKey(shopId, v); } catch { return null; } });
+      if (keys.length && keys.every(v => v !== null) && new Set(keys).size === 1) card.product_key = keys[0]!;
+    }
     const content = goods?.title ? `商品卡片：${goods.title}` : placeholder ?? (typeof m.content === "string" ? m.content : "");
     const thumb = goods ? obj(m.info)?.goodsThumbUrl : null;
     const image = kind === "image" ? imageRef(m) : typeof thumb === "string" && /^https:\/\/\S+$/i.test(thumb.trim()) ? thumb.trim() : null;

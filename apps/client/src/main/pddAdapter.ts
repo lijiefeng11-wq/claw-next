@@ -14,6 +14,8 @@ import { MAX_IMAGE_BYTES, type PageObserved } from "../core/protocol.js";
 import { judgeMark, MARK_COLOR_VALUE, MARK_QUIET_MS, markRequestVerdict, markResponseOk, newMarkWatch, observeInput, type MarkWatch } from "../core/pddMark.js";
 import type { PlatformPage } from "./platformWorkspace.js";
 import { dispatchPageClick, type PageClickResult } from "./pddClick.js";
+import { collectStoreProducts, productReadScript } from "./productCollector.js";
+import type { ProductDoc } from "../core/productLearning.js";
 import { PddMessageWatcher } from "./pddMessageWatcher.js";
 import { popupSweepScript, type PopupSweepMode, type PopupSweepResult } from "./pddPopups.js";
 import { MARKED_LIST_PATH, MARK_REQUEST_PATH, markedListProbe, markRequestProbe, markResponseProbe, type MarkProbeRecord, UNMARK_REQUEST_PATH } from "./markProbe.js";
@@ -1517,7 +1519,7 @@ export class PddPageAdapter implements PlatformAdapter {
       const id = parseCustomServiceInfo(json);
       if (id) this.tracker.identityFromCsInfo(id);
     } else {
-      const list = parseChatList(jsonOrNull(postData), json);
+      const list = parseChatList(jsonOrNull(postData), json, this.shopId);
       console.log(`[${this.shopId}] platform chat/list ${list ? `messages=${list.messages.length} skipped=${list.skipped} has_more=${list.has_more}` : "unparsed"}`);
       if (list) {
         const watch = this.itemWatch;
@@ -1831,6 +1833,37 @@ export class PddPageAdapter implements PlatformAdapter {
 
   async fetchHistory(conversationId: string): Promise<HistoryResult> {
     return this.tracker.history(conversationId);
+  }
+
+  async collectProducts(selection: { goods_id?: string; mall_id?: string }, batch: (products: ProductDoc[], total: number) => Promise<void>, check: () => void) {
+    const win = this.window;
+    const mall = this.status().identity?.platform_shop_id;
+    if (!win || win.isDestroyed() || !mall) throw Error("product_page_unavailable");
+    // Click/layout epochs also change on resize and popup cleanup. Goods reads only bind the page lifecycle.
+    let changed = false;
+    const invalidate = () => { changed = true; };
+    const events = ["did-start-loading", "did-navigate", "render-process-gone", "destroyed"] as const;
+    for (const event of events) win.webContents.on(event as "destroyed", invalidate);
+    const valid = () => {
+      check();
+      const status = this.status();
+      if (changed || this.window !== win || win.isDestroyed() || !status.logged_in
+          || status.identity?.platform_shop_id !== mall || !win.webContents.getURL().startsWith(LOGIN_URL)) throw Error("product_source_changed");
+    };
+    try {
+      return await collectStoreProducts(this.shopId, mall, selection, async (kind, params) => {
+        valid();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const value = await Promise.race([win.webContents.executeJavaScript(productReadScript(kind, params)),
+            new Promise<never>((_, reject) => { timer = setTimeout(() => reject(Error("product_page_unavailable")), 12000); })]);
+          valid();
+          return value;
+        } finally { if (timer) clearTimeout(timer); }
+      }, batch, valid);
+    } finally {
+      for (const event of events) win.webContents.removeListener(event as "destroyed", invalidate);
+    }
   }
 
   historyLoadedAt(conversationId: string): number {

@@ -13,6 +13,7 @@ from socketserver import TCPServer
 from urllib.parse import parse_qs, urlsplit
 
 from . import chatbatch, chatrules, diagnostics, importjobs, modelconfig, modelworker, promptdraft, promptmerge, vehicle_knowledge
+from . import productcatalog, productmodel
 from .auth import AdminAuth
 from .backups import BackupManager
 from .operations import Operations
@@ -405,6 +406,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"shops": store.shops(), "templates": store.reply_templates()})
             if path == "/api/v1/admin/reply-templates" and method == "POST":
                 return self._send(201, store.create_reply_template(self._json()))
+            if len(parts) == 6 and parts[3] == "shops" and parts[5] == "product-learning" and method in ("GET", "POST"):
+                if method == "GET":
+                    return self._send(200, self.server.products.status(parts[4]))
+                payload = self._json()
+                require(set(payload) == {"source_url"}, "invalid_product_request")
+                return self._send(202, self.server.products.request(parts[4], payload["source_url"]))
             if path == "/api/v1/admin/events" and method == "GET":
                 query = parse_qs(urlsplit(self.path).query)
                 try:
@@ -428,6 +435,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/health" and method == "GET":
             return self._send(200, {"service": "claw-next", "protocol_version": PROTOCOL_VERSION, "status": "ok"})
         static = {"/": ("index.html", "text/html; charset=utf-8"), "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+                  "/products.js": ("products.js", "text/javascript; charset=utf-8"),
                   "/assist.js": ("assist.js", "text/javascript; charset=utf-8"), "/style.css": ("style.css", "text/css; charset=utf-8")}
         if path in static and method == "GET":
             name, mime = static[path]
@@ -465,7 +473,24 @@ class Handler(BaseHTTPRequestHandler):
             return self._admin_route(path, method, parts, store)
         require(identity["role"] == "client", "client_required", 403)
         if path == "/api/v1/heartbeat" and method == "POST":
-            return self._send(200, store.heartbeat(identity, self._json()))
+            lease = store.heartbeat(identity, self._json())
+            pending = self.server.products.pending(identity, lease)
+            return self._send(200, {**lease, **({"product_learning": pending} if pending else {})})
+        if len(parts) == 4 and parts[2] == "product-learning" and method == "POST":
+            payload = self._json()
+            products = self.server.products.begin(identity, parts[3], payload)
+            if products is None:
+                return self._send(200, self.server.products.status(identity["shop_id"]))
+            error, learned = None, []
+            if products and not payload["error"]:
+                config = copy.deepcopy(store.model_config(self.server.config.get("model", {})))
+                try:
+                    learned = productmodel.learn(products, config)
+                except ProviderFailure:
+                    error = "product_learning_failed"
+            current = self._identity()
+            require(current == identity, "product_source_changed", 409)
+            return self._send(200, self.server.products.finish(identity, parts[3], payload, learned, error))
         if path == "/api/v1/events" and method == "POST":
             value = store.enqueue(identity, self._json())
             self.server.wake.set()
@@ -529,6 +554,7 @@ class Server(ThreadingHTTPServer):
             self.vehicle_catalogs = {shop: vehicle_knowledge.load_directory(path)
                                      for shop, path in config.get("vehicle_knowledge", {}).items()}
             self.store = Store(data_dir, config["shops"])
+            self.products = productcatalog.ProductCatalog(self.store)
             if startup_check is not None:
                 startup_check()
             self.auth = AdminAuth(data_dir)
@@ -612,6 +638,10 @@ class Server(ThreadingHTTPServer):
         with diagnostics.scope(self.diagnostics, event_ref=diagnostics.reference(job["shop_id"], job["event_id"])):
             diagnostics.emit("decision_started")
             try:
+                goods = job["payload"]["context"].get("goods", [])
+                knowledge = self.products.knowledge(job["shop_id"], goods) if any(g.get("product_key") for g in goods) else []
+                if knowledge:
+                    job["product_knowledge"] = knowledge
                 catalog = self.vehicle_catalogs.get(job["shop_id"])
                 if catalog is not None:
                     # Run in this shop's worker, outside the global store lock and

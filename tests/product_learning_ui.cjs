@@ -1,0 +1,35 @@
+'use strict';
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+const source=fs.readFileSync('backend/static/products.js','utf8');
+class Node { constructor(){this.textContent='';this.value='';this.children=[];this.disabled=false;this.listeners={};} appendChild(n){this.children.push(n);} replaceChildren(){this.children=[];} addEventListener(k,f){this.listeners[k]=f;} }
+const tick=()=>new Promise(r=>setImmediate(r));
+function setup(){
+ const nodes=Object.fromEntries(['product-learning','product-source','product-learn','product-status','product-preview'].map(k=>[k,new Node()]));
+ const state={selectedShopId:'a',token:'fictional-admin',epoch:1,route:'scripts'},calls=[],window={};
+ const document={hidden:false,getElementById:k=>nodes[k],createElement:()=>new Node()};
+ vm.runInNewContext(source,{window,document,setInterval:()=>0});
+ const control=window.setupProductLearning({state,request:(url,opts)=>new Promise((resolve,reject)=>calls.push({url,opts,resolve,reject})),handleError:()=>{state.token=null;}});
+ return {nodes,state,calls,control};
+}
+(async()=>{
+ let passed=0;
+ const h=setup();
+ h.calls[0].resolve({status:'idle',products:[]});await tick();
+ h.nodes['product-source'].value='https://mobile.yangkeduo.com/mall_page.html?ps=fictional';
+ const click=h.nodes['product-learn'].listeners.click();
+ h.nodes['product-learn'].listeners.click();h.control.refresh();
+ assert.equal(h.calls.length,2);assert.equal(h.calls[1].opts.method,'POST');
+ assert.equal(h.calls[1].opts.body.source_url,h.nodes['product-source'].value);passed++;
+ h.calls[1].resolve({status:'queued',client_ready:false});await click;
+ assert.match(h.nodes['product-status'].textContent,/更新/);assert.equal(h.nodes['product-learn'].disabled,false);passed++;
+ h.control.refresh();const old=h.calls[2];h.state.selectedShopId='b';h.control.refresh();h.state.selectedShopId='a';h.control.refresh();
+ old.resolve({status:'completed',processed:999,catalog_count:999,products:[{title:'别家资料',facts:[]}]});await tick();
+ assert.doesNotMatch(h.nodes['product-status'].textContent,/999/);assert.equal(h.nodes['product-preview'].children.length,0);passed++;
+ h.control.refresh();h.calls.at(-1).resolve({status:'partial',processed:1,total:2,products:[{title:'<img src=x onerror=alert(1)>',category:'其他',details_complete:false,facts:['不能用<script>']}]});await tick();
+ assert.match(h.nodes['product-status'].textContent,/部分/);assert.equal(h.nodes['product-preview'].children[0].children[0].textContent,'<img src=x onerror=alert(1)> · 其他 · 部分资料缺失');
+ assert.equal(h.nodes['product-preview'].children[0].children[1].children[0].textContent,'不能用<script>');passed++;
+ h.control.refresh();h.calls.at(-1).resolve({status:'failed',error:'product_learning_failed',products:[]});await tick();assert.match(h.nodes['product-status'].textContent,/原有产品知识保持不变/);passed++;
+ h.control.refresh();const logout=h.calls.at(-1);h.state.token=null;h.state.epoch++;h.control.reset();logout.resolve({status:'completed',processed:9,products:[{title:'旧资料',facts:[]}]});await tick();
+ assert.equal(h.nodes['product-preview'].children.length,0);assert.equal(h.nodes['product-learn'].disabled,true);passed++;
+ console.log(JSON.stringify({passed,actualProductUi:true,platform:false}));
+})().catch(e=>{console.error(e);process.exitCode=1;});

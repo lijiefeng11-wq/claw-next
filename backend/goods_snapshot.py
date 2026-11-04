@@ -64,7 +64,8 @@ def validate_goods(context, require):
     require(isinstance(goods, list) and len(goods) <= MAX_GOODS, "invalid_goods")
     refs, newest = set(), None
     for entry in goods:
-        require(isinstance(entry, dict) and set(entry) == GOODS_KEYS, "invalid_goods")
+        require(isinstance(entry, dict) and GOODS_KEYS <= set(entry) <= GOODS_KEYS | {"product_key"}, "invalid_goods")
+        require("product_key" not in entry or isinstance(entry["product_key"], str) and re.fullmatch(r"[0-9a-f]{64}", entry["product_key"]), "invalid_product_key")
         ref, title = entry["goods_ref"], entry["title"]
         require(isinstance(ref, str) and 0 < len(ref) <= MAX_REF and ref not in refs, "invalid_goods_ref")
         require(isinstance(title, str) and 0 < len(title.strip()) and len(title) <= 200
@@ -80,12 +81,16 @@ def validate_goods(context, require):
         newest = latest
 
 
-def _good_card(messages, evidence, title):
+def _good_card(messages, evidence, entry):
     message = next((m for m in messages if m["id"] == evidence["message_id"]), None)
     if message is None or message["created_at"] != evidence["observed_at"]:
         return False
     card = message.get("card") or {}
-    return message["kind"] == "card" and card.get("type") == "goods" and card.get("title") == title
+    if message["kind"] != "card" or card.get("type") not in ("goods", "source"):
+        return False
+    if "product_key" in entry:
+        return card.get("product_key") == entry["product_key"]
+    return card.get("type") == "goods" and card.get("title") == entry["title"]
 
 
 def validate_references(context, require):
@@ -116,7 +121,7 @@ def validate_references(context, require):
                     line.get("goods_ref") == entry["goods_ref"] for line in lines[item["order_ref"]]),
                     "invalid_goods_evidence")
             else:
-                require(_good_card(messages, item, entry["title"]), "invalid_goods_evidence")
+                require(_good_card(messages, item, entry), "invalid_goods_evidence")
             key = (item["source"], item.get("order_ref") or item.get("message_id"))
             require(key not in keys, "duplicate_goods_evidence")
             keys.add(key)

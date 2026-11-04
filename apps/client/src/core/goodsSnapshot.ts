@@ -41,13 +41,16 @@ export function goodsIdentity(goodsId: string | null, title: string): string {
 /** key 为 null：没有编号、标题又被清理或截断过，无法确定身份——明细照列，但不归入任何商品条目。 */
 type Line = { key: string | null; title: string; sku?: string; quantity?: number };
 
-function orderLines(o: SnapshotOrder): Line[] {
+function orderLines(o: SnapshotOrder, productKey?: (id: string) => string): Line[] {
   const out: Line[] = [];
   for (const g of o.goods.slice(0, MAX_ORDER_ITEMS)) {
     const title = cleanText(g.title);
     if (!title) continue;
     // 标题身份只认与页面原标题逐字相同的标题（exact）；有损清理、截断后的显示标题不作身份。
-    const key = g.goods_id ? goodsIdentity(g.goods_id, title) : g.exact === true && exactTitle(g.title) === title ? goodsIdentity(null, title) : null;
+    let key = g.goods_id ? goodsIdentity(g.goods_id, title) : g.exact === true && exactTitle(g.title) === title ? goodsIdentity(null, title) : null;
+    if (g.goods_id && productKey) {
+      try { key = "product:" + productKey(g.goods_id); } catch { /* Unverified product ID keeps the legacy snapshot only. */ }
+    }
     const sku = cleanText(g.sku);
     const quantity = Number.isInteger(g.quantity) && (g.quantity as number) > 0 ? g.quantity : undefined;
     out.push({ key, title, ...(sku ? { sku } : {}), ...(quantity ? { quantity } : {}) });
@@ -55,7 +58,7 @@ function orderLines(o: SnapshotOrder): Line[] {
   return out;
 }
 
-export function buildGoodsSnapshot(input: { orders: SnapshotOrder[]; messages: ContextMessage[] }, makeRef: (identity: string) => string): { goods: GoodsSnapshot[]; items: Map<string, OrderItem[]> } {
+export function buildGoodsSnapshot(input: { orders: SnapshotOrder[]; messages: ContextMessage[] }, makeRef: (identity: string) => string, productKey?: (id: string) => string): { goods: GoodsSnapshot[]; items: Map<string, OrderItem[]> } {
   const groups = new Map<string, { title: string; titleAt: number; evidence: Map<string, GoodsEvidence> }>();
   const add = (key: string, title: string, ek: string, e: GoodsEvidence) => {
     const g = groups.get(key) ?? groups.set(key, { title, titleAt: -Infinity, evidence: new Map() }).get(key)!;
@@ -65,19 +68,19 @@ export function buildGoodsSnapshot(input: { orders: SnapshotOrder[]; messages: C
   const lines = new Map<string, Line[]>();
   for (const o of input.orders) {
     if (!Number.isFinite(o.observed_at)) continue;
-    const ls = orderLines(o);
+    const ls = orderLines(o, productKey);
     if (!ls.length) continue;
     lines.set(o.order_ref, ls);
     for (const l of ls) if (l.key) add(l.key, l.title, `order:${o.order_ref}`, { source: "order", order_ref: o.order_ref, observed_at: o.observed_at });
   }
   for (const m of input.messages) {
-    if (m.kind !== "card" || m.card?.type !== "goods" || !Number.isFinite(m.created_at)) continue;
+    if (m.kind !== "card" || !(m.card?.type === "goods" || m.card?.type === "source" && productKey && m.card.product_key) || !Number.isFinite(m.created_at)) continue;
     const title = exactTitle(m.card.title);
     if (!title) continue;
     const price = m.card.fields?.find((f) => f.label === "价格")?.value;
     const card_price = typeof price === "string" && price && price.length <= MAX_TITLE && !URL_RE.test(price) ? price : undefined;
-    // 卡片来源暂无平台编号（契约“暂不提供”），一律按标题身份。
-    add(goodsIdentity(null, title), title, `card:${m.id}`, { source: "goods_card", message_id: m.id, ...(card_price ? { card_price } : {}), observed_at: m.created_at });
+    const key = productKey && m.card.product_key ? "product:" + m.card.product_key : goodsIdentity(null, title);
+    add(key, title, `card:${m.id}`, { source: "goods_card", message_id: m.id, ...(card_price ? { card_price } : {}), observed_at: m.created_at });
   }
   const byTime = (a: { observed_at: number }, b: { observed_at: number }) => b.observed_at - a.observed_at;
   const ranked = [...groups.entries()]
@@ -86,7 +89,7 @@ export function buildGoodsSnapshot(input: { orders: SnapshotOrder[]; messages: C
     .sort((a, b) => byTime(a.evidence[0], b.evidence[0]) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
     .slice(0, MAX_GOODS);
   const refs = new Map(ranked.map((g) => [g.key, makeRef(g.key)]));
-  const goods: GoodsSnapshot[] = ranked.map((g) => ({ goods_ref: refs.get(g.key)!, title: g.title, evidence: g.evidence }));
+  const goods: GoodsSnapshot[] = ranked.map((g) => ({ goods_ref: refs.get(g.key)!, title: g.title, evidence: g.evidence, ...(g.key.startsWith("product:") ? { product_key: g.key.slice(8) } : {}) }));
   // 被 MAX_EVIDENCE 截掉的订单来源不影响 items：items 照常列出明细，goods_ref 只看商品是否进入 goods。
   const items = new Map<string, OrderItem[]>();
   for (const [orderRef, ls] of lines) {

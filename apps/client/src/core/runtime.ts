@@ -2,11 +2,14 @@ import { createHash, randomUUID } from "node:crypto";
 import type { AdapterEvent, HistoryResult, MarkResult, PlatformAdapter, PlatformMessage, PlatformSendOption, SendResult } from "./adapter.js";
 import type { OrderGoods, PlatformOrder } from "./pddOrders.js";
 import { buildGoodsSnapshot } from "./goodsSnapshot.js";
+import { productKey, type ProductDoc } from "./productLearning.js";
 import { BackendClient, BackendError, FetchLike, TransportError } from "./backend.js";
 import { AttemptPhase, ConversationState, EventRecord, Journal, LogRefs, ReceiptRecord, StoredMessage, UnknownCheck, describeRecord } from "./journal.js";
 import {
   Attachment,
   CAP_GOODS_SNAPSHOT,
+  CAP_PRODUCT_KNOWLEDGE,
+  ProductLearningRequest,
   CAP_MARK_CONVERSATION,
   CAP_REPLY_DEADLINE,
   CAP_SEND_ITEM,
@@ -213,6 +216,8 @@ export class ShopRuntime {
   private readonly cancelChecks: EventRecord[] = [];
   /** 已记录后台计时的事件，只在内存。 */
   private readonly timingLogged = new Set<string>();
+  private productLearning: Promise<void> | null = null;
+  private readonly productRequests = new Set<string>();
 
   constructor(options: RuntimeOptions) {
     this.config = { ...options.config };
@@ -340,7 +345,7 @@ export class ShopRuntime {
     if (!session || this.stopped) return;
     const started = this.now();
     try {
-      const lease = await this.backend.heartbeat(this.instanceId, session, [...(this.adapter.sendItem ? [CAP_SEND_ITEM] : []), CAP_REPLY_DEADLINE, CAP_GOODS_SNAPSHOT, ...(this.markDeclared() ? [CAP_MARK_CONVERSATION] : [])]);
+      const lease = await this.backend.heartbeat(this.instanceId, session, [...(this.adapter.sendItem ? [CAP_SEND_ITEM] : []), CAP_REPLY_DEADLINE, CAP_GOODS_SNAPSHOT, ...(this.adapter.collectProducts ? [CAP_PRODUCT_KNOWLEDGE] : []), ...(this.markDeclared() ? [CAP_MARK_CONVERSATION] : [])]);
       if (lease.instance_id !== this.instanceId || lease.session_id !== session || lease.shop_id !== this.config.shop_id) {
         this.lease = { state: "error", generation: 0, valid_until: 0, detail: "lease_response_mismatch" };
         return;
@@ -355,6 +360,11 @@ export class ShopRuntime {
       if (caps.has(CAP_GOODS_SNAPSHOT) !== this.capabilities.has(CAP_GOODS_SNAPSHOT)) this.log(`capability goods_snapshot=${caps.has(CAP_GOODS_SNAPSHOT)}`);
       if (caps.has(CAP_MARK_CONVERSATION) !== this.capabilities.has(CAP_MARK_CONVERSATION)) this.log(`capability mark_conversation=${caps.has(CAP_MARK_CONVERSATION)}`);
       this.capabilities = caps;
+      const request = lease.product_learning;
+      if (request && caps.has(CAP_PRODUCT_KNOWLEDGE) && !this.productLearning && !this.productRequests.has(request.request_id)) {
+        this.productRequests.add(request.request_id);
+        this.productLearning = this.learnProducts(request, session, lease.generation).finally(() => { this.productLearning = null; });
+      }
       if (this.config.mode === "auto" && this.sendItemConfirmed()) void this.adapter.prepareSendOptions?.().catch(() => undefined);
     } catch (err) {
       const code = errorCode(err);
@@ -383,6 +393,39 @@ export class ShopRuntime {
   /** 本租约已确认、且本适配器能执行附加发送。 */
   sendItemConfirmed() {
     return !!this.adapter.sendItem && this.capabilities.has(CAP_SEND_ITEM);
+  }
+
+  private async learnProducts(request: ProductLearningRequest, session: string, generation: number) {
+    let seq = 0, total: number | null = null;
+    const owner = { instance_id: this.instanceId, session_id: session, generation };
+    const check = () => {
+      if (this.stopped || this.updateHold() || this.sessionId !== session || this.lease.generation !== generation
+          || this.lease.state !== "held" || this.lease.valid_until <= this.now() || this.platformCheck()
+          || !this.capabilities.has(CAP_PRODUCT_KNOWLEDGE)) throw Error("product_source_changed");
+      if (request.expires_at <= this.now()) throw Error("product_collection_timeout");
+    };
+    const send = async (products: ProductDoc[], finished: boolean, complete: boolean, error: string | null = null) => {
+      const result = await this.backend.productBatch(request.request_id, { ...owner, seq, products, total,
+        finished, catalog_complete: complete, error });
+      if (result.status === "failed") throw Error("product_upload_failed");
+      seq++;
+    };
+    try {
+      check();
+      if (!this.adapter.collectProducts) throw Error("product_page_unavailable");
+      const result = await this.adapter.collectProducts(request.selection, async (products, count) => {
+        check(); total = count; await send(products, false, false); check();
+      }, check);
+      check(); total = result.total;
+      await send([], true, result.complete);
+      this.log("product learning completed");
+    } catch (error) {
+      const known = ["product_source_changed", "product_collection_timeout", "product_list_invalid", "product_page_unavailable"];
+      const code = error instanceof Error && known.includes(error.message) ? error.message : "product_upload_failed";
+      // A failed/uncertain batch is never submitted again. Only cancel this read task.
+      try { await send([], true, false, code); } catch { /* Current owner/task may already have changed. */ }
+      this.log("product learning stopped");
+    }
   }
 
   /** 契约“商品快照（1.2 草案）”：最近一次成功心跳为本租约确认了 goods_snapshot。 */
@@ -471,6 +514,7 @@ export class ShopRuntime {
     const snap = buildGoodsSnapshot(
       { orders: orders.map((o) => ({ order_ref: o.order_ref, observed_at: o.observed_at, goods: stored?.lines.get(o.order_ref) ?? [] })), messages: request.context.messages },
       (identity) => "g-" + logRef([this.config.shop_id, "goods", conversationId, identity]).slice(0, 16),
+      this.capabilities.has(CAP_PRODUCT_KNOWLEDGE) ? (id) => productKey(this.config.shop_id, id) : undefined,
     );
     if (snap.goods.length) request.context.goods = snap.goods;
     if (orders.length && snap.items.size) request.context.orders = orders.map((o) => (snap.items.has(o.order_ref) ? { ...o, items: snap.items.get(o.order_ref) } : o));
@@ -680,6 +724,12 @@ export class ShopRuntime {
     if (conv.messages.length > MAX_CONTEXT_MESSAGES) return this.journal.note(conversationId, messageId, "context_too_large");
     if (conv.messages.some((m) => m.content.length > MAX_CONTENT_CHARS)) return this.journal.note(conversationId, messageId, "content_too_long");
     const messages: ContextMessage[] = conv.messages.map((m) => ({ id: m.id, role: m.role, kind: m.kind, content: m.content, created_at: m.created_at, ...(m.card ? { card: m.card } : {}) }));
+    if (!this.capabilities.has(CAP_PRODUCT_KNOWLEDGE)) {
+      for (const message of messages) if (message.card?.product_key) {
+        const { product_key: _key, ...card } = message.card;
+        message.card = card;
+      }
+    }
     // 契约“图片与卡片（1.0 补充）”：历史中的图片/卡片不再单独阻止；只有最新消息无法识别时本地不发送。
     const textOnly = last.kind !== "unsupported";
     const historyComplete = (history.complete || (history.latest_segment !== undefined && this.continuesConfirmed(conv, history.latest_segment))) && conv.messages.every((m) => m.stable);

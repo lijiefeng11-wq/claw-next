@@ -7,6 +7,7 @@
   <title>Claw-Next 管理后台</title>
   <link rel="stylesheet" href="style.css">
   <script src="assist.js" defer></script>
+  <script src="products.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
@@ -287,6 +288,18 @@
                   </details>
                 </fieldset>
               </div>
+
+              <section id="product-learning" class="help-box" aria-labelledby="product-title">
+                <h3 id="product-title">学习本店商品</h3>
+                <p class="field-help">使用客户端当前店铺的登录状态读取在售商品、文字属性和规格组合，再用已配置模型分类整理。买家咨询时按商品编号匹配本店知识。</p>
+                <label class="field"><span class="field-label">店铺或商品链接（选填）</span>
+                  <input id="product-source" type="url" maxlength="1000" placeholder="留空读取当前店铺；商品链接可只学习这一件">
+                </label>
+                <button id="product-learn" type="button" class="btn btn-sm">学习本店商品</button>
+                <p id="product-status" class="small muted" role="status" aria-live="polite">还未学习商品。</p>
+                <p class="field-help">知识按店铺隔离，共用话术模板不会混用商品。只在模型/混合方式调用模型时使用；纯图片里的说明暂未识别，缺失规格仍会询问，不自动开启回复。</p>
+                <details><summary>查看已学产品的关键资料（最近 20 件）</summary><div id="product-preview"></div></details>
+              </section>
 
               <label class="field">
                 <span class="field-label">模型提示词（模型和混合方式使用）</span>

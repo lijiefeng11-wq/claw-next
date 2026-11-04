@@ -37,7 +37,7 @@ export class BackendClient {
     this.base = normalizeBackendUrl(baseUrl);
   }
 
-  private async request(method: string, path: string, body?: string, auth = true): Promise<unknown> {
+  private async request(method: string, path: string, body?: string, auth = true, timeoutMs = this.timeoutMs): Promise<unknown> {
     if (body !== undefined && Buffer.byteLength(body, "utf8") > MAX_BODY_BYTES) throw new BackendError(413, "body_too_large_local");
     const headers: Record<string, string> = { Accept: "application/json" };
     if (auth) headers.Authorization = `Bearer ${this.token}`;
@@ -50,7 +50,7 @@ export class BackendClient {
         body,
         // 口令不能随重定向转发到其他地址。
         redirect: "error",
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
       throw new TransportError((err as Error)?.name === "TimeoutError" ? "timeout" : "network_error");
@@ -98,6 +98,12 @@ export class BackendClient {
   async heartbeat(instance_id: string, session_id: string, capabilities: string[] = []): Promise<Lease> {
     const body = capabilities.length ? { instance_id, session_id, capabilities } : { instance_id, session_id };
     return parseLease(await this.request("POST", "/api/v1/heartbeat", JSON.stringify(body)));
+  }
+
+  async productBatch(requestId: string, body: unknown): Promise<{ status: string }> {
+    const r = await this.request("POST", `/api/v1/product-learning/${encodeURIComponent(requestId)}`, JSON.stringify(body), true, 90000) as { status?: unknown };
+    if (!r || typeof r.status !== "string") throw new TransportError("product_response_invalid");
+    return { status: r.status };
   }
 
   /** body 必须是本地已持久化的原始请求体；重投时逐字节相同。 */
