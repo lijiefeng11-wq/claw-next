@@ -53,12 +53,13 @@ export async function collectStoreProducts(shop: string, mall: string, selection
       const doc = parseProductFacts(shop, row, properties, skus);
       // Bound model batches without dropping the remaining products.
       if (docs.length && (docs.length >= 3 || JSON.stringify([...docs, doc]).length > 20000)) {
-        await identity(); await batch(docs, total); docs = [];
+        await identity(); await batch(docs, total); check(); docs = [];
       }
       docs.push(doc);
     }
     await identity();
     if (docs.length) await batch(docs, total);
+    check();
     if (seen.size >= total || list.rows.length === 0 || added === 0) break;
   }
   return { total: total ?? 0, complete: stable && seen.size === total };
