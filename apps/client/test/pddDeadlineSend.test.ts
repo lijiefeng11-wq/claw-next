@@ -47,6 +47,25 @@ test("按下发送命令拒绝：保留 unknown，不补发松开或重试", asy
   assert.deepEqual(commands, ["mousePressed"]);
 });
 
+test("按钮等待正好到达1500ms余量边界：按到期返回，零点击并释放忙碌", async (t) => {
+  let now = 10_000, commands = 0, clears = 0;
+  t.mock.method(Date, "now", () => now);
+  const adapter = new PddPageAdapter("fictional", "虚构") as any;
+  adapter.window = { isDestroyed: () => false, webContents: { isDestroyed: () => false, debugger: { isAttached: () => true, sendCommand: async () => { commands++; } } } };
+  adapter.tracker = { status: () => ({ logged_in: true }) };
+  adapter.openConversation = async () => null;
+  adapter.run = async (script: string) => {
+    if (script.includes('return "filled"')) return "filled";
+    now = 10_200;
+    return "pdd_input_missing";
+  };
+  adapter.clearInput = async () => { clears++; };
+  const result = await adapter.send({ conversation_id: "9001", text: "虚构回复", attempt_id: "fixture", deadline: 11.7 });
+  assert.deepEqual(result, { status: "not_sent", reason: "claim_expiring" });
+  assert.equal(commands, 0); assert.equal(clears, 1);
+  assert.equal(adapter.sending, false); assert.equal(adapter.outgoing, null);
+});
+
 test("非发送按钮定位等待中页面变化：旧坐标不得点击新的页面", async () => {
   for (const change of ["resize", "replace"]) {
     const adapter = new PddPageAdapter("fictional", "虚构") as any;

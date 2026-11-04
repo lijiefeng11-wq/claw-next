@@ -46,6 +46,15 @@ npm start
 
 ## 界面端到端测试（Playwright）
 
+### 发送定位对照（Playwright + Scrapling）
+
+`npm run verify:selectors` 用独立 Electron 和虚构页面检查按钮就绪、隐藏副本、遮挡与引导弹窗；
+读取当前适配器的三个精确选择器，并将浏览器结果与 Scrapling 离线解析结果核对。
+先在独立 Python 虚拟环境安装 `scripts/selector-requirements.txt`，再通过 `CLAW_NEXT_SELECTOR_PYTHON`
+指定该环境的 Python。缺少依赖会明确失败；不安装 Scrapling 的浏览器或抓取扩展。
+这是开发检查，不是日常发送驱动，不连接已登录店铺；静态选择器匹配不代表可点击、买家身份或平台发送成功。
+当前普通 CI 保留原有真实适配器/虚构页面发送测试，这项可选对照用上述命令单独运行。
+
 `npm run e2e` 会先构建，然后用 Playwright（`playwright-core` 的 Electron 驱动）启动开发版客户端，并连上一个临时的虚构后台（仓库后台 + 虚构配置），像用户一样点击界面完成检查。全程只用模拟平台，不连接任何真实店铺，也不打开拼多多页面。覆盖：
 
 - 渲染页面隔离：没有 `require`/`process`，只暴露 `invoke`/`onState`；
