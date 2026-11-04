@@ -37,6 +37,10 @@ type Opts = {
   changeDuringFinalGate?: boolean;
   /** 最后一次页面快照期间：切到别的买家（快照自己核对出来），或时间越过期限（快照返回 ok 后才发现）。 */
   duringFinalSnapshot?: "switch" | "expire";
+  /** 开始核对之后的残留读数（收尾时）；省略时与 leftovers 相同。 */
+  leftoversLater?: { dialogs: number; popovers: number };
+  /** 收尾按 Esc 的 CDP 命令替身：同步抛错、挂起或返回。 */
+  sendCommand?: (method: string, params: { type: string }) => Promise<unknown>;
 };
 
 function harness(opts: Opts) {
@@ -49,7 +53,19 @@ function harness(opts: Opts) {
   let cancelCheck = opts.cancelCheck ?? "ok";
   let listReads = 0;
   let armed = false;
-  a.window = { isDestroyed: () => false };
+  const keys: string[] = [];
+  a.window = {
+    isDestroyed: () => false,
+    webContents: {
+      debugger: {
+        sendCommand: (method: string, params: { type: string }) => {
+          keys.push(params.type);
+          return opts.sendCommand ? opts.sendCommand(method, params) : Promise.resolve({});
+        },
+      },
+    },
+  };
+  let leftoverReads = 0;
   a.tracker = { status: () => ({ logged_in: true }) };
   a.actionGate = async () => {
     if (armed) {
@@ -69,7 +85,10 @@ function harness(opts: Opts) {
     return { status: "dispatched" };
   };
   a.run = async (script: string) => {
-    if (script.includes("const popovers")) return opts.leftovers ?? { dialogs: 0, popovers: 0 };
+    if (script.includes("const popovers")) {
+      const start = opts.leftovers ?? { dialogs: 0, popovers: 0 };
+      return leftoverReads++ === 0 ? start : (opts.leftoversLater ?? start);
+    }
     if (script.includes("el-dialog__headerbtn")) return CLOSE;
     if (script.includes("cells")) return [{ cells: [NAME, "在线"], button: ROW }];
     if (script.includes("aria-describedby")) {
@@ -96,7 +115,7 @@ function harness(opts: Opts) {
   };
   const logFile = path.join(dir, "transfer-test.jsonl");
   const logs = () => (fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
-  return { a, clicks, logs, logFile, checks };
+  return { a, clicks, logs, logFile, checks, keys };
 }
 
 // 期限与 Date.now() 同为毫秒；“到期”用时钟偏移模拟。
@@ -213,4 +232,43 @@ test("扫描读到的买家与请求携带的对话令牌不一致：一开始�
   h.a.convTokenFor = () => "conv-other";
   assert.equal(await run(h), "not_executed:conversation_mismatch");
   assert.deepEqual(h.clicks, []);
+});
+
+test("复审反例：收尾按 Esc 时 CDP 同步抛错、按下挂起、松开挂起——都在有界时间内返回并释放忙碌，只记固定分类", async () => {
+  const hang = () => new Promise<unknown>(() => undefined);
+  const cases: [string, NonNullable<Opts["sendCommand"]>, string, string[]][] = [
+    ["同步抛错", () => {
+      throw new Error("debugger detached");
+    }, "keydown_failed", ["keyDown"]],
+    ["按下挂起", hang, "keydown_timeout", ["keyDown"]],
+    ["松开挂起", (_m, p) => (p.type === "keyDown" ? Promise.resolve({}) : hang()), "keyup_timeout", ["keyDown", "keyUp"]],
+    ["按下被拒", () => Promise.reject(new Error("x")), "keydown_failed", ["keyDown"]],
+  ];
+  for (const [name, sendCommand, result, keys] of cases) {
+    // 对话框关不掉（关闭按钮无效）才会走到 Esc。
+    const h = harness({ ...stable, leftoversLater: { dialogs: 1, popovers: 0 }, sendCommand });
+    const started = realNow();
+    assert.equal(await run(h), "inspected:rows=1,confirm_buttons=1", name);
+    assert.ok(realNow() - started < 8_000, `${name}：收尾有界`);
+    assert.equal(h.a.sending, false, `${name}：释放忙碌`);
+    assert.deepEqual(h.keys, keys, `${name}：不重试按键`);
+    const cleanup = h.logs().filter((r) => r.phase === "cleanup").at(-1);
+    assert.equal(cleanup.steps.at(-1).step, "escape", name);
+    assert.equal(cleanup.steps.at(-1).result, result, name);
+    // 下一次诊断不再因忙碌被拒（残留仍在，按既有规则以 leftover_popup 拒绝开始）。
+    assert.equal(await run(h), "not_executed:leftover_popup", `${name}：后续请求不是 busy`);
+  }
+});
+
+test("复审反例：收尾过程抛异常——仍释放忙碌，记固定分类", async () => {
+  const h = harness({ ...stable });
+  const orig = h.a.nativeClick;
+  h.a.nativeClick = async (pt: Pt) => {
+    // 收尾点关闭按钮时抛出（读脚本自带 catch，点击没有）。
+    if (same(pt, CLOSE)) throw new Error("boom");
+    return orig(pt);
+  };
+  assert.equal(await run(h), "inspected:rows=1,confirm_buttons=1");
+  assert.equal(h.a.sending, false);
+  assert.equal(h.logs().filter((r) => r.phase === "cleanup").at(-1).result, "cleanup_failed");
 });

@@ -74,7 +74,15 @@ const page = (active, agents, favorited = false) => `<!doctype html><meta charse
       if (!window.noDialogOnOpen) document.getElementById("dlg").style.display = "block";
       if (window.switchOnOpen) switchConv();
     });
-    document.getElementById("x").addEventListener("click", () => { clicks.push("close"); document.getElementById("dlg").style.display = "none"; document.querySelector(".el-popover").style.display = "none"; });
+    document.getElementById("x").addEventListener("click", () => { clicks.push("close"); if (window.stickyDialog) return; document.getElementById("dlg").style.display = "none"; document.querySelector(".el-popover").style.display = "none"; });
+    if (window.noCancel === undefined) window.noCancel = false;
+    // 仿真实平台：气泡按“点击外部”关闭（点气泡本身或行内“转移”按钮不算外部）；Esc 关闭对话框。
+    document.addEventListener("click", (e) => {
+      const p = document.querySelector(".el-popover");
+      if (p.style.display !== "block" || p.contains(e.target) || e.target.closest("tr.el-table__row span[aria-describedby]")) return;
+      clicks.push("outside"); p.style.display = "none";
+    });
+    document.addEventListener("keydown", (e) => { if (e.key !== "Escape") return; clicks.push("esc"); document.getElementById("dlg").style.display = "none"; document.querySelector(".el-popover").style.display = "none"; });
     document.getElementById("cancel").addEventListener("click", () => { clicks.push("cancel"); document.querySelector(".el-popover").style.display = "none"; });
     const leave = () => document.querySelector('[data-random="9001-x"]').closest("li").remove();
     document.getElementById("ok").addEventListener("click", () => {
@@ -123,6 +131,29 @@ app.whenReady().then(async () => {
       return { r, clicks: await wc.executeJavaScript("window.clicks.slice()"), log: readLog(), fresh: adapter.pendingFreshBuyer };
     };
     const noOk = (clicks) => !clicks.some((c) => c.startsWith("ok") || c === "unfav");
+    const noCancel = "document.getElementById('cancel').remove()";
+    const cleanup = (log) => log.find((l) => l.phase === "cleanup") ?? {};
+    {
+      const { r, clicks, log } = await run(page(true, ["虚构客服A", T]), { confirm: false, before: noCancel });
+      const c = cleanup(log);
+      check("inspect（气泡里没有“取消”，同真实平台）：点对话框标题让气泡关闭，再点关闭，不点气泡里任何项", r.startsWith("inspected:rows=2,confirm_buttons=1") && JSON.stringify(clicks) === `["open","row:${T}","outside","close"]` && noOk(clicks) && !clicks.includes("send") && !clicks.includes("reason"), { r, clicks });
+      check("inspect（无“取消”）：收尾记录每步与最终残留为零；气泡项只记类别计数", c.leftover?.dialogs === 0 && c.leftover?.popovers === 0 && c.steps?.map((x) => x.step).join() === "outside_click,close_button" && log.some((l) => l.phase === "popover" && l.kinds?.cancel === 0 && l.kinds?.direct === 1 && l.kinds?.send === 1 && l.kinds?.other === 1) && !JSON.stringify(log).includes("催发货"), log);
+    }
+    {
+      // 同一页面、同一对话：先 inspect 再真实转移（即用户实际的操作顺序），inspect 收干净后转移不再因残留拒绝。
+      fs.rmSync(logFile, { force: true });
+      const { wc, adapter, conv } = await adapterFor(win, page(true, ["虚构客服A", T]));
+      await wc.executeJavaScript(noCancel);
+      const first = await adapter.transferTest(T, false, conv, Date.now() + 60_000);
+      const second = await adapter.transferTest(T, true, conv, Date.now() + 60_000);
+      const clicks = await wc.executeJavaScript("window.clicks.slice()");
+      check("先 inspect 后真实转移（同一页面）：不因残留拒绝，只确认目标一次", first.startsWith("inspected:") && second === "unknown:left_list_observed" && JSON.stringify(clicks) === `["open","row:${T}","outside","close","open","row:${T}","ok:${T}"]`, { first, second, clicks });
+    }
+    {
+      const { r, clicks, log } = await run(page(true, ["虚构客服A", T]), { confirm: false, before: noCancel + "; window.stickyDialog = true" });
+      const c = cleanup(log);
+      check("关闭按钮不起作用时：按一次 Esc 收尾，残留为零，不重复点击", r.startsWith("inspected:") && JSON.stringify(clicks) === `["open","row:${T}","outside","close","esc"]` && c.steps?.at(-1)?.step === "escape" && c.leftover?.dialogs === 0 && c.leftover?.popovers === 0, { r, clicks, c });
+    }
     {
       const { r, clicks, log } = await run(page(true, ["虚构客服A", T]), { confirm: false });
       check("inspect：打开、点行、取消、关闭，不点确认", r.startsWith("inspected:rows=2,confirm_buttons=1") && JSON.stringify(clicks) === `["open","row:${T}","cancel","close"]`, { r, clicks });
