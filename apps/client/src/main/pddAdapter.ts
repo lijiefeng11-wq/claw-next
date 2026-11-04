@@ -1908,13 +1908,7 @@ export class PddPageAdapter implements PlatformAdapter {
         const ta = document.querySelector(${JSON.stringify(TEXTAREA)});
         if (!ta) return "pdd_input_missing";
         const box = ta.closest("div.reply-box");
-        const buttons = [...(box?.querySelectorAll(${JSON.stringify(SEND_BTN)}) || [])].filter(btn => {
-          const r = btn.getBoundingClientRect(), style = getComputedStyle(btn);
-          return btn.closest("div.reply-box") === box && style.visibility === "visible" &&
-            r.width >= 4 && r.height >= 4 && r.right > 0 && r.bottom > 0 && r.left < innerWidth && r.top < innerHeight;
-        });
-        if (buttons.length !== 1) return "pdd_input_missing";
-        const btn = buttons[0];`;
+        if (!box?.querySelector(${JSON.stringify(SEND_BTN)})) return "pdd_input_missing";`;
       const filled = await this.run<string>(`(() => { ${guard}
         if (ta.value.trim()) return "pdd_input_not_empty";
         Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(ta, ${JSON.stringify(text)});
@@ -1933,6 +1927,14 @@ export class PddPageAdapter implements PlatformAdapter {
       // CDP 使用页面视口 CSS 坐标，不依赖桌面焦点或页面缩放。
       const located = await this.run<string | { x: number; y: number }>(`(() => { ${guard}
         if (ta.value !== ${JSON.stringify(text)}) return "pdd_input_mismatch";
+        // 有些页面在输入后才显示按钮；可见性与唯一性放在填入文字之后检查。
+        const buttons = [...box.querySelectorAll(${JSON.stringify(SEND_BTN)})].filter(btn => {
+          const r = btn.getBoundingClientRect(), style = getComputedStyle(btn);
+          return btn.closest("div.reply-box") === box && style.visibility === "visible" &&
+            r.width >= 4 && r.height >= 4 && r.right > 0 && r.bottom > 0 && r.left < innerWidth && r.top < innerHeight;
+        });
+        if (buttons.length !== 1) return "pdd_input_missing";
+        const btn = buttons[0];
         const r = btn.getBoundingClientRect();
         const left = Math.max(0, r.left), right = Math.min(innerWidth, r.right);
         const top = Math.max(0, r.top), bottom = Math.min(innerHeight, r.bottom);
