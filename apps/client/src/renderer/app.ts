@@ -26,7 +26,18 @@
   const bridge = (window as unknown as { clawNext: Bridge }).clawNext;
 
   const ERRORS: Record<string, string> = {
-    token_missing: "请先保存本店客户端口令",
+    token_missing: "请先保存本店客户端口令（后台不在本机时需在“高级”里手动填写）",
+    pairing_no_grant: "还没填后台快捷登录授权码：请在后台管理页生成授权码，填到“客户端设置”里，再点“连接后台”自动登记本店",
+    pairing_unsupported: "后台版本还不支持自动登记店铺：请先更新后台，或在“高级”里手动填写客户端口令",
+    pairing_grant_invalid: "后台快捷登录授权码无效或已撤销：请在后台重新生成，并在“客户端设置”里重新填入",
+    pairing_conflict: "后台已有冲突的店铺登记（同一编号或口令被其他绑定占用），未做任何修改；请在后台管理页核对，或在“高级”里手动填写口令",
+    pairing_reserved: "这个店铺编号在后台有历史记录、暂不能重新登记：请换一个店铺编号新建",
+    pairing_rate_limited: "尝试太频繁，后台暂时拒绝了：请稍等一分钟再点“连接后台”",
+    pairing_local_only: "后台只接受本机发起的登记，请确认后台地址是本机地址",
+    pairing_invalid_request: "登记内容不符合后台要求（店铺编号或名称格式），请检查店铺设置",
+    pairing_uncertain: "登记结果不确定（超时或连不上后台）：后台可能已经登记，请稍后再点“连接后台”，客户端会用同一组凭据核对，不会重复登记",
+    pairing_rejected: "后台拒绝了登记请求，请查看后台日志或在“高级”里手动填写口令",
+    pairing_stored_invalid: "本机保存的登记凭据读不出来，为避免重复登记已停止：请在“高级”里手动填写口令，或删除本店后重新添加",
     invalid_token: "口令格式不正确（至少 32 位可打印字符，不含空格）",
     invalid_admin_grant: "授权码格式不正确（应为 43 位字母、数字、_ 或 -）",
     admin_target_unsupported: "只有本机根地址（127.0.0.1 / [::1] / localhost，无路径）的后台才能使用快捷登录授权码",
@@ -73,6 +84,16 @@
     payload_not_object: "请求内容格式不对，请更新客户端或查看日志",
     unknown_channel: "这个操作当前版本不支持，请更新客户端",
   };
+
+  /** 本机后台根地址（与主进程 adminLocalTarget 规则一致的简化判断，只决定界面是否尝试自动登记；最终由主进程校验）。 */
+  function isLocalBackend(raw: string): boolean {
+    try {
+      const u = new URL(raw.trim());
+      return (u.protocol === "http:" || u.protocol === "https:") && !u.username && !u.password && !u.search && !u.hash && u.pathname === "/" && ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname);
+    } catch {
+      return false;
+    }
+  }
 
   function errorText(code: string | undefined): string {
     if (code && ERRORS[code]) return ERRORS[code];
@@ -685,6 +706,13 @@
         const saved = await call("shop:setToken", { shop_id: target, token: token.value });
         token.value = "";
         if (!saved) return;
+      } else if (!state.shops.find((s) => s.config.shop_id === target)?.token_set && isLocalBackend(url.value)) {
+        // 本机后台、没填口令：自动在后台登记本店（#75）。失败只提示，店铺配置已保存；之后点“连接后台”会再核对。
+        const r = await bridge.invoke("shop:pair", { shop_id: target });
+        if (r.ok) {
+          if (r.data) apply(r.data);
+          toast("已在后台登记本店。新店的自动回复默认关闭，请到后台管理页开启");
+        } else toast(`店铺已保存；${errorText(r.error)}`);
       }
       selected = target;
       // 新加的拼多多店铺直接进入平台工作台。
@@ -706,9 +734,15 @@
         ...field("后台地址", url),
         ...field("平台店铺编号", pid),
         ...field("平台适配", adapter),
-        ...field("客户端口令", token),
       ),
-      h("div", { class: "hint", text: "远程后台必须是 HTTPS；本机开发可用 http://127.0.0.1。口令只保存到系统安全存储，界面不会显示原文。不需要模型密钥或后台管理员口令。" }),
+      h("div", { class: "hint", text: "本机后台（http://127.0.0.1 等）：保存时客户端用“客户端设置”里的后台快捷登录授权码，自动在后台登记本店，不用填口令。远程后台必须是 HTTPS，需要在下面“高级”里手动填写客户端口令。" }),
+      h(
+        "details",
+        { class: "advanced", open: !!entry?.token_set && !isLocalBackend(c?.backend_url ?? "") },
+        h("summary", { text: "高级：手动填写客户端口令（远程后台或旧版后台）" }),
+        h("div", { class: "form-grid" }, ...field("客户端口令", token)),
+        h("div", { class: "hint", text: "口令只保存到系统安全存储，界面不会显示原文。不需要模型密钥或后台管理员口令。" }),
+      ),
       h(
         "div",
         { class: "row" },

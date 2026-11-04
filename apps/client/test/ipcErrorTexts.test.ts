@@ -65,8 +65,8 @@ describe("IPC 错误提示", () => {
     assert.match(renderer, /function errorText\(code: string \| undefined\): string/);
     assert.match(renderer, /code\?\.startsWith\("unexpected_field:"\)/);
     assert.ok(renderer.includes("请求格式不对（含不认识的字段），请更新客户端或查看日志"));
-    // 通用调用、清理弹窗，以及“打开后台管理”（#62）三处。
-    assert.equal((renderer.match(/errorText\(r\.error\)/g) ?? []).length, 3);
+    // 通用调用、清理弹窗、“打开后台管理”（#62），以及保存店铺后自动登记（#75）四处。
+    assert.equal((renderer.match(/errorText\(r\.error\)/g) ?? []).length, 4);
     assert.ok(!renderer.includes('ERRORS[r.error ?? ""]'), "两处调用应全部替换");
   });
 });

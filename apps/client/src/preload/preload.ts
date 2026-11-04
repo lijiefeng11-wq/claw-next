@@ -7,6 +7,7 @@
     "shop:save",
     "shop:remove",
     "shop:setToken",
+    "shop:pair",
     "shop:connect",
     "shop:disconnect",
     "shop:login",
