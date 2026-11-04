@@ -10,6 +10,7 @@ export const IPC_CHANNELS = [
   "shop:save",
   "shop:remove",
   "shop:setToken",
+  "shop:pair",
   "shop:connect",
   "shop:disconnect",
   "shop:login",
@@ -42,7 +43,7 @@ export type IpcPayload =
   | { channel: "state:get" }
   | { channel: "workspace:present"; shop_id: string | null; bounds: { x: number; y: number; width: number; height: number } | null; zoom?: number }
   | { channel: "shop:save"; shop: ShopInput }
-  | { channel: "shop:remove" | "shop:connect" | "shop:disconnect" | "shop:login" | "shop:logout" | "shop:reloadPage" | "shop:dismissPopups"; shop_id: string }
+  | { channel: "shop:remove" | "shop:pair" | "shop:connect" | "shop:disconnect" | "shop:login" | "shop:logout" | "shop:reloadPage" | "shop:dismissPopups"; shop_id: string }
   | { channel: "shop:platformNav"; shop_id: string; action: "back" | "chat" }
   | { channel: "shop:setToken"; shop_id: string; token: string }
   | { channel: "shop:setMode"; shop_id: string; mode: ShopMode }
@@ -149,6 +150,7 @@ export function validateIpc(channel: unknown, payload: unknown): IpcPayload {
       return { channel: ch, shop: validateShopInput(v.shop) };
     }
     case "shop:remove":
+    case "shop:pair":
     case "shop:connect":
     case "shop:disconnect":
     case "shop:login":

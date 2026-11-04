@@ -12,6 +12,7 @@ import {
   parseSnapshot,
 } from "./protocol.js";
 import { isHandoffTicket } from "./adminHandoff.js";
+import { parseRegistration } from "./shopPairing.js";
 
 /** 后台返回的明确错误（有 HTTP 状态与错误码）。 */
 export class BackendError extends Error {
@@ -81,6 +82,17 @@ export class BackendClient {
     // 已过期的票据（按本机时间）也按响应不合格处理，不拿去打开。
     if (!r || typeof r !== "object" || !isHandoffTicket(r.ticket) || typeof r.expires_at !== "number" || !Number.isFinite(r.expires_at) || r.expires_at <= Date.now() / 1000) throw new TransportError("handoff_response_invalid");
     return { ticket: r.ticket, expires_at: r.expires_at };
+  }
+
+  /**
+   * 本机店铺自动登记（#75）：本客户端的 token 必须是本机授权码。请求体恰为四个字段；口令只在请求体里，不写日志。
+   * 响应不合格按结果不确定处理（TransportError），调用方不重新生成凭据。
+   */
+  async registerShop(body: { shop_id: string; name: string; client_id: string; client_token: string }): Promise<{ created: boolean; name: string }> {
+    const payload = JSON.stringify({ shop_id: body.shop_id, name: body.name, client_id: body.client_id, client_token: body.client_token });
+    const r = parseRegistration(await this.request("POST", "/api/v1/admin/handoff/shops", payload), body);
+    if (!r) throw new TransportError("registration_response_invalid");
+    return r;
   }
 
   async heartbeat(instance_id: string, session_id: string, capabilities: string[] = []): Promise<Lease> {

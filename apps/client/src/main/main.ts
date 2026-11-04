@@ -27,6 +27,7 @@ import { Updater, readBuildInfo, writeReadyMarker } from "./updater.js";
 import { chromeLikeUserAgent } from "../core/userAgent.js";
 import { type AdminFailure, adminFailureOf, type AdminOpenResult, adminOpenText, adminPageUrl, adminGrantKey, adminLocalTarget, resolveAdminTarget } from "../core/adminHandoff.js";
 import { BackendClient, BackendError } from "../core/backend.js";
+import { pairShop, pairingKey } from "../core/shopPairing.js";
 
 const APP_NAME = "Claw-Next-Client";
 app.setName(APP_NAME);
@@ -72,6 +73,10 @@ class Controller {
   readonly secrets = new SecretStore(path.join(userData, "secrets"));
   /** 后台快捷登录授权码：按后台 origin 的 sha256 前 32 位作键，与店铺口令分开存放。 */
   readonly adminGrants = new SecretStore(path.join(userData, "admin-grants"));
+  /** 本机店铺自动登记（#75）的 client_id 与口令：按“店铺 + 后台 origin”保存，与店铺口令、授权码分开存放。 */
+  readonly pairings = new SecretStore(path.join(userData, "shop-pairing"));
+  /** 进行中的登记：同一店铺并发点击只发一次，避免生成两组凭据。 */
+  private readonly pairingInFlight = new Map<string, Promise<{ created: boolean }>>();
   /** 上次打开着的店铺（用户手动连接/打开平台页时记录），启动时恢复。 */
   readonly sessions = new SessionStore(path.join(userData, "config"));
   /** 恢复进行中被用户手动操作过的店铺：其待恢复步骤作废。 */
@@ -269,11 +274,61 @@ class Controller {
     this.slot(shopId).ephemeralToken = token;
   }
 
+  /**
+   * 本机店铺自动登记（#75）。已有本店口令时不做任何事。后台不是本机根地址时要求手填口令（token_missing）；
+   * 没有本机授权码时提示先授权（pairing_no_grant）。凭据先存入安全存储再发请求；响应丢失、超时不重试、不重新生成，
+   * 下次用同一组值核对。成功后才把口令保存为本店客户端口令。只记封闭结果类别，不记口令、授权码或后台原文。
+   */
+  async pair(shopId: string): Promise<{ created: boolean }> {
+    const running = this.pairingInFlight.get(shopId);
+    if (running) return running;
+    const job = this.pairOnce(shopId).finally(() => this.pairingInFlight.delete(shopId));
+    this.pairingInFlight.set(shopId, job);
+    return job;
+  }
+
+  private async pairOnce(shopId: string): Promise<{ created: boolean }> {
+    const config = this.require(shopId);
+    const origin = adminLocalTarget(config.backend_url);
+    const r = await pairShop({
+      shopId,
+      displayName: config.display_name,
+      origin,
+      // 登记期间店铺被删除或改了后台地址：旧响应不写回口令。
+      stillCurrent: () => {
+        const now = this.configs.get(shopId);
+        return !!now && adminLocalTarget(now.backend_url) === origin;
+      },
+      grant: (origin) => this.adminGrants.get(adminGrantKey(origin)),
+      store: this.pairings,
+      register: (origin, grant, body) => new BackendClient(origin, grant).registerShop(body),
+      saveToken: (token) => this.secrets.set(shopId, token),
+    });
+    console.log(`[${shopId}] pairing result=${r.ok ? `ok created=${r.created}` : r.failure}`);
+    if (r.ok) {
+      this.push();
+      return { created: r.created };
+    }
+    if (r.failure === "not_local") throw new IpcValidationError("token_missing");
+    if (r.failure === "storage_unavailable") throw new IpcValidationError("secure_storage_unavailable");
+    throw new IpcValidationError(`pairing_${r.failure}`);
+  }
+
   async connect(shopId: string) {
     const config = this.require(shopId);
     const s = this.slot(shopId);
     if (s.stopping) await s.stopping;
     if (s.runtime) return;
+    // 本机后台、尚无本店口令：先自动登记（#75），成功后照常连接。
+    if (!s.ephemeralToken && !this.secrets.has(shopId) && adminLocalTarget(config.backend_url)) {
+      await this.pair(shopId);
+      // 登记期间可能有另一次“连接”先完成或正在停止：等待后重新核对，同一店铺只建一个运行实例。
+      if (s.stopping) await s.stopping;
+      if (s.runtime) return;
+      // 登记期间店铺被删除或配置被改：不按旧配置启动。
+      const now = this.configs.get(shopId);
+      if (!now || now.backend_url !== config.backend_url) throw new IpcValidationError("pairing_changed");
+    }
     const token = s.ephemeralToken ?? this.secrets.get(shopId);
     if (!token) throw new IpcValidationError("token_missing");
     const adapter = s.adapter ?? this.createAdapter(config);
@@ -354,6 +409,7 @@ class Controller {
         return undefined;
       }
       case "shop:save": {
+        if (this.pairingInFlight.has(p.shop.shop_id)) throw new IpcValidationError("pairing_in_progress");
         const existing = this.configs.get(p.shop.shop_id);
         if (existing && (this.slots.get(p.shop.shop_id)?.runtime || this.slots.get(p.shop.shop_id)?.stopping)) throw new IpcValidationError("disconnect_first");
         if (existing && (existing.adapter !== p.shop.adapter || existing.platform_shop_id !== p.shop.platform_shop_id)) throw new IpcValidationError("shop_identity_immutable");
@@ -361,15 +417,25 @@ class Controller {
         this.configs.upsert({ ...p.shop, mode: existing?.mode ?? "observe" });
         return this.state();
       }
-      case "shop:remove":
-        this.require(p.shop_id);
+      case "shop:remove": {
+        if (this.pairingInFlight.has(p.shop_id)) throw new IpcValidationError("pairing_in_progress");
+        const removed = this.require(p.shop_id);
         this.restoreTouched.add(p.shop_id);
         await this.disconnect(p.shop_id);
         this.configs.remove(p.shop_id);
         this.secrets.remove(p.shop_id);
+        // 后台绑定不会因此注销（契约：本增量没有解绑接口）；本地登记凭据一并删除，重新添加时生成新的一组。
+        const removedOrigin = adminLocalTarget(removed.backend_url);
+        if (removedOrigin) this.pairings.remove(pairingKey(p.shop_id, removedOrigin));
         this.sessions.remove(p.shop_id);
         return this.state();
+      }
+      case "shop:pair": {
+        const r = await this.pair(p.shop_id);
+        return { ...this.state(), pairing: r };
+      }
       case "shop:setToken":
+        if (this.pairingInFlight.has(p.shop_id)) throw new IpcValidationError("pairing_in_progress");
         this.require(p.shop_id);
         this.secrets.set(p.shop_id, p.token);
         return this.state();
