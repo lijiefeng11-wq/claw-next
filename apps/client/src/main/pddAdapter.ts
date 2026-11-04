@@ -877,6 +877,9 @@ export function popoverButtonKinds(buttons: { text: string }[]): { cancel: numbe
   return { cancel, direct, send, other: buttons.length - cancel - direct - send };
 }
 
+/** 诊断转移收尾按 Esc 时，每个按键命令（按下 / 松开）最多等这么久。 */
+export const TRANSFER_ESC_TIMEOUT_MS = 1000;
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** 自动清理平台引导弹窗的间隔。 */
 export const POPUP_SWEEP_INTERVAL_MS = 2000;
@@ -2727,8 +2730,22 @@ export class PddPageAdapter implements PlatformAdapter {
         steps.push({ step: "close_button", result, left });
       }
       if (typeof left !== "string" && (left.dialogs || left.popovers) && this.watchEpoch === epoch && !page.isDestroyed()) {
-        const key = (type: string) => page.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type, key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
-        const result = await key("keyDown").then(() => key("keyUp")).then(() => "dispatched", () => "failed");
+        // 每个按键命令都捕获同步异常并有界等待：超时或失败只记固定分类，不重试；按下没成功就不再发松开。
+        const key = (type: string) =>
+          new Promise<"dispatched" | "failed" | "timeout">((resolve) => {
+            const timer = setTimeout(() => resolve("timeout"), TRANSFER_ESC_TIMEOUT_MS);
+            const done = (r: "dispatched" | "failed") => {
+              clearTimeout(timer);
+              resolve(r);
+            };
+            try {
+              page.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type, key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }).then(() => done("dispatched"), () => done("failed"));
+            } catch {
+              done("failed");
+            }
+          });
+        const down = await key("keyDown");
+        const result = down === "dispatched" ? ((up) => (up === "dispatched" ? "dispatched" : `keyup_${up}`))(await key("keyUp")) : `keydown_${down}`;
         await sleep(400);
         left = await leftovers();
         steps.push({ step: "escape", result, left });
@@ -2855,15 +2872,25 @@ export class PddPageAdapter implements PlatformAdapter {
       popoverMaybe = false;
       return await this.settleTransfer(uid, page, epoch, same, gate, allowUnfavorite, log);
     } finally {
-      if (opened) {
-        if (popoverMaybe && !cancelTried) {
-          log({ phase: "cleanup", popover_cancel: await cancelPopover() });
+      // 收尾出错不得让本适配器一直处于忙碌：无论收尾结果如何都释放 sending。
+      try {
+        if (opened) {
+          if (popoverMaybe && !cancelTried) {
+            log({ phase: "cleanup", popover_cancel: await cancelPopover() });
+            await sleep(300);
+          }
           await sleep(300);
+          log({ phase: "cleanup", ...(await dismiss()) });
         }
-        await sleep(300);
-        log({ phase: "cleanup", ...(await dismiss()) });
+      } catch {
+        try {
+          log({ phase: "cleanup", result: "cleanup_failed" });
+        } catch {
+          // 连日志都写不了时只放弃记录。
+        }
+      } finally {
+        this.sending = false;
       }
-      this.sending = false;
     }
   }
 
