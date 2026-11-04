@@ -18,6 +18,7 @@ from .backups import BackupManager
 from .operations import Operations
 from .content import MAX_EVENT_BYTES
 from .engine import ProviderFailure, decide, decision, immediate_decision, test_slot
+from .localshops import LocalShops
 from .store import ApiError, Store, identifier, require, validate_settings
 
 PROTOCOL_VERSION = "1.0"
@@ -131,6 +132,9 @@ class Handler(BaseHTTPRequestHandler):
         for client in config["clients"]:
             if hmac.compare_digest(token, client["token"]):
                 return {"role": "client", "client_id": client["client_id"], "shop_id": client["shop_id"]}
+        identity = self.server.local_shops.identity(token)
+        if identity is not None:
+            return identity
         return self.server.auth.identity(token)
 
     def _require_local_handoff(self):
@@ -433,6 +437,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/v1/admin/login" and method == "POST":
             result = self.server.auth.login(self._json(), self.client_address[0])
             return self._send(200, {**result, "protocol_version": PROTOCOL_VERSION})
+        if path == "/api/v1/admin/handoff/shops" and method == "POST":
+            header = self.headers.get("Authorization", "")
+            token = header[7:] if header.startswith("Bearer ") and len(header) <= 1024 and header.isascii() else None
+            with self.server.auth.lock:
+                payload = self._json()
+                self.server.auth.authorize_local_shop(token, self.client_address[0], payload.get("client_token"))
+                result = self.server.local_shops.register(payload)
+            return self._send(200, {**result, "protocol_version": PROTOCOL_VERSION})
         if method == "POST" and path in ("/api/v1/admin/handoff", "/api/v1/admin/handoff/redeem"):
             payload = self._json()
             if path.endswith("/redeem"):
@@ -518,6 +530,7 @@ class Server(ThreadingHTTPServer):
             if startup_check is not None:
                 startup_check()
             self.auth = AdminAuth(data_dir)
+            self.local_shops = LocalShops(self.store, config["clients"], [config["admin_token"]] if config.get("admin_token") else ())
             self.diagnostics = diagnostics.Diagnostics(data_dir)
             self.diagnostics.write("service_started")
         except Exception:
