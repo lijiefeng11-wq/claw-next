@@ -92,7 +92,9 @@
 }
 ```
 
-`message_id` 必须是上下文最后一条消息，角色 buyer。每个消息必须有 id/role/kind/content/created_at；role 为 buyer/agent/system，kind 为 text/image/card/unsupported；消息按时间非递减排序，id 不重复。上下文 1–200 条，每条 content 最多 8000 字符；超限拒绝，前台不得截断后伪称完整。图片/卡片保存可读文字或安全的占位描述；history_complete=false 的上下文返回转人工，不猜测。图片与卡片按下文“图片与卡片（1.0 补充）”处理，不再一律转人工。
+`message_id` 必须是上下文最后一条消息，角色 buyer。每个消息必须有 id/role/kind/content/created_at；role 为 buyer/agent/system，kind 为 text/image/card/unsupported；消息按时间非递减排序，id 不重复。上下文 1–200 条，每条 content 最多 8000 字符；超限拒绝，前台不得截断后伪称完整。图片/卡片保存可读文字或安全的占位描述。图片与卡片按下文“图片与卡片（1.0 补充）”处理，不再一律转人工。
+
+`history_complete=false` 如实表示早期历史缺失，**不再单独阻止判断、claim 或发送**。后台仍根据本次提供的可见消息、已保存规则与已核实规格回答最新买家问题；模型须明确知晓历史不完整，不得补造遗漏对话或先前承诺，缺少必要信息时以简短回复追问，不能只因缺历史而转人工。规则仍只匹配最新买家消息，不将缺历史伪装为完整。业务确实需要人工权限时仍可 handoff。前台保留原标记；店铺身份、实时新消息/最新版本、租约、预算、发送候选与单次尝试等其余校验继续生效。此修改不触发历史回补消息的自动回复，也不重放终态或 unknown 事件。
 
 ### 图片与卡片（1.0 补充）
 
