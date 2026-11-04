@@ -347,7 +347,7 @@ class Store:
             resumed = owner and old["session_id"] == p["session_id"] and bool(old.get("restart_pending"))
             gen = old["generation"] if same or resumed else (old["generation"] + 1 if old else 1)
             lease = {"shop_id": identity["shop_id"], "client_id": identity["client_id"], "instance_id": p["instance_id"], "session_id": p["session_id"], "generation": gen, "expires_at": now + 60}
-            lease["capabilities"] = [cap for cap in (senditems.CAPABILITY, deadlines.CAPABILITY, goods_snapshot.CAPABILITY,
+            lease["capabilities"] = [cap for cap in (senditems.CAPABILITY, deadlines.CAPABILITY, goods_snapshot.CAPABILITY, "product_knowledge",
                                                     *conversation_actions.READY_CAPABILITIES) if cap in caps]
             self.db.execute("INSERT OR REPLACE INTO leases VALUES (?,?)", (identity["shop_id"], json.dumps(lease)))
             self._resolve_recovery(identity["shop_id"], lease, now)
@@ -590,6 +590,8 @@ class Store:
                 require(has_transfer, "capability_not_confirmed")
             if "goods" in p["context"] or any("items" in order for order in p["context"].get("orders", [])):
                 require(goods_snapshot.CAPABILITY in lease.get("capabilities", []), "capability_not_confirmed")
+            if any(g.get("product_key") for g in p["context"].get("goods", [])) or any((m.get("card") or {}).get("product_key") for m in p["context"]["messages"]):
+                require("product_knowledge" in lease.get("capabilities", []), "capability_not_confirmed")
             if has_budget:
                 require(deadlines.CAPABILITY in lease.get("capabilities", []), "capability_not_confirmed")
             if "send_options" in p["context"]:

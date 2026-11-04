@@ -16,7 +16,7 @@ export type DeliveryStatus = "unclaimed" | "claimed" | "sent" | "not_sent" | "un
 export type ReceiptStatus = "sent" | "not_sent" | "unknown";
 
 export type CardType = "goods" | "order" | "source" | "system";
-export type Card = { type: CardType; title?: string; description?: string; fields?: { label: string; value: string }[] };
+export type Card = { type: CardType; title?: string; description?: string; fields?: { label: string; value: string }[]; product_key?: string };
 export type ImageMime = "image/png" | "image/jpeg" | "image/webp";
 export type Attachment = { type: "image"; mime: ImageMime; data_url: string };
 export type OrderLogistics = {
@@ -50,7 +50,9 @@ export const CAP_GOODS_SNAPSHOT = "goods_snapshot";
 export type GoodsEvidence =
   | { source: "order"; order_ref: string; observed_at: number }
   | { source: "goods_card"; message_id: string; card_price?: string; observed_at: number };
-export type GoodsSnapshot = { goods_ref: string; title: string; evidence: GoodsEvidence[] };
+export type GoodsSnapshot = { goods_ref: string; title: string; evidence: GoodsEvidence[]; product_key?: string };
+export const CAP_PRODUCT_KNOWLEDGE = "product_knowledge";
+export type ProductLearningRequest = { request_id: string; selection: { goods_id?: string; mall_id?: string }; expires_at: number };
 /** 订单明细：goods_ref 只在该商品进入 context.goods 时出现。 */
 export type OrderItem = { goods_ref?: string; goods_title: string; sku?: string; quantity?: number };
 
@@ -202,7 +204,7 @@ export function isDeadlineTerminal(s: EventSnapshot | null | undefined): boolean
 
 export type Me = { role: "client"; client_id: string; shop_id: string; protocol_version: string };
 /** capabilities：服务端确认的能力交集；旧后台不返回，视为空。 */
-export type Lease = { shop_id: string; client_id: string; instance_id: string; session_id: string; generation: number; expires_at: number; capabilities: string[] };
+export type Lease = { shop_id: string; client_id: string; instance_id: string; session_id: string; generation: number; expires_at: number; capabilities: string[]; product_learning?: ProductLearningRequest };
 
 const ID = /^[A-Za-z0-9_.:-]{1,128}$/;
 
@@ -254,7 +256,14 @@ export function parseLease(value: unknown): Lease {
   need(Number.isInteger(v.generation) && (v.generation as number) > 0 && isFiniteNumber(v.expires_at), "lease_invalid");
   const caps = v.capabilities === undefined || v.capabilities === null ? [] : v.capabilities;
   need(Array.isArray(caps) && caps.every((c) => typeof c === "string"), "lease_invalid");
-  return { shop_id: v.shop_id as string, client_id: v.client_id as string, instance_id: v.instance_id as string, session_id: v.session_id as string, generation: v.generation as number, expires_at: v.expires_at as number, capabilities: caps as string[] };
+  let learning: ProductLearningRequest | undefined;
+  if (v.product_learning !== undefined) {
+    const p = obj(v.product_learning), selection = obj(p.selection);
+    need(caps.includes(CAP_PRODUCT_KNOWLEDGE) && typeof p.request_id === "string" && /^[a-f0-9]{32}$/.test(p.request_id)
+      && isFiniteNumber(p.expires_at) && Object.keys(selection).every(k => ["goods_id", "mall_id"].includes(k) && typeof selection[k] === "string" && /^[0-9]{1,32}$/.test(selection[k] as string)), "product_request_invalid");
+    learning = p as unknown as ProductLearningRequest;
+  }
+  return { shop_id: v.shop_id as string, client_id: v.client_id as string, instance_id: v.instance_id as string, session_id: v.session_id as string, generation: v.generation as number, expires_at: v.expires_at as number, capabilities: caps as string[], ...(learning ? { product_learning: learning } : {}) };
 }
 
 const ITEM_TYPES: readonly string[] = ["instruction", "goods_card", "video"];

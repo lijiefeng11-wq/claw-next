@@ -41,7 +41,9 @@ def validate_content(messages, require):
         if "card" in message:
             card = message["card"]
             require(message["kind"] == "card" and isinstance(card, dict)
-                    and set(card) <= {"type", "title", "description", "fields"}, "invalid_card")
+                    and set(card) <= {"type", "title", "description", "fields", "product_key"}, "invalid_card")
+            require("product_key" not in card or isinstance(card["product_key"], str) and re.fullmatch(r"[0-9a-f]{64}", card["product_key"]), "invalid_product_key")
+            require("product_key" not in card or card.get("type") in ("goods", "source"), "invalid_product_key")
             require(card.get("type") in ("goods", "order", "source", "system"), "invalid_card_type")
             for key, maximum in (("type", 64), ("title", 500), ("description", 4000)):
                 require(key not in card or isinstance(card[key], str) and len(card[key]) <= maximum, "invalid_card")
@@ -66,6 +68,8 @@ def model_content(context):
     images = []
     for message in context.get("messages", []):
         clean = {k: v for k, v in message.items() if k != "attachments"}
+        if "product_key" in (clean.get("card") or {}):
+            clean["card"] = {k: v for k, v in clean["card"].items() if k != "product_key"}
         attachments = message.get("attachments", [])
         if message["kind"] == "image" and not attachments:
             clean["image_available"] = False
@@ -76,5 +80,7 @@ def model_content(context):
             images.extend([{"type": "text", "text": "Image for message " + message["id"] + " (" + message["role"] + ")"},
                            {"type": "image_url", "image_url": {"url": attachment["data_url"]}}])
     view = {k: v for k, v in context.items() if k != "send_options"}
+    if "goods" in view:
+        view["goods"] = [{k: v for k, v in g.items() if k != "product_key"} for g in view["goods"]]
     text = json.dumps({**view, "messages": messages}, ensure_ascii=False)
     return [{"type": "text", "text": text}, *images] if images else text
