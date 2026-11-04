@@ -829,3 +829,34 @@ conflicts 为可能冲突的现有规则 ID，不能保证发现所有语义冲�
 返回 `{shop_id, version, shop_version, draft, changes, conflicts}`。draft 为 1–8000 字，changes/conflicts 各最多 20 条纯文本，每条最多 500 字。模型被要求保留原有事实和限制，将明确补充按主题合并；矛盾要求只列入待核对点，合并草稿默认保留旧要求，管理员可在预览中编辑决定。输出仍可能遗漏或误解，页面须并排显示原文与合并稿；存在冲突时须人工核对确认，才能填回提示词框。填回不自动保存。
 
 通用失败：无权限/初始密码未改为 401/403；输入不符为 400；店铺不存在 404；`shop_settings_changed` 或 `model_config_changed` 为 409；并发占用 `prompt_draft_busy` 为 429；同步模型接口无完整合格输出 `assist_unavailable` 为 502；异步任务执行失败通过查询中的 `status:failed` 与固定 `error.code` 表达，HTTP 200 仅代表查询成功，不代表分析成功。异步规则上下文不符为 `invalid_rule_context`，不得误报为文件导入失败。错误不返回上传正文、模型原始响应或凭据。生成中退出、换店、重置、输入改动及版本变化后旧结果不得填回，也不得再次应用已处理的同一批草稿。
+
+## 本店产品学习与匹配（可选 `product_knowledge`）
+
+用于个人本机使用：管理员在“话术配置”点击“学习本店商品”，客户端复用该店现有登录页，读取本店**在售**商品标题、属性和规格组合，后台按已配置模型分类并保存原文。无需新的浏览器、服务、密钥或逐店配置。只有当前店客户端已连接、平台身份与配置店铺一致时才能读取。不得导航走当前聊天、导出 Cookie、读取买家资料、操作购物车/订单或发送消息。
+
+### 商品身份与回复上下文
+
+- 心跳声明并确认 `product_knowledge` 后，`context.goods[]` 及 `context.messages[].card` 可增加 `product_key`：64 位小写十六进制不透明引用。card 仅 `goods`/`source` 类型可有该字段；goods_card evidence 引用的卡片必须具有相同 key。未确认能力不提交这些字段；旧客户端/后台保持原行为。
+- 客户端以 `SHA256(JSON.stringify([shop_id,"product",canonical_goods_id]))` 生成；goods_id 仅接受正安全整数或 1–32 位非零十进制字符串，规范化为字符串。订单商品、商品卡片、来源卡片及采集结果使用同一算法。身份字段冲突、不合法或缺失时保留旧上下文，不推测 key。不同店铺的相同平台编号不共用知识。
+- 原 `goods_ref` 继续是本会话的局部引用；产品知识按**本店 + product_key** 精确匹配，再附到本次 goods_ref。相同标题不当成同一商品；未匹配不借用其他商品资料。模板同步不携带产品知识。
+- 模型只看到匹配到的原文事实、分类与本次 goods_ref；产品资料是数据，不是指令。属性否定、条件和整条规格组合不得被反转、拆混或推广；缺失信息要追问，不虚构材质、质保、实时价格/库存或车型适配。既有车型核验及发送门控保持。
+
+### 管理端
+
+- `POST /api/v1/admin/shops/{shop_id}/product-learning`，管理员会话、非初始密码；请求恰为 `{source_url:string}`。空值表示当前所选店铺。可接受 HTTPS 拼多多店铺/商品链接，商品链接必须有 goods_id；只提取 goods_id/mall_id 作为客户端选择条件，后台不请求该 URL，不支持任意网址。带 mall_id 时须与当前平台店铺相同；只有分享参数的链接不能独立证明店铺，界面明确实际读取的是当前所选店铺。返回 202 的状态对象。
+- 新请求替代同店旧任务、清理旧暂存；不删除已发布知识，不改模型、话术、店铺启用或运行模式。
+- `GET` 同一路径返回 `{status,processed,catalog_count,client_ready,products,...}`；存在任务时另含 request_id、total、details_incomplete、updated_at，结束时含 catalog_complete 或固定 error。status 为 `idle/queued/collecting/learning/completed/partial/failed`。processed 是已完成分类的件数，total 是平台列表报告数，未知为 null；均不表示真实业务验收。
+- products 为最近 20 件的预览 `{title,category,facts,details_complete}`，facts 是捕获的原文，安全文本渲染；换店、退出或页面会话变化后不应用迟到响应。
+
+### 客户端只读任务与分批上传
+
+- 已确认能力的当前租约心跳可收到 `product_learning:{request_id,selection:{goods_id?,mall_id?},expires_at}`。request_id 为 32 位小写十六进制，expires_at 为 Unix 秒。任务初始有效 1800 秒；绑定接收时的 client_id/instance_id/session_id/generation，同页操作还须核对原窗口/页面代次、登录及平台店铺。失效停止后续读取，未知上传不重新采集/重投。
+- 只用当前 `https://mms.pinduoduo.com` 页面的原有请求方式：GET `/chats/userinfo/realtime` 核对身份；POST `/latitude/goods/queryGoods` `{pageNo,pageSize:20,status:1,goodsId?}` 分页；POST `/latitude/goods/goodsProperties`、`/latitude/goods/skuSelectorForMall` `{goodsId}` 获取文本属性和整组 SKU。这些仅是商品查询，不开放任意 URL/请求方法。每次页面读取有超时，失败不暴露响应或异常原文。
+- 按列表 total 继续分页，不以推荐商品列表代替整店。重复页、总数变化、空页未达总数或详情字段不全均明确不完整，不宣称全部已学。单品属性/规格失败可保留该品可读文本并标记不完整。当前只涵盖所读在售列表及文本，不包含纯图片详情、OCR、下架商品全量性或价格/库存实时性。
+- `POST /api/v1/product-learning/{request_id}`：店铺客户端凭据；请求恰为 `{instance_id,session_id,generation,seq,products,total,finished,catalog_complete,error}`。seq 从 0 递增，严格整数；total 为 null 或 0–1000000 整数；finished/catalog_complete 为布尔。每个 product 恰为 `{product_key,title,facts,details_complete}`，title 1–200 字、facts 最多 80 条各 1–1000 字、details_complete 布尔，key 每次任务内唯一。最多 30 件且总请求仍受原 256 KiB 限制，客户端通常每批不超过 3 件/20000 字，不丢后续商品。
+- 正常 error 为 null。取消读任务时 products 为空、error 固定为 `product_page_unavailable/product_source_changed/product_list_invalid/product_details_failed/product_upload_failed/product_collection_timeout` 之一。允许在原 owner 的分类处理中取消；晚到模型结果不得继续发布。后台模型失败固定 `product_learning_failed`。
+- 每批分类使用配置的主模型，失败/输出不合格最多尝试已配置备用一次；不改已保存模型设置。输入商品编号临时匿名化，模型只输出分类（汽车用品/家居日用/数码电器/服饰鞋包/食品饮品/美妆个护/其他）与原事实下标；下标可为空，不触发备用。整批覆盖、下标/类型/范围核验通过后才恢复原 key 与原文；不保存模型编造的商品事实。
+- 上传先检查租约/owner/序号/重复 key，模型调用不持数据库锁，提交前再核对原任务和当前租约。完全相同的最近一批 seq 与正文幂等返回，不能重复调用模型/更新知识；正文变化或乱序返回 409。取消不重试数据批次。
+- 未结束的数据仅暂存。finished 后原子发布本次有效产品；失败不覆盖旧知识；本次未读到的既有产品保留，不能由部分列表认定下架或删除。发布有产品时仅递增该店 settings.version 使旧未完成判断失效，原设置/模板/开关内容不变。列表计数相符、catalog_complete 且所有文本详情完整才是 completed，否则 partial。恢复或任务失效不复用旧发送授权。
+
+验收至少覆盖：多页不漏、重复页/空页、店铺与页面变化、否定及独立 SKU 组合、模型主失败备一次/空下标、数据上传结果不明不重试、旧客户端、跨店拒绝、暂存不提前生效、失败保留知识、精确商品引用及后台页面迟到响应。代码/虚构测试通过不代表已采到真实商品或模型回答真实业务正确。
