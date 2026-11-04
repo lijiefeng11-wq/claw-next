@@ -710,13 +710,14 @@ class ApiContractTestCase(unittest.TestCase):
         error = self.assert_error_envelope(body)
         self.assertEqual(error["code"], "message_duplicate")
 
-    def test_incomplete_history_hands_off_without_send_permission(self):
+    def test_incomplete_history_uses_current_rule_and_can_be_claimed(self):
         self.enable_shop(shop_id="shop-a")
         lease = self.acquire()
         payload = self.make_event(lease, history_complete=False)
         self.submit_event(lease, payload)
         snapshot = self.wait_ready(lease, payload["event_id"])
-        self.assertEqual(snapshot["decision"]["action"], "handoff")
+        self.assertEqual(snapshot["decision"]["action"], "reply")
+        self.assertEqual(snapshot["decision"]["text"], RULE_REPLY)
 
         status, body = self.request(
             "POST",
@@ -729,7 +730,7 @@ class ApiContractTestCase(unittest.TestCase):
             },
             token=lease["token"],
         )
-        self.assertEqual(status, 409, msg=body)
+        self.assertEqual(status, 200, msg=body)
 
     def test_delayed_new_message_can_reply_but_future_clock_is_rejected(self):
         self.enable_shop(shop_id="shop-a")

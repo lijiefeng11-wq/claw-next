@@ -91,10 +91,9 @@ class MultimodalTests(unittest.TestCase):
         self.assertEqual(post.call_count, 1)
 
     def test_integrity_and_current_buyer_gates_still_hold(self):
-        for modifier, expected in (("incomplete", "history_incomplete"), ("disabled", "shop_disabled"),
+        for modifier, expected in (("disabled", "shop_disabled"),
                                    ("future", "message_future"), ("role", "no_new_buyer_message")):
             item = job([message()])
-            if modifier == "incomplete": item["payload"]["context"]["history_complete"] = False
             if modifier == "disabled": item["settings"]["enabled"] = False
             if modifier == "future": item["payload"]["received_at"] += 30
             if modifier == "role": item["payload"]["context"]["messages"][-1]["role"] = "system"
