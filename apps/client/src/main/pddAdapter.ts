@@ -1906,8 +1906,15 @@ export class PddPageAdapter implements PlatformAdapter {
       const guard = `const act = document.querySelector(${JSON.stringify(ITEM.replace("[data-random]", ".active[data-random]"))});
         if (!act || !(act.getAttribute("data-random") || "").startsWith(${JSON.stringify(uid + "-")})) return "pdd_conversation_changed";
         const ta = document.querySelector(${JSON.stringify(TEXTAREA)});
-        const btn = document.querySelector(${JSON.stringify(SEND_BTN)});
-        if (!ta || !btn) return "pdd_input_missing";`;
+        if (!ta) return "pdd_input_missing";
+        const box = ta.closest("div.reply-box");
+        const buttons = [...(box?.querySelectorAll(${JSON.stringify(SEND_BTN)}) || [])].filter(btn => {
+          const r = btn.getBoundingClientRect(), style = getComputedStyle(btn);
+          return btn.closest("div.reply-box") === box && style.visibility === "visible" &&
+            r.width >= 4 && r.height >= 4 && r.right > 0 && r.bottom > 0 && r.left < innerWidth && r.top < innerHeight;
+        });
+        if (buttons.length !== 1) return "pdd_input_missing";
+        const btn = buttons[0];`;
       const filled = await this.run<string>(`(() => { ${guard}
         if (ta.value.trim()) return "pdd_input_not_empty";
         Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(ta, ${JSON.stringify(text)});
@@ -1927,10 +1934,16 @@ export class PddPageAdapter implements PlatformAdapter {
       const located = await this.run<string | { x: number; y: number }>(`(() => { ${guard}
         if (ta.value !== ${JSON.stringify(text)}) return "pdd_input_mismatch";
         const r = btn.getBoundingClientRect();
-        if (r.width < 4 || r.height < 4) return "pdd_send_button_hidden";
-        const x = Math.round(r.left + r.width / 2), y = Math.round(r.top + r.height / 2);
-        if (document.elementFromPoint(x, y)?.closest(${JSON.stringify(SEND_BTN)}) !== btn) return "pdd_send_button_covered";
-        return { x, y }; })()`).catch(() => "pdd_page_script_failed");
+        const left = Math.max(0, r.left), right = Math.min(innerWidth, r.right);
+        const top = Math.max(0, r.top), bottom = Math.min(innerHeight, r.bottom);
+        if (right - left < 4 || bottom - top < 4) return "pdd_send_button_hidden";
+        const y = (top + bottom) / 2;
+        // 只在同一个按钮的可见部分找命中点；定位可探测多点，真实点击仍只有一次。
+        for (const fraction of [0.5, 0.25, 0.75]) {
+          const x = left + (right - left) * fraction;
+          if (document.elementFromPoint(x, y)?.closest(${JSON.stringify(SEND_BTN)}) === btn) return { x, y };
+        }
+        return "pdd_send_button_covered"; })()`).catch(() => "pdd_page_script_failed");
       const win = this.window;
       if (typeof located === "string" || !win || win.isDestroyed()) {
         this.outgoing = null;
