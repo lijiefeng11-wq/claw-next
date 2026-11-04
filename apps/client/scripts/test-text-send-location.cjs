@@ -24,11 +24,12 @@ function html(s) {
     ${s.offscreenDuplicate ? '<div class="reply-box" style="left:-1200px"><div class="reply-footer">' + button + '</div></div>' : ""}
     <div class="reply-box" id="composer"><div class="reply-input"><textarea></textarea></div>
       <div class="reply-footer">${s.hiddenDuplicate ? '<div class="send-btn" style="display:none"></div>' : ""}
-      ${button}${s.ambiguous ? button : ""}</div></div>
+      ${s.insertDelay ? "" : button}${s.ambiguous ? button : ""}</div></div>
     ${s.mask ? '<div style="position:fixed;inset:0;background:#fff;z-index:10"></div>' : ""}
     <script>window.clicks=0;${s.changeDraft ? 'document.querySelector("textarea").addEventListener("input",e=>{if(e.target.value)e.target.value="人工草稿"})' : ""}
     ${s.revealButton ? 'document.querySelector("textarea").addEventListener("input",()=>{document.querySelector("#composer .send-btn").style.visibility="visible"})' : ""}
     ${s.revealDelay ? `document.querySelector("textarea").addEventListener("input",()=>{setTimeout(()=>{document.querySelector("#composer .send-btn").style.visibility="visible"},${s.revealDelay})})` : ""}
+    ${s.insertDelay ? `document.querySelector("textarea").addEventListener("input",()=>{if(document.querySelector("textarea").value)setTimeout(()=>document.querySelector("#composer .reply-footer").insertAdjacentHTML("beforeend",${JSON.stringify(button)}),${s.insertDelay})})` : ""}
     ${s.switchWhileWaiting ? 'document.querySelector("textarea").addEventListener("input",()=>setTimeout(()=>document.querySelector(".chat-item-box").setAttribute("data-random","9002-fixture"),100))' : ""}</script>`;
 }
 
@@ -42,6 +43,7 @@ app.whenReady().then(async () => {
     { name: "button_appears_after_input", revealButton: true, status: "confirmed" },
     { name: "button_appears_after_350ms", revealDelay: 350, status: "confirmed" },
     { name: "button_appears_after_650ms", revealDelay: 650, status: "confirmed" },
+    { name: "button_created_after_input", insertDelay: 350, status: "confirmed" },
     { name: "waiting_never_retries_a_click", neverReveal: true, status: "not_sent", reason: "pdd_input_missing" },
     { name: "conversation_changes_while_waiting", revealDelay: 650, switchWhileWaiting: true, status: "not_sent", reason: "pdd_conversation_changed" },
     { name: "page_changes_while_waiting", revealDelay: 650, pageChanged: true, status: "not_sent", reason: "pdd_page_changed" },

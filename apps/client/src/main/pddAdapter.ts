@@ -1908,7 +1908,7 @@ export class PddPageAdapter implements PlatformAdapter {
         const ta = document.querySelector(${JSON.stringify(TEXTAREA)});
         if (!ta) return "pdd_input_missing";
         const box = ta.closest("div.reply-box");
-        if (!box?.querySelector(${JSON.stringify(SEND_BTN)})) return "pdd_input_missing";`;
+        if (!box) return "pdd_input_missing";`;
       const filled = await this.run<string>(`(() => { ${guard}
         if (ta.value.trim()) return "pdd_input_not_empty";
         Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(ta, ${JSON.stringify(text)});
@@ -1926,7 +1926,7 @@ export class PddPageAdapter implements PlatformAdapter {
       // CDP 使用页面视口 CSS 坐标，不依赖桌面焦点或页面缩放。
       const locate = () => this.run<string | { x: number; y: number }>(`(() => { ${guard}
         if (ta.value !== ${JSON.stringify(text)}) return "pdd_input_mismatch";
-        // 有些页面在输入后才显示按钮；可见性与唯一性放在填入文字之后检查。
+        // 有些页面在输入后才创建或显示按钮；存在性、可见性与唯一性在填入后检查。
         const buttons = [...box.querySelectorAll(${JSON.stringify(SEND_BTN)})].filter(btn => {
           const r = btn.getBoundingClientRect(), style = getComputedStyle(btn);
           return btn.closest("div.reply-box") === box && style.visibility === "visible" &&
