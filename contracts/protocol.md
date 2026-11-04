@@ -558,7 +558,8 @@ unknown 表示前台无法确认平台是否发出。管理员可到平台聊天
   - 管理页登录后本地轮询并提示：连接未确认、线程停止、模型连续失败、unknown 记录、备份失败。缺失 / 畸形计数或请求失败不视为健康；已有记录保持不确定或过期提示。页面关闭 / 未登录时不承诺通知，不调用外部服务。
   - 备份为本机后台 SQLite 的每日一致性快照，保留最近 7 份，POSIX 目录 0700 / 文件 0600；不包含独立认证库、密钥或客户端资料，不等于完整部署回退。仅在独立实现部署后生效；不授权恢复、重启或平台动作。
   - unknown 数量包括已经人工核查但仍保留原 unknown 状态的历史；提醒不改写、不清除、不重试这些记录。建议回复的展示也不赋予 claim / 发送权限，前台“仅观察”与“人工接管”的发送阻止保持。
-- `GET /api/v1/admin/shops`：`{"shops":[{"shop_id":"demo-shop","name":"演示店铺","settings":{...},"lease":null或租约}]}`。
+- `GET /api/v1/admin/shops`：`{"shops":[{"shop_id":"demo-shop","name":"演示店铺","settings":{...},"lease":null或租约}],"templates":[话术模板...]}`。旧后台可不返回 `templates`。
+- `POST /api/v1/admin/reply-templates`：将当前话术另存为独立模板，详见下文“共用话术模板”；不绑定店铺、不开启自动回复。
 - `GET /api/v1/admin/events?shop_id=demo-shop&limit=50`：`{"events":[事件快照...]}`；limit 1–200，不传店铺查全部。
 - `POST /api/v1/admin/prompt-draft`：根据管理员本次输入生成未应用的提示词草稿，详见下方“管理员提示词草稿”约定；不写入店铺设置。
 - `PUT /api/v1/admin/shops/{shop_id}/settings`：完整替换下列设置，后台增加 version；修改后旧未发送决定失效。
@@ -570,6 +571,19 @@ unknown 表示前台无法确认平台是否发出。管理员可到平台聊天
 {"enabled":true,"mode":"hybrid","system_prompt":"仅根据所提供的店铺规则回答；无法确认则转人工。","rules":[{"id":"shipping","contains":"发货","description":"问什么时候发货、几天能到","reply":"演示：付款后48小时内发货。"}]}
 ```
 settings 返回上述字段加 version。mode=rules/model/hybrid。规则可带可选 `description`（适用问题说明，如“问发货时间、几天到”；字符串，最多 500 字符；不传或空串表示无），只用于混合模式的语义匹配，不会发给买家。
+
+### 共用话术模板（管理员增量）
+
+模板只含 `mode/system_prompt/rules`，规则保持原有文字、发送条目及 handling 校验。店铺的 `enabled` 与 `fallback` 独立保存，不复制源店铺开关、账号凭据、模型配置或规格资料。
+
+- 创建请求严格为 `{name,mode,system_prompt,rules}`；name 去除首尾空白后为 1–80 字，同名返回 409 `template_name_exists`，坏名称为 400 `invalid_template_name`，额外/缺失字段为 400 `invalid_template`，话术内容沿用现有校验及错误码。成功 HTTP 201 返回 `{template_id,name,version:1,mode,system_prompt,rules}`。template_id 为服务端生成的 32 位小写十六进制值。列表按名称与编号排序。保存模板本身不修改店铺设置。
+- 管理设置 PUT 增加可选 `template_id/template_version`。非空 template_id 表示选用模板，必须提交其当前整数 template_version；有效但不存在的编号为 404 `template_not_found`，版本缺失/类型错误/过期为 409 `template_changed`。编号类型非法为 400 `invalid_template`。
+- 显式 `template_id:null` 或空串表示本店独立配置，template_version 应不传或为 null；本次提交的有效话术保留，此后不跟随模板更新。未绑定时提交非空版本为 400 `invalid_template`。
+- 选用模板时仍提交完整设置。若共享三字段有变化，在一次事务内更新模板版本，并将共享内容同步到全部已绑定店铺；各店 enabled/fallback 保持自身设置，来源店按本次提交保存自己的 enabled/fallback。每个受影响店铺的 settings.version 只增加一次，旧未发送决定按既有版本校验失效；无共享变动时模板与其他店铺版本不变。空 description 与省略等价，不产生无意义的模板版本变更。
+- 返回设置中，已绑定店铺增加 `template_id/template_version`；独立店铺保持原有返回字段。客户端事件协议及引擎内部只使用原有效话术，不需要理解模板编号。
+- 旧 PUT 未带 template_id 时，未绑定店铺按旧行为保存；已绑定店铺保留绑定，只允许共享内容与模板当前值相同的本店设置更新。若共享内容不同，409 `template_changed`，不隐式解绑或覆盖模板。所有校验及同步失败均不得部分提交。
+- 界面继续使用现有话术编辑区，选用/取消选用先留在未保存状态，保存后生效；“保存并同步模板”明确作用于共用店铺。切模板不改本店启用开关与兜底处理；有未保存话术时先确认替换。后台轮询和迟到响应不得覆盖当前编辑，旧模板版本不得覆盖他店新改动。模板名称以文本展示。
+- 上述管理端点沿用管理员登录、首次密码更换与权限校验，不允许客户端令牌读取或写入。模板在现有本机 SQLite 持久保存，不新增服务、运行依赖或定时任务。
 
 - **rules**：规则按列表顺序做不区分大小写的字符串包含匹配（只看最新买家文字消息）；未命中转人工。**规则模式的业务判断不调用模型**，即使后台已配置模型；管理员主动连接测试和草稿生成独立于业务判断方式。
 - **model**：只用模型（主→备），仅使用后台私有配置的模型地址和密钥；主备均未配置或均不可用时转人工。
