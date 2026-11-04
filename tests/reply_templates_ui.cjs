@@ -97,5 +97,10 @@ let passed=0;
     h.applyRemoteSettings({...local,...shared,template_id:tpl.template_id,template_version:4,version:12,system_prompt:'同步的新话术'});
     assert.equal(ids['prompt-input'].value,'同步的新话术');assert.equal(h.state.templateVersion,4);assert.equal(ids['enabled-input'].checked,false);passed++;
   }
+  {
+    const name='😀'.repeat(50),{h,calls,window}=setup(()=>response({...tpl,name,version:1}));
+    window.prompt=()=>name;await h.createTemplate();assert.equal(calls.length,1);assert.equal(h.state.templateId,tpl.template_id);
+    assert.equal(h.state.templates[0].name,name);passed++;
+  }
   console.log(JSON.stringify({passed,actualManagementCode:true,realHttp:false,platform:false}));
 })().catch(e=>{console.error(e);process.exitCode=1;});

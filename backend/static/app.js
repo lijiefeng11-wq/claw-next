@@ -1380,7 +1380,7 @@
 
   function validTemplate(item) {
     return item && typeof item.template_id === "string" && /^[0-9a-f]{32}$/.test(item.template_id)
-      && typeof item.name === "string" && item.name.trim().length > 0 && item.name.length <= 80
+      && typeof item.name === "string" && item.name.trim().length > 0 && Array.from(item.name).length <= 80
       && Number.isInteger(item.version) && item.version > 0
       && ["rules", "model", "hybrid"].includes(item.mode)
       && typeof item.system_prompt === "string" && item.system_prompt.length <= LIMITS.prompt
@@ -1447,7 +1447,7 @@
     const input = window.prompt("给这份话术模板起个名字（最多80字）：");
     if (input === null) return;
     const name = input.trim();
-    if (!name || name.length > 80) { setText(el["save-status"], "模板名称请填写1–80字。"); return; }
+    if (!name || Array.from(name).length > 80) { setText(el["save-status"], "模板名称请填写1–80字。"); return; }
     const payload = {name: name, mode: el["mode-input"].value, system_prompt: prompt, rules: rules.value};
     const epoch = state.epoch, shopId = state.selectedShopId, revision = state.formRevision;
     state.templateBusy = true;
