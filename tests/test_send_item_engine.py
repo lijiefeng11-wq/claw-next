@@ -131,13 +131,11 @@ class SendItemRuleTests(unittest.TestCase):
         post.assert_not_called()
 
     def test_integrity_gates_precede_item_send(self):
-        for modifier, expected in (("disabled", "shop_disabled"), ("incomplete", "history_incomplete"),
+        for modifier, expected in (("disabled", "shop_disabled"),
                                    ("future", "message_future"), ("role", "no_new_buyer_message")):
             item = job("rules", [rule(kind="instruction")])
             if modifier == "disabled":
                 item["settings"]["enabled"] = False
-            if modifier == "incomplete":
-                item["payload"]["context"]["history_complete"] = False
             if modifier == "future":
                 item["payload"]["received_at"] = time.time() + 30
             if modifier == "role":

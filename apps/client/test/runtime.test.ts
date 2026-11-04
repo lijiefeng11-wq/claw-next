@@ -294,16 +294,18 @@ describe("图片", () => {
 });
 
 describe("阻止旧发送", () => {
-  test("历史缺失：上报 history_complete=false，后台转人工，不发送", async () => {
+  test("历史缺失：如实上报，仍按当前消息回复一次并上传回执", async () => {
     const { rt, mock } = await shop();
     mock.historyGaps.add("buyer-1");
     mock.injectBuyerMessage({ conversation_id: "buyer-1", content: "营业时间？" });
-    await decided(rt);
+    await waitFor(() => eventsOf(rt)[0]?.attempt?.receipt?.upload === "uploaded", "partial-history receipt");
     const ev = eventsOf(rt)[0];
     assert.equal(ev.history_complete, false);
     assert.equal(JSON.parse(ev.body).context.history_complete, false);
-    assert.equal(ev.snapshot?.decision?.action, "handoff");
-    assert.equal(mock.platformSends.length, 0);
+    assert.equal(ev.snapshot?.decision?.action, "reply");
+    assert.equal(mock.platformSends.length, 1);
+    assert.equal(mock.platformSends[0].text, HOURS_REPLY);
+    assert.equal((await backend.events("shop-a"))[0].delivery.status, "sent");
   });
 
   test("页面只加载最近一段：与本地已确认完整的记录接得上，仍算完整", async () => {
