@@ -21,6 +21,7 @@ function snapshot(value={}){return {...base,status:'completed',phase:'completed'
 function fixture(handler){
  const ids={},calls=[],timers=[],readers=[];let applied=0,edited=0;
  const document={getElementById:id=>ids[id]??=new Element(),createElement:tag=>new Element(tag)};
+ document.getElementById('rules-apply-status');
  class FileReader {
   constructor(){readers.push(this);this.readyState=0;}
   readAsArrayBuffer(file){this.readyState=1;if(file.auto!==false)Promise.resolve().then(()=>{if(this.readyState!==1)return;this.onprogress?.({loaded:file.size,total:file.size,lengthComputable:true});this.result=new TextEncoder().encode(file.text||'[]').buffer;this.readyState=2;this.onload();});}
@@ -38,6 +39,18 @@ function fixture(handler){
 }
 let checks=0;
 async function importDone(f){f.select();await f.ids['chat-import'].fire('click');assert.equal(f.ids['chat-preview'].hidden,false);}
+async function draftDone(candidates,rules=[]){
+ const job={job_id:'rules-feedback',shop_id:'a',shop_version:3,version:7};
+ const f=fixture(async(url,o)=>{
+  if(url==='/api/v1/admin/chat-import/jobs')return base;
+  if(url==='/api/v1/admin/chat-import/jobs/import1')return snapshot();
+  if(url==='/api/v1/admin/rule-draft/jobs')return job;
+  if(url==='/api/v1/admin/rule-draft/jobs/rules-feedback')return {...job,status:'completed',processed_pairs:45,total_pairs:45,processed_batches:2,total_batches:2,result:{candidates,warnings:[]}};
+  throw Error('unexpected route');
+ });
+ f.state.rules=rules;await importDone(f);f.ids['chat-confirm'].checked=true;f.ids['chat-confirm'].fire('change');await f.ids['rules-generate'].fire('click');return f;
+}
+const candidate=contains=>({contains,description:'虚构问题',reply:'虚构答复',evidence_ids:['p1'],count:2,conflicts:[],warnings:[]});
 (async()=>{
  {
   const gate=deferred();let gets=0;
@@ -107,10 +120,46 @@ async function importDone(f){f.select();await f.ids['chat-import'].fire('click')
   await importDone(f);assert.match(f.ids['chat-analysis-plan'].textContent,/51 组独立问答，预计 4 批/);assert(!f.calls.some(c=>c.url.includes('rule-draft')));checks++;
  }
  {
+  const f=await draftDone([candidate('清洁')]);const card=f.ids['rule-candidates'].children[0];
+  const choice=card.querySelectorAll('select')[0];choice.value='add';choice.fire('change');
+  card.querySelectorAll('textarea')[1].value='';
+  f.ids['rules-apply'].fire('click');assert.match(f.ids['rules-apply-status'].textContent,/空白或过长/);
+  assert.match(f.ids['rules-apply-status'].textContent,/第 1 条/);
+  assert.equal(f.ids['rules-apply-status'].textContent,f.ids['rule-draft-status'].textContent);
+  assert.equal(f.state.rules.length,0);assert.equal(f.applied(),0);assert.equal(f.edited(),0);checks++;
+ }
+ {
+  const f=await draftDone([candidate('清洁')]);
+  assert.equal(f.ids['rules-apply'].disabled,true);assert.match(f.ids['rules-apply'].textContent,/0 条/);
+  assert.match(f.ids['rules-apply-status'].textContent,/请选择要新增或替换/);checks++;
+ }
+ {
+  const f=await draftDone([candidate('汽车'),candidate('汽车安装')]);
+  f.ids['rule-candidates'].querySelectorAll('select').forEach(c=>{c.value='add';c.fire('change');});
+  f.ids['rules-apply'].fire('click');assert.match(f.ids['rules-apply-status'].textContent,/重叠/);
+  assert.match(f.ids['rules-apply-status'].textContent,/第 2 条/);
+  assert.equal(f.state.rules.length,0);assert.equal(f.applied(),0);assert.equal(f.edited(),0);checks++;
+ }
+ {
+  const original=[{id:'r1',uid:1,contains:'原规则',reply:'原答复'}];const f=await draftDone([candidate('清洁'),candidate('安装')],original);
+  f.ids['rule-candidates'].querySelectorAll('select').forEach(c=>{c.value='replace:r1';c.fire('change');});
+  f.ids['rules-apply'].fire('click');assert.match(f.ids['rules-apply-status'].textContent,/替换目标无效或已被其他草稿/);
+  assert.match(f.ids['rules-apply-status'].textContent,/第 2 条/);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.state.rules)),original);assert.equal(f.applied(),0);checks++;
+ }
+ {
+  const f=await draftDone([candidate('清洁'),candidate('安装')]);
+  f.ids['rule-candidates'].querySelectorAll('select').forEach(c=>{c.value='add';c.fire('change');});
+  assert.match(f.ids['rules-apply'].textContent,/2 条/);f.ids['rules-apply'].fire('click');
+  assert.match(f.ids['rules-apply-status'].textContent,/已把 2 条草稿填入表单，尚未保存/);
+  assert.equal(f.state.rules.length,2);assert.equal(f.applied(),1);assert.equal(f.edited(),1);assert(!f.calls.some(c=>c.method==='PUT'));checks++;
+ }
+ {
   const html=fs.readFileSync(path.join(__dirname,'../backend/static/index.html'),'utf8');
   const scriptPage=html.slice(html.indexOf('<section id="page-scripts"'),html.indexOf('<section id="page-chat-import"'));
   assert(!scriptPage.includes('id="chat-file"'));assert(html.includes('data-route="chat-import"'));assert(html.includes('id="page-system"'));assert(html.includes('id="page-model"'));
-  const ids=[...html.matchAll(/\bid="([^"]+)"/g)].map(m=>m[1]);assert.equal(ids.length,new Set(ids).size);checks++;
+  const ids=[...html.matchAll(/\bid="([^"]+)"/g)].map(m=>m[1]);assert.equal(ids.length,new Set(ids).size);
+  assert.match(html,/id="rules-apply"[^>]*>[\s\S]*?<p id="rules-apply-status"[^>]*aria-live="polite"/);checks++;
  }
  console.log(JSON.stringify({passed:checks,realAssistModule:true,fictionalDOM:true,network:false,model:false}));
 })().catch(e=>{console.error(e);process.exitCode=1;});
