@@ -143,7 +143,7 @@ class AdminAuth:
             self.identity(token)
             del self.sessions[self._session_key(token)]
 
-    # Persistent grants authorize only short-lived, single-use handoff tickets.
+    # Persistent grants authorize local handoff tickets and local shop enrollment.
     def _handoff_admin(self, admin_token):
         require(isinstance(admin_token, str) and admin_token.isascii() and len(admin_token) <= 1024,
                 "unauthorized", 401)
@@ -211,6 +211,19 @@ class AdminAuth:
             self.tickets[self._session_key(ticket)] = {"grant_id": grant_id, "expires_at": expires_at}
             self.failures.pop(address, None)
             return {"ticket": ticket, "expires_at": expires_at}
+
+    def authorize_local_shop(self, grant_token, address, client_token):
+        with self.lock:
+            record = self._check_limit(address)
+            grant_id = self._grant_hook(grant_token)
+            if grant_id is None or self.must_change_password:
+                self._failed(address, record)
+                raise ApiError(401, "invalid_handoff_grant")
+            if opaque_secret(client_token):
+                require(self._grant_hook(client_token) is None and self._session_key(client_token) not in self.sessions,
+                        "client_registration_conflict", 409)
+            self.failures.pop(address, None)
+            return grant_id
 
     def redeem_handoff_ticket(self, payload, address):
         with self.lock:
