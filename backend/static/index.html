@@ -209,7 +209,7 @@
               <label class="field field-inline">
                 <span class="field-label">店铺</span>
                 <select id="shop-select" aria-describedby="shop-select-help"></select>
-                <span id="shop-select-help" class="field-help">先选要配置的店铺；下面的规则和提示词只保存到这家店，模型配置则由后台各店共用。</span>
+                <span id="shop-select-help" class="field-help">先选店铺，可独立配置或选用共用话术模板；回复开关和兜底处理仍按店铺保存。</span>
               </label>
               <div id="shop-meta" class="shop-meta muted small">尚未加载店铺。</div>
             </div>
@@ -229,6 +229,17 @@
             </div>
 
             <form id="settings-form" class="settings-form" novalidate>
+              <div class="form-actions">
+                <label class="field field-inline">
+                  <span class="field-label">话术模板</span>
+                  <select id="template-select" aria-describedby="template-help">
+                    <option value="">本店独立配置</option>
+                  </select>
+                </label>
+                <button id="template-create" class="btn btn-ghost" type="button">存为新模板</button>
+              </div>
+              <p id="template-help" class="field-help">模板共用判断方式、提示词和全部规则。选用后点“保存设置”生效；修改模板会自动同步到已选用的店铺。</p>
+              <p id="template-status" class="small muted" role="status" aria-live="polite"></p>
               <div class="settings-grid">
                 <fieldset class="settings-group">
                   <legend>启用状态</legend>

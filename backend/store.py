@@ -6,6 +6,7 @@ import re
 import sqlite3
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from . import conversation_actions, deadlines, diagnostics, goods_snapshot, modelconfig, modelsecrets, senditems
@@ -96,6 +97,7 @@ def validate_settings(p):
 
 
 DEFAULT_SETTINGS = {"enabled": False, "mode": "rules", "system_prompt": "仅根据已知店铺规则回答；无法确认则转人工。", "rules": [], "version": 1}
+TEMPLATE_FIELDS = ("mode", "system_prompt", "rules")
 
 
 class Store:
@@ -111,6 +113,9 @@ class Store:
         self.db.execute("PRAGMA secure_delete=ON")
         self.db.executescript("""
         CREATE TABLE IF NOT EXISTS shops (shop_id TEXT PRIMARY KEY, name TEXT NOT NULL, settings TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS reply_templates (
+          template_id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, content TEXT NOT NULL, version INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS shop_reply_templates (shop_id TEXT PRIMARY KEY, template_id TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS leases (shop_id TEXT PRIMARY KEY, payload TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS model_settings (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS delivery_verifications (
@@ -355,13 +360,82 @@ class Store:
     def update_settings(self, shop, p):
         clean = validate_settings(p)
         with self.lock, self.db:
-            clean["version"] = self._settings(shop)["version"] + 1
+            current = self._settings(shop)
+            binding = self._template_binding(shop)
+            template_id = p.get("template_id", binding["template_id"] if binding else None)
+            if not template_id:
+                require(template_id is None or template_id == "", "invalid_template")
+                require(p.get("template_version") is None, "invalid_template")
+                self.db.execute("DELETE FROM shop_reply_templates WHERE shop_id=?", (shop,))
+            else:
+                require(identifier(template_id), "invalid_template")
+                template = self.db.execute("SELECT * FROM reply_templates WHERE template_id=?", (template_id,)).fetchone()
+                require(template is not None, "template_not_found", 404)
+                content = self._template_content(clean)
+                clean.update(content)
+                previous = json.loads(template["content"])
+                if "template_id" not in p:
+                    # Old forms may change local switches, but cannot edit a shared template unknowingly.
+                    require(content == previous, "template_changed", 409)
+                else:
+                    require(type(p.get("template_version")) is int and p["template_version"] == template["version"],
+                            "template_changed", 409)
+                if content != previous:
+                    self.db.execute("UPDATE reply_templates SET content=?,version=version+1 WHERE template_id=?",
+                                    (json.dumps(content, ensure_ascii=False), template_id))
+                    for row in self.db.execute("SELECT s.shop_id,s.settings FROM shops s JOIN shop_reply_templates b "
+                                               "ON s.shop_id=b.shop_id WHERE b.template_id=? AND s.shop_id<>?",
+                                               (template_id, shop)).fetchall():
+                        settings = json.loads(row["settings"])
+                        settings.update(content)
+                        settings["version"] += 1
+                        self.db.execute("UPDATE shops SET settings=? WHERE shop_id=?", (json.dumps(settings), row["shop_id"]))
+                self.db.execute("INSERT OR REPLACE INTO shop_reply_templates VALUES (?,?)", (shop, template_id))
+            clean["version"] = current["version"] + 1
             self.db.execute("UPDATE shops SET settings=? WHERE shop_id=?", (json.dumps(clean), shop))
-            return clean
+            return self._admin_settings(shop, clean)
+
+    def _template_binding(self, shop):
+        return self.db.execute("SELECT t.template_id,t.version FROM reply_templates t JOIN shop_reply_templates b "
+                               "ON t.template_id=b.template_id WHERE b.shop_id=?", (shop,)).fetchone()
+
+    def _admin_settings(self, shop, settings):
+        binding = self._template_binding(shop)
+        return {**settings, "template_id": binding["template_id"], "template_version": binding["version"]} if binding else settings
+
+    @staticmethod
+    def _template_view(row):
+        return {"template_id": row["template_id"], "name": row["name"], "version": row["version"], **json.loads(row["content"])}
+
+    @staticmethod
+    def _template_content(settings):
+        content = {key: copy.deepcopy(settings[key]) for key in TEMPLATE_FIELDS}
+        for rule in content["rules"]:
+            if rule.get("description") == "":
+                rule.pop("description")
+        return content
+
+    def reply_templates(self):
+        with self.lock:
+            return [self._template_view(row) for row in self.db.execute("SELECT * FROM reply_templates ORDER BY name,template_id")]
+
+    def create_reply_template(self, p):
+        require(isinstance(p, dict) and set(p) == {"name", *TEMPLATE_FIELDS}, "invalid_template")
+        name = p["name"]
+        require(isinstance(name, str) and 1 <= len(name.strip()) <= 80, "invalid_template_name")
+        clean = validate_settings({**p, "enabled": False})
+        content = self._template_content(clean)
+        with self.lock, self.db:
+            require(not self.db.execute("SELECT 1 FROM reply_templates WHERE name=?", (name.strip(),)).fetchone(),
+                    "template_name_exists", 409)
+            template_id = uuid.uuid4().hex
+            self.db.execute("INSERT INTO reply_templates VALUES (?,?,?,1)",
+                            (template_id, name.strip(), json.dumps(content, ensure_ascii=False)))
+            return {"template_id": template_id, "name": name.strip(), "version": 1, **content}
 
     def shops(self):
         with self.lock:
-            return [{"shop_id": r["shop_id"], "name": r["name"], "settings": json.loads(r["settings"]), "lease": self._public_lease(r["shop_id"])} for r in self.db.execute("SELECT * FROM shops ORDER BY shop_id") if r["shop_id"] in self.shop_ids]
+            return [{"shop_id": r["shop_id"], "name": r["name"], "settings": self._admin_settings(r["shop_id"], json.loads(r["settings"])), "lease": self._public_lease(r["shop_id"])} for r in self.db.execute("SELECT * FROM shops ORDER BY shop_id") if r["shop_id"] in self.shop_ids]
 
     def _runtime(self, shop, event):
         row = self.db.execute("SELECT * FROM event_runtime WHERE shop_id=? AND event_id=?", (shop, event)).fetchone()
