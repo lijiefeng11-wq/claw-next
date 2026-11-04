@@ -402,7 +402,9 @@ class Handler(BaseHTTPRequestHandler):
                                           "backup": self.server.backups.snapshot()}
                 return self._send(200, summary)
             if path == "/api/v1/admin/shops" and method == "GET":
-                return self._send(200, {"shops": store.shops()})
+                return self._send(200, {"shops": store.shops(), "templates": store.reply_templates()})
+            if path == "/api/v1/admin/reply-templates" and method == "POST":
+                return self._send(201, store.create_reply_template(self._json()))
             if path == "/api/v1/admin/events" and method == "GET":
                 query = parse_qs(urlsplit(self.path).query)
                 try:

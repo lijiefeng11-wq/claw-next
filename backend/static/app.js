@@ -38,6 +38,12 @@
     handoff: { seq: 0, busy: false },
     route: "dashboard",
     shops: [],
+    templates: [],
+    templateId: "",
+    templateVersion: null,
+    templateBusy: false,
+    settingsBusy: false,
+    formRevision: 0,
     selectedShopId: null,
     loadedSettings: null,
     remoteSettings: null,
@@ -98,6 +104,7 @@
     "page-dashboard", "page-scripts", "page-chat-import", "page-records", "page-model", "page-system",
     "shop-connection-list", "shop-connection-summary", "shop-connection-meta",
     "shop-select", "shop-meta", "settings-version", "lease-status", "lease-details",
+    "template-select", "template-create", "template-help", "template-status",
     "lease-instance", "lease-session", "lease-generation", "lease-expires",
     "settings-form", "enabled-input", "enabled-note", "mode-input", "prompt-input",
     "prompt-brief", "generate-prompt", "prompt-draft-status", "prompt-draft", "apply-prompt-draft",
@@ -406,7 +413,8 @@
       rules,
       ["unhandled", "error", "model_timeout"].map(function (key) {
         return policySignature(s.fallback && s.fallback[key]);
-      })
+      }),
+      s.template_id || "", s.template_version || null
     ]);
   }
 
@@ -1257,6 +1265,7 @@
   }
 
   function onFormEdit() {
+    state.formRevision += 1;
     state.formDirty = true;
     setText(el["save-status"], "有未保存的修改。");
     hideRulesError();
@@ -1270,6 +1279,10 @@
     state.formVersion = settingsVersion(s);
     state.formSignature = settingsSignature(s);
     state.formDirty = false;
+    state.formRevision += 1;
+    state.templateId = typeof s.template_id === "string" ? s.template_id : "";
+    state.templateVersion = Number.isInteger(s.template_version) ? s.template_version : null;
+    syncTemplateSelect();
     el["enabled-input"].checked = s.enabled === true;
     setText(el["enabled-note"], s.enabled === true ? "服务器当前为开启。" : "服务器当前为关闭。");
     el["mode-input"].value = ["model", "hybrid"].includes(s.mode) ? s.mode : "rules";
@@ -1321,6 +1334,10 @@
     state.formVersion = null;
     state.formSignature = "";
     state.formDirty = false;
+    state.formRevision += 1;
+    state.templateId = "";
+    state.templateVersion = null;
+    syncTemplateSelect();
     el["enabled-input"].checked = false;
     setText(el["enabled-note"], "服务器状态未知。");
     el["mode-input"].value = "rules";
@@ -1353,11 +1370,112 @@
         sync();
       }
     });
+    syncTemplateSelect();
   }
 
   function setSaveBusy(busy) {
-    el["save-btn"].disabled = busy;
-    setText(el["save-btn"], busy ? "保存中…" : "保存设置");
+    state.settingsBusy = busy;
+    syncTemplateSelect();
+  }
+
+  function validTemplate(item) {
+    return item && typeof item.template_id === "string" && /^[0-9a-f]{32}$/.test(item.template_id)
+      && typeof item.name === "string" && item.name.trim().length > 0 && Array.from(item.name).length <= 80
+      && Number.isInteger(item.version) && item.version > 0
+      && ["rules", "model", "hybrid"].includes(item.mode)
+      && typeof item.system_prompt === "string" && item.system_prompt.length <= LIMITS.prompt
+      && Array.isArray(item.rules) && item.rules.length <= LIMITS.maxRules;
+  }
+
+  function syncTemplateSelect() {
+    const select = el["template-select"];
+    const signature = JSON.stringify([state.templates.map(function (item) { return [item.template_id, item.name]; }), state.templateId]);
+    if (select.dataset.signature !== signature) {
+      const own = document.createElement("option");
+      own.value = ""; own.textContent = "本店独立配置";
+      select.replaceChildren(own);
+      state.templates.forEach(function (item) {
+        const option = document.createElement("option");
+        option.value = item.template_id; option.textContent = item.name;
+        select.appendChild(option);
+      });
+      if (state.templateId && !state.templates.some(function (t) { return t.template_id === state.templateId; })) {
+        const missing = document.createElement("option");
+        missing.value = state.templateId; missing.textContent = "当前模板（待刷新）";
+        select.appendChild(missing);
+      }
+      select.dataset.signature = signature;
+    }
+    select.value = state.templateId;
+    const busy = state.settingsBusy || state.templateBusy;
+    select.disabled = state.formDisabled || busy;
+    el["template-create"].disabled = state.formDisabled || busy;
+    el["save-btn"].disabled = state.formDisabled || busy;
+    setText(el["save-btn"], state.settingsBusy ? "保存中…" : state.templateId ? "保存并同步模板" : "保存设置");
+    setText(el["template-status"], state.templateId
+      ? "保存后，共用此模板的店铺会自动更新话术；各店开关和兜底处理不变。"
+      : "本店独立维护话术；存为模板后可供其他店铺选用。");
+  }
+
+  function onTemplateChange() {
+    const id = el["template-select"].value;
+    if (state.formDisabled || state.settingsBusy || state.templateBusy || id === state.templateId) return;
+    const template = state.templates.find(function (item) { return item.template_id === id; });
+    if ((id && !template) || (id && state.formDirty && !window.confirm("选用模板会替换尚未保存的话术、提示词和判断方式，是否继续？店铺开关和兜底处理不变。"))) {
+      el["template-select"].value = state.templateId;
+      return;
+    }
+    clearPromptDraft();
+    state.templateId = id;
+    state.templateVersion = template ? template.version : null;
+    if (template) {
+      el["mode-input"].value = template.mode;
+      el["prompt-input"].value = template.system_prompt;
+      loadRules(template.rules);
+    }
+    onFormEdit();
+    syncTemplateSelect();
+    setText(el["save-status"], "尚未保存。" + (id ? "核对后点“保存并同步模板”选用。" : "点“保存设置”后，本店不再跟随模板更新。"));
+  }
+
+  async function createTemplate() {
+    if (state.formDisabled || !state.token || !currentShop() || state.settingsBusy || state.templateBusy) return;
+    const rules = collectRules();
+    if (!rules.ok) { showRulesError(rules.message, rules.uid, rules.field); return; }
+    const prompt = el["prompt-input"].value;
+    if (prompt.length > LIMITS.prompt) { showAlert("提示词最多 8000 个字。", "error"); return; }
+    const input = window.prompt("给这份话术模板起个名字（最多80字）：");
+    if (input === null) return;
+    const name = input.trim();
+    if (!name || Array.from(name).length > 80) { setText(el["save-status"], "模板名称请填写1–80字。"); return; }
+    const payload = {name: name, mode: el["mode-input"].value, system_prompt: prompt, rules: rules.value};
+    const epoch = state.epoch, shopId = state.selectedShopId, revision = state.formRevision;
+    state.templateBusy = true;
+    syncTemplateSelect();
+    setText(el["save-status"], "正在保存新模板…");
+    try {
+      const data = await request("/api/v1/admin/reply-templates", {method: "POST", body: payload});
+      if (isStale(epoch)) return;
+      if (!validTemplate(data)) throw new ApiError(0, "bad_response", "模板保存结果未确认。");
+      state.templates = state.templates.filter(function (item) { return item.template_id !== data.template_id; }).concat([data]);
+      if (state.selectedShopId === shopId && state.formRevision === revision) {
+        state.templateId = data.template_id;
+        state.templateVersion = data.version;
+        onFormEdit();
+        setText(el["save-status"], "新模板已保存。点“保存并同步模板”后，本店才会选用。");
+      } else {
+        showAlert("新模板已保存，可从模板列表选用。当前页面的修改已保留。", "info");
+      }
+    } catch (err) {
+      if (isStale(epoch)) return;
+      if (err instanceof ApiError && err.status === 401) { handleError(err, "保存模板失败", epoch, state.token); return; }
+      const message = err instanceof ApiError && err.code === "template_name_exists"
+        ? "已有同名模板，请从列表选用，或换个名字。"
+        : "模板保存结果未确认，请刷新模板列表核对；当前话术仍保留。";
+      showAlert(message, "warn");
+    } finally {
+      if (!isStale(epoch)) { state.templateBusy = false; syncTemplateSelect(); }
+    }
   }
 
   function clearModelDisplay() {
@@ -1394,6 +1512,9 @@
   function clearAllVisibleData() {
     clearHandoff();
     state.shops = [];
+    state.templates = [];
+    state.templateBusy = false;
+    state.settingsBusy = false;
     state.selectedShopId = null;
     state.loadedSettings = null;
     state.remoteSettings = null;
@@ -2040,6 +2161,7 @@
 
   function applyShopsSnapshot(shops, options) {
     const opts = options || {};
+    if (Array.isArray(opts.templates)) state.templates = opts.templates.filter(validTemplate);
     const previousShopId = state.selectedShopId;
     state.shops = (Array.isArray(shops) ? shops : []).filter(function (shop) {
       return shop && typeof shop.shop_id === "string" && shop.shop_id;
@@ -2074,6 +2196,7 @@
     const shop = currentShop();
     renderLease(shop ? shop.lease : null);
     applyRemoteSettings(shop ? shop.settings : null);
+    syncTemplateSelect();
     renderShopConnections();
     return true;
   }
@@ -2104,7 +2227,7 @@
       state.shopUpdatedAt = new Date();
       setText(el["system-connection"], "正常");
       setText(el["system-checked"], formatTime(Math.floor(Date.now() / 1000)));
-      const hasShops = applyShopsSnapshot(shops, { resetForm: true });
+      const hasShops = applyShopsSnapshot(shops, { resetForm: true, templates: shopsData && shopsData.templates });
       if (!hasShops) {
         renderEvents([]);
         setText(el["events-meta"], "没有可查询的店铺，事件列表为空。");
@@ -2165,7 +2288,7 @@
       state.shopStatus = "ok";
       state.shopError = "";
       state.shopUpdatedAt = new Date();
-      applyShopsSnapshot(shops, {});
+      applyShopsSnapshot(shops, { templates: data && data.templates });
       applyHealthSummary(results[1]);
       setText(el["system-connection"], "正常");
       setText(el["system-checked"], formatTime(Math.floor(Date.now() / 1000)));
@@ -2771,6 +2894,7 @@
     if (event) {
       event.preventDefault();
     }
+    if (state.settingsBusy || state.templateBusy) return;
     const shop = currentShop();
     if (!shop) {
       showAlert("保存失败：还没有选择店铺。", "error");
@@ -2795,6 +2919,8 @@
       rules: checked.value,
       fallback: JSON.parse(JSON.stringify(state.fallback))
     };
+    payload.template_id = state.templateId || null;
+    if (state.templateId) payload.template_version = state.templateVersion;
     for (const policy of Object.values(payload.fallback)) {
       const error = policyError(policy);
       if (error) { showAlert("保存失败：" + error, "error");return; }
@@ -2805,6 +2931,7 @@
     const token = state.token;
     const shopId = shop.shop_id;
     const shopLabel = shopName(shop);
+    const revision = state.formRevision;
     const otherShop = function () {
       return state.selectedShopId !== shopId;
     };
@@ -2831,8 +2958,12 @@
         showAlert("店铺“" + shopLabel + "”的设置已保存。你已切换到其他店铺，因此没有在这里显示。", "info");
         return;
       }
+      if (state.formRevision !== revision && state.formDirty) {
+        setText(el["save-status"], "已保存提交时的设置，之后的修改仍保留，尚未保存。");
+        return;
+      }
       renderSettings(saved);
-      setText(el["save-status"], "已保存，服务器已确认。");
+      setText(el["save-status"], saved.template_id ? "已保存，共用模板的店铺已同步话术。" : "已保存，服务器已确认。");
       showAlert("");
     } catch (err) {
       if (isStale(epoch)) {
@@ -2856,6 +2987,10 @@
           ? "网络请求没有完成，服务器可能已经保存"
           : "服务器没有返回明确结果") + "。页面上的修改仍保留。）", "warn");
       } else {
+        if (err instanceof ApiError && err.code === "template_changed") {
+          setText(el["save-status"], "模板已有更新，请先点“撤销修改”载入最新话术，再修改保存。当前修改仍保留。");
+          return;
+        }
         setText(el["save-status"], "保存失败：" + err.message + "。页面上的修改仍保留。");
         showAlert("保存设置失败：" + errorText(err) + "（修改未保存，仍保留在页面上）", "error");
       }
@@ -3666,6 +3801,8 @@
     });
 
     el["shop-select"].addEventListener("change", onShopChange);
+    el["template-select"].addEventListener("change", onTemplateChange);
+    el["template-create"].addEventListener("click", createTemplate);
     el["settings-form"].addEventListener("submit", saveSettings);
     el["reset-btn"].addEventListener("click", resetSettings);
     el["generate-prompt"].addEventListener("click", generatePromptDraft);
