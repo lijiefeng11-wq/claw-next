@@ -699,6 +699,8 @@
     adapter.value = c?.adapter ?? "mock";
     const token = h("input", { type: "password", autocomplete: "off", placeholder: entry?.token_set ? "已保存（••••••••）；输入新口令可替换" : "粘贴本店客户端口令" }) as HTMLInputElement;
     const save = async () => {
+      // 自动登记的结果提示（成功或失败原因）；有它时不再用笼统的“已保存”覆盖。
+      let note: string | null = null;
       const ok = await call("shop:save", { shop: { shop_id: shopId.value.trim(), display_name: name.value, backend_url: url.value, platform_shop_id: pid.value.trim(), adapter: adapter.value } });
       if (!ok) return;
       const target = shopId.value.trim();
@@ -709,17 +711,15 @@
       } else if (!state.shops.find((s) => s.config.shop_id === target)?.token_set && isLocalBackend(url.value)) {
         // 本机后台、没填口令：自动在后台登记本店（#75）。失败只提示，店铺配置已保存；之后点“连接后台”会再核对。
         const r = await bridge.invoke("shop:pair", { shop_id: target });
-        if (r.ok) {
-          if (r.data) apply(r.data);
-          toast("已在后台登记本店。新店的自动回复默认关闭，请到后台管理页开启");
-        } else toast(`店铺已保存；${errorText(r.error)}`);
+        if (r.ok && r.data) apply(r.data);
+        note = r.ok ? "已保存，并已在后台登记本店。新店的自动回复默认关闭，请到后台管理页开启" : `店铺已保存；${errorText(r.error)}`;
       }
       selected = target;
       // 新加的拼多多店铺直接进入平台工作台。
       if (!entry) workspaceTab = adapter.value === "pdd" ? "platform" : "records";
       editing = null;
       skeletonFor = null;
-      toast("已保存");
+      toast(note ?? "已保存");
       render();
     };
     return h(

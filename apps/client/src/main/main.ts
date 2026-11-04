@@ -314,7 +314,12 @@ class Controller {
     if (s.stopping) await s.stopping;
     if (s.runtime) return;
     // 本机后台、尚无本店口令：先自动登记（#75），成功后照常连接。
-    if (!s.ephemeralToken && !this.secrets.has(shopId) && adminLocalTarget(config.backend_url)) await this.pair(shopId);
+    if (!s.ephemeralToken && !this.secrets.has(shopId) && adminLocalTarget(config.backend_url)) {
+      await this.pair(shopId);
+      // 登记期间可能有另一次“连接”先完成或正在停止：等待后重新核对，同一店铺只建一个运行实例。
+      if (s.stopping) await s.stopping;
+      if (s.runtime) return;
+    }
     const token = s.ephemeralToken ?? this.secrets.get(shopId);
     if (!token) throw new IpcValidationError("token_missing");
     const adapter = s.adapter ?? this.createAdapter(config);
