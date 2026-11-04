@@ -1946,15 +1946,16 @@ export class PddPageAdapter implements PlatformAdapter {
         }
         return "pdd_send_button_covered"; })()`).catch(() => "pdd_page_script_failed");
       // 只等按钮就绪，不固定停顿，也不重做填入或点击。到期前留出原有发送余量。
-      const readyUntil = Math.min(Date.now() + 1000, (request.deadline ?? Infinity) * 1000 - 1500);
+      const clickDeadline = (request.deadline ?? Infinity) * 1000 - 1500;
+      const readyUntil = Math.min(Date.now() + 1000, clickDeadline);
       let located = await locate();
       while (typeof located === "string" && ["pdd_input_missing", "pdd_send_button_hidden", "pdd_send_button_covered"].includes(located) && Date.now() < readyUntil) {
         await sleep(Math.min(50, readyUntil - Date.now()));
         if (this.window !== page || this.watchEpoch !== epoch) { located = "pdd_page_changed"; break; }
-        if (left() < 1.5) { located = "claim_expiring"; break; }
+        if (Date.now() >= clickDeadline) { located = "claim_expiring"; break; }
         located = await locate();
       }
-      if (typeof located === "string" && left() < 1.5) located = "claim_expiring";
+      if (typeof located === "string" && Date.now() >= clickDeadline) located = "claim_expiring";
       const win = this.window;
       if (typeof located === "string" || !win || win.isDestroyed()) {
         this.outgoing = null;
