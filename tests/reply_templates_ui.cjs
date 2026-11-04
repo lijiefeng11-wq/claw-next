@@ -102,5 +102,25 @@ let passed=0;
     window.prompt=()=>name;await h.createTemplate();assert.equal(calls.length,1);assert.equal(h.state.templateId,tpl.template_id);
     assert.equal(h.state.templates[0].name,name);passed++;
   }
+  {
+    let done;const {h,ids}=setup(()=>new Promise(r=>{done=r;}));
+    const original={...local,...shared,template_id:tpl.template_id,template_version:3};
+    h.renderSettings(original);ids['prompt-input'].value='这次提交的新话术';h.onFormEdit();const pending=h.saveSettings();
+    h.renderSettings(original); // Reset while the response is delayed.
+    done(response({...original,system_prompt:'这次提交的新话术',template_version:4,version:12}));await pending;
+    assert.equal(ids['prompt-input'].value,'这次提交的新话术');assert.equal(h.state.templateVersion,4);assert.equal(h.state.formDirty,false);passed++;
+  }
+  {
+    let done;const {h,ids,calls}=setup(()=>new Promise(r=>{done=r;}));
+    const original={...local,...shared,template_id:tpl.template_id,template_version:3};
+    h.renderSettings(original);ids['prompt-input'].value='服务器将保存的新话术';h.onFormEdit();const pending=h.saveSettings();
+    h.state.selectedShopId='b';h.renderSettings(local);h.state.selectedShopId='a';h.renderSettings(original);
+    ids['enabled-input'].checked=true;h.onFormEdit();
+    done(response({...original,system_prompt:'服务器将保存的新话术',template_version:4,version:12}));await pending;
+    assert.equal(ids['prompt-input'].value,shared.system_prompt);assert.equal(h.state.templateVersion,3);assert.equal(ids['enabled-input'].checked,true);
+    const second=h.saveSettings();assert.equal(calls[1].body.template_version,3);
+    done(response({error:{code:'template_changed',message:'template_changed'}},409));await second;
+    assert.match(ids['save-status'].textContent,/模板已有更新/);assert.equal(ids['prompt-input'].value,shared.system_prompt);passed++;
+  }
   console.log(JSON.stringify({passed,actualManagementCode:true,realHttp:false,platform:false}));
 })().catch(e=>{console.error(e);process.exitCode=1;});

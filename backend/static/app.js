@@ -2958,8 +2958,7 @@
         showAlert("店铺“" + shopLabel + "”的设置已保存。你已切换到其他店铺，因此没有在这里显示。", "info");
         return;
       }
-      if (state.formRevision !== revision) {
-        if (state.templateId === saved.template_id) state.templateVersion = saved.template_version;
+      if (state.formRevision !== revision && state.formDirty) {
         setText(el["save-status"], "已保存提交时的设置，之后的修改仍保留，尚未保存。");
         return;
       }
