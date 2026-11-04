@@ -6,14 +6,17 @@ window.setupAdminAssist = function (options) {
   const {state, request, onEdit, renderRules, newRuleId, nextUid, validateRules, handleError} = options;
   const ids = ["chat-file", "chat-import", "chat-clear", "chat-status", "chat-preview", "chat-pairs", "chat-confirm",
     "chat-import-progress", "chat-analysis-progress", "chat-shop-name", "chat-shop-select", "chat-analysis-plan",
-    "rules-generate", "rule-draft-status", "rule-candidates", "rules-apply", "merge-brief", "merge-generate",
+    "rules-generate", "rule-draft-status", "rule-candidates", "rules-apply", "rules-apply-status", "merge-brief", "merge-generate",
     "merge-status", "merge-preview", "merge-before", "merge-result", "merge-notes", "merge-confirm",
     "merge-confirm-label", "merge-apply", "prompt-input"];
   const el = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
   let seq = 0, importing = false, generating = false, merging = false;
   let pairs = [], draft = null, merge = null;
   let reader = null, imported = null, jobs = [], importContext = null;
-  const say = (id, text) => { el[id].textContent = text; };
+  const say = (id, text) => {
+    el[id].textContent = text;
+    if (id === "rule-draft-status" && el["rules-apply-status"]) el["rules-apply-status"].textContent = text;
+  };
   const norm = text => text.toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
   const ruleSnapshot = () => JSON.stringify(state.rules);
   const context = () => ({epoch: state.epoch, token: state.token, shop: state.selectedShopId, version: state.formVersion, seq});
@@ -186,7 +189,9 @@ window.setupAdminAssist = function (options) {
     el["chat-import"].disabled = locked || busy || !el["chat-file"].files.length;
     el["chat-confirm"].disabled = locked || busy || !pairs.length;
     el["rules-generate"].disabled = locked || busy || state.model.dirty || !pairs.length || !el["chat-confirm"].checked;
-    el["rules-apply"].disabled = locked || busy || !draft || !draft.items.some(i => i.choice.value !== "skip");
+    const selected = draft ? draft.items.filter(i => i.choice.value !== "skip").length : 0;
+    el["rules-apply"].disabled = locked || busy || !selected;
+    say("rules-apply", "把选中的草稿填入话术配置（" + selected + " 条）");
     el["merge-generate"].disabled = locked || busy || state.model.dirty || !el["merge-brief"].value.trim() || !el["prompt-input"].value.trim();
     el["merge-apply"].disabled = locked || busy || !merge || !el["merge-result"].value.trim() ||
       (merge.conflicts.length > 0 && !el["merge-confirm"].checked);
@@ -338,20 +343,20 @@ window.setupAdminAssist = function (options) {
     sync(); if (el["rules-apply"].disabled || !draft) return;
     const next = state.rules.map(r => ({...r})), targets = new Set(), additions = [];
     let changed = 0;
-    for (const item of draft.items) {
+    for (const [itemIndex, item] of draft.items.entries()) {
       const choice = item.choice.value; if (choice === "skip") continue;
       const value = {contains: item.contains.value.trim(), description: item.description.value.trim(), reply: item.reply.value.trim(), send: null, handling: null};
       if (!value.contains || value.contains.length > 500 || value.description.length > 500 || !value.reply || value.reply.length > 2000) {
-        say("rule-draft-status", "所选草稿有空白或过长内容，请修改后再填入。"); return;
+        say("rule-draft-status", "第 " + (itemIndex + 1) + " 条草稿有空白或过长内容，请修改后再填入。"); return;
       }
       if (choice === "add") {
         if (conflicts(item.candidate, value.contains).length || additions.some(k => k.includes(norm(value.contains)) || norm(value.contains).includes(k))) {
-          say("rule-draft-status", "所选草稿之间或与现有规则存在重叠，请改为替换或跳过。"); return;
+          say("rule-draft-status", "第 " + (itemIndex + 1) + " 条草稿与其他所选草稿或现有规则存在重叠，请改为替换或跳过。"); return;
         }
         additions.push(norm(value.contains)); next.push({...value, uid: nextUid(), id: newRuleId()});
       } else {
         const id = choice.slice(8), index = next.findIndex(r => r.id === id);
-        if (index < 0 || targets.has(id)) { say("rule-draft-status", "不能让两条草稿同时替换同一规则，请重新选择。"); return; }
+        if (index < 0 || targets.has(id)) { say("rule-draft-status", "第 " + (itemIndex + 1) + " 条草稿的替换目标无效或已被其他草稿选中，请重新选择。"); return; }
         targets.add(id); next[index] = {...next[index], ...value};
       }
       changed += 1;
