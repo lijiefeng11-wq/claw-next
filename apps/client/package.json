@@ -16,6 +16,7 @@
     "start": "npm run build && electron .",
     "smoke": "npm run build && node scripts/smoke.mjs",
     "e2e": "npm run build && node scripts/e2e.mjs",
+    "verify:selectors": "npm run build && node scripts/verify-selectors.mjs",
     "package": "node scripts/package.mjs",
     "package:mac": "node scripts/package.mjs --platform darwin --arch arm64",
     "package:mac-intel": "node scripts/package.mjs --platform darwin --arch x64",

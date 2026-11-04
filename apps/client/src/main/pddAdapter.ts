@@ -1915,7 +1915,6 @@ export class PddPageAdapter implements PlatformAdapter {
         ta.dispatchEvent(new Event("input", { bubbles: true }));
         return "filled"; })()`).catch(() => "pdd_page_script_failed");
       if (filled !== "filled") return notSent(filled);
-      await sleep(200);
       const left = () => (request.deadline ?? Infinity) - Date.now() / 1000;
       if (left() < 1.5) {
         await this.clearInput(text);
@@ -1925,7 +1924,7 @@ export class PddPageAdapter implements PlatformAdapter {
         this.outgoing = { to_uid: uid, text, matched: null, blocked: 0, resolve };
       });
       // CDP 使用页面视口 CSS 坐标，不依赖桌面焦点或页面缩放。
-      const located = await this.run<string | { x: number; y: number }>(`(() => { ${guard}
+      const locate = () => this.run<string | { x: number; y: number }>(`(() => { ${guard}
         if (ta.value !== ${JSON.stringify(text)}) return "pdd_input_mismatch";
         // 有些页面在输入后才显示按钮；可见性与唯一性放在填入文字之后检查。
         const buttons = [...box.querySelectorAll(${JSON.stringify(SEND_BTN)})].filter(btn => {
@@ -1946,6 +1945,16 @@ export class PddPageAdapter implements PlatformAdapter {
           if (document.elementFromPoint(x, y)?.closest(${JSON.stringify(SEND_BTN)}) === btn) return { x, y };
         }
         return "pdd_send_button_covered"; })()`).catch(() => "pdd_page_script_failed");
+      // 只等按钮就绪，不固定停顿，也不重做填入或点击。到期前留出原有发送余量。
+      const readyUntil = Math.min(Date.now() + 1000, (request.deadline ?? Infinity) * 1000 - 1500);
+      let located = await locate();
+      while (typeof located === "string" && ["pdd_input_missing", "pdd_send_button_hidden", "pdd_send_button_covered"].includes(located) && Date.now() < readyUntil) {
+        await sleep(Math.min(50, readyUntil - Date.now()));
+        if (this.window !== page || this.watchEpoch !== epoch) { located = "pdd_page_changed"; break; }
+        if (left() < 1.5) { located = "claim_expiring"; break; }
+        located = await locate();
+      }
+      if (typeof located === "string" && left() < 1.5) located = "claim_expiring";
       const win = this.window;
       if (typeof located === "string" || !win || win.isDestroyed()) {
         this.outgoing = null;

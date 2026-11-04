@@ -19,7 +19,7 @@ function html(s) {
     body{margin:0} .reply-box{position:absolute;left:120px;top:100px;width:300px}
     textarea{width:200px;height:60px} .reply-footer{position:relative}
     .send-btn{position:relative;display:inline-block;width:100px;height:40px;background:#69f}
-    ${s.css || ""}${s.revealButton ? '#composer .send-btn{visibility:hidden}' : ""}</style>
+    ${s.css || ""}${s.revealButton || s.revealDelay || s.neverReveal ? '#composer .send-btn{visibility:hidden}' : ""}</style>
     <ul><li class="chat-item"><div class="chat-item-box active" data-random="${s.otherBuyer ? "9002" : "9001"}-fixture"></div></li></ul>
     ${s.offscreenDuplicate ? '<div class="reply-box" style="left:-1200px"><div class="reply-footer">' + button + '</div></div>' : ""}
     <div class="reply-box" id="composer"><div class="reply-input"><textarea></textarea></div>
@@ -27,7 +27,9 @@ function html(s) {
       ${button}${s.ambiguous ? button : ""}</div></div>
     ${s.mask ? '<div style="position:fixed;inset:0;background:#fff;z-index:10"></div>' : ""}
     <script>window.clicks=0;${s.changeDraft ? 'document.querySelector("textarea").addEventListener("input",e=>{if(e.target.value)e.target.value="人工草稿"})' : ""}
-    ${s.revealButton ? 'document.querySelector("textarea").addEventListener("input",()=>{document.querySelector("#composer .send-btn").style.visibility="visible"})' : ""}</script>`;
+    ${s.revealButton ? 'document.querySelector("textarea").addEventListener("input",()=>{document.querySelector("#composer .send-btn").style.visibility="visible"})' : ""}
+    ${s.revealDelay ? `document.querySelector("textarea").addEventListener("input",()=>{setTimeout(()=>{document.querySelector("#composer .send-btn").style.visibility="visible"},${s.revealDelay})})` : ""}
+    ${s.switchWhileWaiting ? 'document.querySelector("textarea").addEventListener("input",()=>setTimeout(()=>document.querySelector(".chat-item-box").setAttribute("data-random","9002-fixture"),100))' : ""}</script>`;
 }
 
 app.whenReady().then(async () => {
@@ -38,6 +40,12 @@ app.whenReady().then(async () => {
   const scenarios = [
     { name: "normal", status: "confirmed" },
     { name: "button_appears_after_input", revealButton: true, status: "confirmed" },
+    { name: "button_appears_after_350ms", revealDelay: 350, status: "confirmed" },
+    { name: "button_appears_after_650ms", revealDelay: 650, status: "confirmed" },
+    { name: "waiting_never_retries_a_click", neverReveal: true, status: "not_sent", reason: "pdd_input_missing" },
+    { name: "conversation_changes_while_waiting", revealDelay: 650, switchWhileWaiting: true, status: "not_sent", reason: "pdd_conversation_changed" },
+    { name: "page_changes_while_waiting", revealDelay: 650, pageChanged: true, status: "not_sent", reason: "pdd_page_changed" },
+    { name: "deadline_expires_while_waiting", revealDelay: 650, shortDeadline: true, status: "not_sent", reason: "claim_expiring" },
     { name: "hidden_first_button", hiddenDuplicate: true, status: "confirmed" },
     { name: "offscreen_button_in_other_composer", offscreenDuplicate: true, status: "confirmed" },
     { name: "partly_clipped_button", css: "#composer{left:-80px}", status: "confirmed" },
@@ -75,7 +83,9 @@ app.whenReady().then(async () => {
         const run = adapter.run.bind(adapter);
         adapter.run = async code => { const value = await run(code); if (code.includes("pdd_send_button_covered")) adapter.watchEpoch++; return value; };
       }
-      const result = await adapter.send({ conversation_id: "9001", text: "虚构回复", attempt_id: "fixture-only", deadline: Date.now() / 1000 + 10, recheck: () => s.recheck || null });
+      const started = Date.now();
+      const result = await adapter.send({ conversation_id: "9001", text: "虚构回复", attempt_id: "fixture-only", deadline: Date.now() / 1000 + (s.shortDeadline ? 1.7 : 10), recheck: () => s.recheck || null });
+      const elapsed = Date.now() - started;
       const clicks = await wc.executeJavaScript("window.clicks");
       try {
         assert.equal(result.status, s.status);
@@ -85,7 +95,8 @@ app.whenReady().then(async () => {
         assert.equal(adapter.sending, false);
         assert.equal(adapter.outgoing, null);
         if (s.changeDraft) assert.equal(await wc.executeJavaScript('document.querySelector("textarea").value'), "人工草稿");
-        results.push({ name: s.name, ok: true, result, clicks, commands });
+        if (s.neverReveal) assert.ok(elapsed < 3000, "等待必须有界");
+        results.push({ name: s.name, ok: true, result, clicks, commands, elapsed });
       } catch (error) {
         results.push({ name: s.name, ok: false, result, clicks, commands, error: error.message });
       }
