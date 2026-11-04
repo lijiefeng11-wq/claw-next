@@ -289,10 +289,16 @@ class Controller {
 
   private async pairOnce(shopId: string): Promise<{ created: boolean }> {
     const config = this.require(shopId);
+    const origin = adminLocalTarget(config.backend_url);
     const r = await pairShop({
       shopId,
       displayName: config.display_name,
-      origin: adminLocalTarget(config.backend_url),
+      origin,
+      // 登记期间店铺被删除或改了后台地址：旧响应不写回口令。
+      stillCurrent: () => {
+        const now = this.configs.get(shopId);
+        return !!now && adminLocalTarget(now.backend_url) === origin;
+      },
       grant: (origin) => this.adminGrants.get(adminGrantKey(origin)),
       store: this.pairings,
       register: (origin, grant, body) => new BackendClient(origin, grant).registerShop(body),
@@ -319,6 +325,9 @@ class Controller {
       // 登记期间可能有另一次“连接”先完成或正在停止：等待后重新核对，同一店铺只建一个运行实例。
       if (s.stopping) await s.stopping;
       if (s.runtime) return;
+      // 登记期间店铺被删除或配置被改：不按旧配置启动。
+      const now = this.configs.get(shopId);
+      if (!now || now.backend_url !== config.backend_url) throw new IpcValidationError("pairing_changed");
     }
     const token = s.ephemeralToken ?? this.secrets.get(shopId);
     if (!token) throw new IpcValidationError("token_missing");
@@ -400,6 +409,7 @@ class Controller {
         return undefined;
       }
       case "shop:save": {
+        if (this.pairingInFlight.has(p.shop.shop_id)) throw new IpcValidationError("pairing_in_progress");
         const existing = this.configs.get(p.shop.shop_id);
         if (existing && (this.slots.get(p.shop.shop_id)?.runtime || this.slots.get(p.shop.shop_id)?.stopping)) throw new IpcValidationError("disconnect_first");
         if (existing && (existing.adapter !== p.shop.adapter || existing.platform_shop_id !== p.shop.platform_shop_id)) throw new IpcValidationError("shop_identity_immutable");
@@ -408,6 +418,7 @@ class Controller {
         return this.state();
       }
       case "shop:remove": {
+        if (this.pairingInFlight.has(p.shop_id)) throw new IpcValidationError("pairing_in_progress");
         const removed = this.require(p.shop_id);
         this.restoreTouched.add(p.shop_id);
         await this.disconnect(p.shop_id);
@@ -424,6 +435,7 @@ class Controller {
         return { ...this.state(), pairing: r };
       }
       case "shop:setToken":
+        if (this.pairingInFlight.has(p.shop_id)) throw new IpcValidationError("pairing_in_progress");
         this.require(p.shop_id);
         this.secrets.set(p.shop_id, p.token);
         return this.state();

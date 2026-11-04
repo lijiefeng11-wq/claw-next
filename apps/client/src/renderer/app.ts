@@ -37,6 +37,8 @@
     pairing_invalid_request: "登记内容不符合后台要求（店铺编号或名称格式），请检查店铺设置",
     pairing_uncertain: "登记结果不确定（超时或连不上后台）：后台可能已经登记，请稍后再点“连接后台”，客户端会用同一组凭据核对，不会重复登记",
     pairing_rejected: "后台拒绝了登记请求，请查看后台日志或在“高级”里手动填写口令",
+    pairing_changed: "登记期间本店被删除或改了后台地址，这次登记已作废、没有连接；请核对店铺设置后重新点“连接后台”",
+    pairing_in_progress: "正在后台登记本店，请稍候几秒再修改或删除",
     pairing_stored_invalid: "本机保存的登记凭据读不出来，为避免重复登记已停止：请在“高级”里手动填写口令，或删除本店后重新添加",
     invalid_token: "口令格式不正确（至少 32 位可打印字符，不含空格）",
     invalid_admin_grant: "授权码格式不正确（应为 43 位字母、数字、_ 或 -）",
@@ -84,6 +86,52 @@
     payload_not_object: "请求内容格式不对，请更新客户端或查看日志",
     unknown_channel: "这个操作当前版本不支持，请更新客户端",
   };
+
+  /**
+   * 连接后台。本店还没有口令、本店后台没有授权码，而其他已授权店铺只用一个后台时，先问用户是否改用那个后台再登记
+   * （用户明确同意才改本店后台地址；不碰已有口令的店铺；多个不同后台时不擅自选择）。
+   */
+  async function connectShop(entry: ShopEntry) {
+    const id = entry.config.shop_id;
+    const own = originOf(entry.config.backend_url);
+    const granted = grantedOrigins();
+    if (!entry.token_set && !entry.admin_grant_set && granted.length === 1 && granted[0] !== own) {
+      const target = granted[0];
+      if (confirm(`本店的后台地址（${entry.config.backend_url}）还没有快捷登录授权码，其他店铺用的后台是 ${target}。\n\n改用 ${target} 并在那里自动登记本店？`)) {
+        const c = entry.config;
+        const saved = await call("shop:save", { shop: { shop_id: id, display_name: c.display_name, backend_url: target, platform_shop_id: c.platform_shop_id, adapter: c.adapter } });
+        if (!saved) return;
+      }
+    }
+    if (await call("shop:connect", { shop_id: id })) {
+      if (!entry.token_set) toast("已连接；本店已在后台登记。新店的自动回复默认关闭，请到后台管理页开启");
+    }
+  }
+
+  /** 后台地址的 origin（解析失败为 null）。 */
+  function originOf(raw: string): string | null {
+    try {
+      return new URL(raw.trim()).origin;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 已填快捷登录授权码的本机后台（去重后的 origin）。 */
+  function grantedOrigins(): string[] {
+    return [...new Set(state.shops.filter((s) => s.admin_grant_set).map((s) => originOf(s.config.backend_url)).filter((o): o is string => !!o))];
+  }
+
+  /**
+   * 新增店铺的默认后台地址：当前选中店铺已授权就用它的后台；否则所有已授权店铺若只有一个后台就用它；
+   * 有多个不同后台时不擅自选择，退回默认地址由用户填写。
+   */
+  function defaultBackendUrl(): string {
+    const cur = current();
+    if (cur?.admin_grant_set) return originOf(cur.config.backend_url) ?? cur.config.backend_url;
+    const granted = grantedOrigins();
+    return granted.length === 1 ? granted[0] : "http://127.0.0.1:18880";
+  }
 
   /** 本机后台根地址（与主进程 adminLocalTarget 规则一致的简化判断，只决定界面是否尝试自动登记；最终由主进程校验）。 */
   function isLocalBackend(raw: string): boolean {
@@ -441,7 +489,7 @@
       { class: "toolbar" },
       entry.running
         ? h("button", { class: "btn secondary", type: "button", text: "断开后台", onclick: () => call("shop:disconnect", { shop_id: id }) })
-        : h("button", { class: "btn", type: "button", text: "连接后台", onclick: () => call("shop:connect", { shop_id: id }) }),
+        : h("button", { class: "btn", type: "button", text: "连接后台", onclick: () => connectShop(entry) }),
       entry.config.adapter === "pdd"
         ? h("button", { class: "btn", type: "button", text: "打开本店工作台 / 登录", onclick: () => { workspaceTab = "platform"; render(); void call("shop:login", { shop_id: id }); } })
         : entry.running && !v?.platform.logged_in
@@ -519,7 +567,7 @@
         : h("button", { class: "btn small", type: "button", text: "打开本店工作台 / 登录", onclick: () => call("shop:login", { shop_id: id }) }),
       entry.running
         ? h("button", { class: "btn secondary small", type: "button", text: "断开后台", onclick: () => call("shop:disconnect", { shop_id: id }) })
-        : h("button", { class: "btn small", type: "button", text: "连接后台", onclick: () => call("shop:connect", { shop_id: id }) }),
+        : h("button", { class: "btn small", type: "button", text: "连接后台", onclick: () => connectShop(entry) }),
       pageOpen || (entry.running && v?.platform.logged_in) ? h("button", { class: "btn danger small", type: "button", text: "退出平台登录", onclick: () => call("shop:logout", { shop_id: id }) }) : null,
     );
   }
@@ -693,7 +741,7 @@
     const c = entry?.config;
     const shopId = h("input", { type: "text", value: c?.shop_id ?? "", disabled: !!c, placeholder: "与后台配置一致，例如 demo-shop" }) as HTMLInputElement;
     const name = h("input", { type: "text", value: c?.display_name ?? "" }) as HTMLInputElement;
-    const url = h("input", { type: "url", value: c?.backend_url ?? "http://127.0.0.1:18880" }) as HTMLInputElement;
+    const url = h("input", { type: "url", value: c?.backend_url ?? defaultBackendUrl() }) as HTMLInputElement;
     const pid = h("input", { type: "text", value: c?.platform_shop_id ?? "", placeholder: "平台实际店铺编号，用于登录身份核验" }) as HTMLInputElement;
     const adapter = h("select", {}, h("option", { value: "mock", text: "模拟平台（虚构数据）" }), h("option", { value: "pdd", text: "拼多多（独立平台工作台）" })) as HTMLSelectElement;
     adapter.value = c?.adapter ?? "mock";

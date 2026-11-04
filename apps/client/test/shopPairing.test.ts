@@ -115,6 +115,32 @@ describe("登记流程 pairShop", () => {
     assert.equal(noGrant.sent.length, 0);
   });
 
+  test("登记等待期间本店被删除或改了后台地址：旧响应不写回口令", async () => {
+    let current = true;
+    const t = deps({ stillCurrent: () => current });
+    t.d.register = async (_o, _g, body) => {
+      t.sent.push(body);
+      current = false; // 等待响应期间用户删店/改地址
+      return { created: true };
+    };
+    assert.deepEqual(await pairShop(t.d), { ok: false, failure: "changed" });
+    assert.deepEqual(t.saved, [], "不写回本店口令");
+  });
+
+  test("授权码按 origin 取：已授权后台 A、本店后台 B 时不带 A 的授权去 B，零请求", async () => {
+    const A = "http://127.0.0.1:18880", B = "http://127.0.0.1:18881";
+    const asked: string[] = [];
+    const t = deps({ origin: B, grant: (o) => (asked.push(o), o === A ? GRANT : null) });
+    assert.deepEqual(await pairShop(t.d), { ok: false, failure: "no_grant" });
+    assert.deepEqual(asked, [B]);
+    assert.equal(t.sent.length, 0);
+    const ok = deps({ origin: A, grant: (o) => (o === A ? GRANT : null) });
+    const origins: string[] = [];
+    ok.d.register = async (o, g, body) => (origins.push(o), assert.equal(g, GRANT), ok.sent.push(body), { created: true });
+    assert.deepEqual(await pairShop(ok.d), { ok: true, created: true });
+    assert.deepEqual(origins, [A], "只向 A 登记");
+  });
+
   test("安全存储不可用：不发请求", async () => {
     const t = deps();
     t.d.store = { ...t.d.store, set: () => { throw new Error("unavailable"); } };
@@ -185,7 +211,7 @@ describe("BackendClient.registerShop", () => {
 
 test("每个登记失败类别在界面上都有中文说明", () => {
   const renderer = fs.readFileSync(path.join(__dirname, "../../src/renderer/app.ts"), "utf8");
-  const failures: PairingFailure[] = ["no_grant", "unsupported", "grant_invalid", "conflict", "reserved", "rate_limited", "local_only", "invalid_request", "uncertain", "rejected", "stored_invalid"];
+  const failures: PairingFailure[] = ["no_grant", "unsupported", "grant_invalid", "conflict", "reserved", "rate_limited", "local_only", "invalid_request", "uncertain", "rejected", "stored_invalid", "changed"];
   for (const f of failures) assert.match(renderer, new RegExp(`\\bpairing_${f}: "`), f);
   const preload = fs.readFileSync(path.join(__dirname, "../../src/preload/preload.ts"), "utf8");
   assert.ok(preload.includes('"shop:pair"'), "预加载脚本放行 shop:pair");

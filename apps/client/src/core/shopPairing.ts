@@ -62,7 +62,8 @@ export type PairingFailure =
   | "invalid_request"
   | "uncertain"
   | "rejected"
-  | "stored_invalid";
+  | "stored_invalid"
+  | "changed";
 
 export function pairingFailureOf(err: unknown): PairingFailure {
   const e = err as { status?: unknown; code?: unknown } | null;
@@ -97,6 +98,8 @@ export type PairingDeps = {
   store: { has(key: string): boolean; get(key: string): string | null; set(key: string, value: string): void };
   register: (origin: string, grant: string, body: { shop_id: string; name: string; client_id: string; client_token: string }) => Promise<{ created: boolean }>;
   saveToken: (token: string) => void;
+  /** 保存口令前核对：本店仍存在、后台 origin 未变；否则本次登记作废，不写回口令。 */
+  stillCurrent?: () => boolean;
   random?: (n: number) => Buffer;
 };
 
@@ -135,6 +138,7 @@ export async function pairShop(d: PairingDeps): Promise<PairingOutcome> {
   } catch (err) {
     return { ok: false, failure: pairingFailureOf(err) };
   }
+  if (d.stillCurrent && !d.stillCurrent()) return { ok: false, failure: "changed" };
   try {
     d.saveToken(pairing.client_token);
   } catch {
