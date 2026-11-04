@@ -979,7 +979,6 @@ export class ShopRuntime {
     if (!this.leaseValid(ev.generation)) return "lease_invalid";
     if (conv.revision !== ev.context_revision) return "superseded";
     if (conv.messages[conv.messages.length - 1]?.id !== ev.message_id) return "superseded";
-    if (!ev.history_complete) return "history_incomplete";
     if (!ev.text_only) return "unsupported_content";
     const decision = ev.snapshot?.decision;
     if (!decision || ev.snapshot?.state !== "ready") return "not_ready";
