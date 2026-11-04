@@ -585,7 +585,7 @@
             onclick: () => call("conv:takeover", { shop_id: entry.config.shop_id, conversation_id: conv.conversation_id, on: !conv.takeover }),
           }),
         ),
-        h("div", { class: "messages" }, ...conv.messages.map(messageNode)),
+        h("div", { class: "messages", "data-conv": conv.conversation_id }, ...conv.messages.map(messageNode)),
       );
     } else view.append(h("div", { class: "empty", text: "选择左侧对话查看" }));
     return h("div", { class: "workspace" }, list, view);
@@ -803,6 +803,8 @@
       );
       return;
     }
+    // 状态每次推送都会重绘记录页：先记下对话列表、消息区和整页的滚动位置，重绘后恢复，避免拉到下面又被弹回顶部。
+    const scroll = captureScroll(dyn, detail);
     dyn?.replaceChildren(
       renderBanners(entry),
       renderStatus(entry),
@@ -811,6 +813,34 @@
       renderWorkspace(entry),
       entry.view ? h("div", { class: "hint", text: `实例 ${entry.view.instance_id} · 平台会话 ${entry.view.session_id ?? "无"} · 已忽略重复推送 ${entry.view.duplicates} 次` }) : "",
     );
+    restoreScroll(dyn, detail, scroll);
+  }
+
+  type ScrollState = { detail: number; list: number | null; msgs: { conv: string | null; top: number; atBottom: boolean } | null };
+
+  function captureScroll(dyn: HTMLElement | null, detail: HTMLElement): ScrollState {
+    const list = dyn?.querySelector<HTMLElement>(".conv-list") ?? null;
+    const msgs = dyn?.querySelector<HTMLElement>(".messages") ?? null;
+    return {
+      detail: detail.scrollTop,
+      list: list ? list.scrollTop : null,
+      msgs: msgs ? { conv: msgs.getAttribute("data-conv"), top: msgs.scrollTop, atBottom: msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 40 } : null,
+    };
+  }
+
+  /**
+   * 恢复滚动：对话列表与整页保持原位置；消息区在同一对话、且用户没停在最底部时保持原位置，
+   * 停在最底部（或刚切到另一对话）时跟到最新一条。
+   */
+  function restoreScroll(dyn: HTMLElement | null, detail: HTMLElement, st: ScrollState) {
+    const list = dyn?.querySelector<HTMLElement>(".conv-list");
+    if (list && st.list !== null) list.scrollTop = st.list;
+    const msgs = dyn?.querySelector<HTMLElement>(".messages");
+    if (msgs) {
+      const same = st.msgs !== null && st.msgs.conv === msgs.getAttribute("data-conv");
+      msgs.scrollTop = same && !st.msgs!.atBottom ? st.msgs!.top : msgs.scrollHeight;
+    }
+    detail.scrollTop = st.detail;
   }
 
   function apply(next: AppState) {

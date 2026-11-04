@@ -179,6 +179,38 @@ try {
     await card("店铺身份").getByText("已核验").waitFor();
     await detail.locator(".banner.error", { hasText: "疑似串店" }).waitFor({ state: "detached" });
   });
+  await step("收发记录：状态刷新后对话列表与消息区保持滚动位置；停在最底部时跟到最新消息", async () => {
+    // 把两个区域限高，让少量虚构消息也能滚动；样式挂在 head 上，重绘不会去掉。
+    // 页面 CSP 不允许内联样式：用 CSSOM 往已有样式表里加规则（只影响本次测试窗口）。
+    await page.evaluate(() => {
+      const sheet = document.styleSheets[0];
+      sheet.insertRule(".conv-list{max-height:80px!important}", sheet.cssRules.length);
+      sheet.insertRule(".messages{max-height:80px!important;flex:none!important}", sheet.cssRules.length);
+    });
+    for (let i = 0; i < 6; i++) await simSend("buyer-scroll-001", `滚动测试第 ${i} 条，营业时间？`);
+    await page.locator(".conv-item", { hasText: "buyer-scroll-001" }).click();
+    await page.locator(".messages[data-conv='buyer-scroll-001']").getByText("滚动测试第 5 条").waitFor();
+    // 等 6 条都拿到后台判断、内容高度不再变化，再记滚动位置。
+    await page.waitForFunction(() => document.querySelectorAll(".messages[data-conv='buyer-scroll-001'] .decision").length >= 6, null, { timeout: 15_000 });
+    await page.waitForTimeout(500);
+    const set = (sel, top) => page.evaluate(([q, t]) => { const e = document.querySelector(q); e.scrollTop = t; return e.scrollTop; }, [sel, top]);
+    const get = (sel) => page.evaluate((q) => document.querySelector(q)?.scrollTop ?? -1, sel);
+    const dims = () => page.evaluate(() => { const e = document.querySelector(".messages"); return { sh: e.scrollHeight, ch: e.clientHeight, top: e.scrollTop, conv: e.getAttribute("data-conv") }; });
+    const listTop = await set(".conv-list", 30);
+    const msgTop = await set(".messages", 25);
+    if (listTop <= 0 || msgTop <= 0) throw new Error(`区域不能滚动：list=${listTop} msgs=${msgTop}`);
+    // 等几次普通状态推送（心跳等）触发重绘：这正是“拉到下面又被弹回去”的场景。
+    await page.waitForTimeout(6000);
+    const [l2, m2] = [await get(".conv-list"), await get(".messages")];
+    if (Math.abs(l2 - listTop) > 1 || Math.abs(m2 - msgTop) > 1) throw new Error(`重绘后滚动位置变了：list ${listTop}→${l2} msgs ${msgTop}→${m2} ${JSON.stringify(await dims())}`);
+    // 停在最底部：本对话来新消息后仍在最底部。
+    await page.evaluate(() => { const e = document.querySelector(".messages"); e.scrollTop = e.scrollHeight; });
+    await simSend("buyer-scroll-001", "滚动测试最新一条");
+    await page.locator(".messages").getByText("滚动测试最新一条").waitFor();
+    await page.waitForTimeout(300);
+    const bottom = await page.evaluate(() => { const e = document.querySelector(".messages"); return e.scrollHeight - e.scrollTop - e.clientHeight; });
+    if (bottom > 2) throw new Error(`停在底部时没跟到最新消息：距底 ${bottom}`);
+  });
   await step("客户端设置：开发运行时两个勾选项不可用，并说明仅打包版可用；检查更新只显示说明", async () => {
     await page.locator("#app-settings summary").click();
     await page.locator("#app-settings > details[open]").waitFor();
