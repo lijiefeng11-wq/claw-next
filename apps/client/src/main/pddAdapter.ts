@@ -2771,6 +2771,7 @@ export class PddPageAdapter implements PlatformAdapter {
     const active = () => Promise.race([this.freshActive(epoch), sleep(500).then(() => null)]);
     this.sending = true;
     let opened = false;
+    let targets: TransferTarget[] = [];
     try {
       if ((await active()) !== conversationId || !valid()) return [];
       const cached = [...this.formalTransferTargets].filter(([, t]) => t.page === page && t.epoch === epoch && t.shop === shop && Date.now() - t.at < 30000);
@@ -2791,20 +2792,56 @@ export class PddPageAdapter implements PlatformAdapter {
       const names = rows.map(row => row.cells[0]);
       if (names.some(n => typeof n !== "string" || !n || n !== n.trim() || n.length > 40) || new Set(names).size !== names.length || rows.some(row => !row.button)) return [];
       const at = Date.now();
-      for (const [id, target] of this.formalTransferTargets) if (at - target.at > 30000 || target.epoch !== epoch) this.formalTransferTargets.delete(id);
-      return names.map(name => {
+      targets = names.map(name => {
         const id = crypto.createHash("sha256").update(JSON.stringify([this.shopId, shop, epoch, name])).digest("hex").slice(0, 32);
-        this.formalTransferTargets.set(id, { account: name, page, epoch, shop, at });
         return { target_id: id, name, observed_at: at / 1000 };
       });
     } finally {
+      let cleaning = true;
+      let timer: NodeJS.Timeout | undefined;
       try {
-        if (opened && this.window === page && !page.isDestroyed() && this.watchEpoch === epoch) {
-          const close = await Promise.race([this.run<Point | string>(TRANSFER_DIALOG_CLOSE), sleep(500).then(() => "missing")]).catch(() => "missing");
-          if (typeof close !== "string") await this.nativeClick(close, page, epoch);
+        if (opened) {
+          const owns = () => cleaning && this.window === page && !page.isDestroyed() && this.watchEpoch === epoch &&
+            this.tracker.status(true).logged_in && this.tracker.status(true).identity?.platform_shop_id === shop;
+          const same = async () => owns() && (await Promise.race([active(), sleep(150).then(() => null)])) === conversationId && owns();
+          const left = () => Promise.race([this.run<{ dialogs: number; popovers: number } | string>(TRANSFER_LEFTOVERS), sleep(150).then(() => "unavailable" as const)]);
+          const cleanup = async () => {
+            if (!await same()) return false;
+            const close = await Promise.race([this.run<Point | string>(TRANSFER_DIALOG_CLOSE), sleep(150).then(() => "missing")]).catch(() => "missing");
+            if (typeof close !== "string" && await same()) await dispatchPageClick(page.webContents, close, () => owns() ? null : "page_changed");
+            let remaining = await left();
+            if (typeof remaining !== "string" && remaining.dialogs && !remaining.popovers && await same()) {
+              // Some platform dialogs hide the header close button. Cancel this discovery's dialog only.
+              const key = async (type: "keyDown" | "keyUp") => {
+                if (!await same()) return false;
+                return Promise.race([
+                  Promise.resolve().then(() => owns() ? page.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type, key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }).then(() => true) : false).catch(() => false),
+                  sleep(250).then(() => false),
+                ]);
+              };
+              if (await key("keyDown")) await key("keyUp");
+              if (!owns()) return false;
+              await sleep(50);
+              remaining = await left();
+            }
+            return await same() && typeof remaining !== "string" && remaining.dialogs === 0 && remaining.popovers === 0;
+          };
+          const closed = await Promise.race([cleanup().catch(() => false), new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), 900); })]);
+          if (!closed) {
+            targets = [];
+            console.log(`[${this.shopId}] transfer target discovery cleanup=unconfirmed`);
+          }
         }
-      } finally { this.sending = false; }
+      } finally {
+        cleaning = false;
+        if (timer) clearTimeout(timer);
+        this.sending = false;
+      }
     }
+    const now = Date.now();
+    for (const [id, target] of this.formalTransferTargets) if (now - target.at > 30000 || target.epoch !== epoch) this.formalTransferTargets.delete(id);
+    for (const target of targets) this.formalTransferTargets.set(target.target_id, { account: target.name, page, epoch, shop, at: target.observed_at * 1000 });
+    return targets;
   }
 
   async transferConversation(request: TransferRequest): Promise<TransferResult> {
