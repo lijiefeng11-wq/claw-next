@@ -52,6 +52,12 @@ test("read-only target discovery is page-bound, does not click a target, and rel
   assert.equal(targets.length, 1); assert.equal(targets[0].name, "fictional-main"); assert.match(targets[0].target_id, /^[0-9a-f]{32}$/);
   assert.deepEqual(h.clicks, ["open", "close"]); assert.equal(h.a.sending, false);
 });
+
+test("ordinary messages reuse the still-fresh account list without reopening a dialog or renewing its timestamp", async () => {
+  const h = harness(), first = await h.a.readTransferTargets("9001", 1800); h.clicks.length = 0;
+  const second = await h.a.readTransferTargets("9001", 1800);
+  assert.deepEqual(second, first); assert.deepEqual(h.clicks, []); assert.equal(h.a.sending, false);
+});
 for (const [label, opts] of [["duplicate accounts", { names: ["same", "same"] }], ["oversize account", { names: ["x".repeat(41)] }], ["page change", { changeOnRows: true }]] as const) {
   test(`${label}: no guessed target and no action`, async () => { const h = harness(opts); const targets = await h.a.readTransferTargets("9001", 1000); assert.deepEqual(targets, []); assert(!h.clicks.includes("row")); assert.equal(h.a.sending, false); });
 }

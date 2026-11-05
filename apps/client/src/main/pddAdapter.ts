@@ -2782,6 +2782,8 @@ export class PddPageAdapter implements PlatformAdapter {
     let opened = false;
     try {
       if ((await active()) !== conversationId || !valid()) return [];
+      const cached = [...this.formalTransferTargets].filter(([, t]) => t.page === page && t.epoch === epoch && t.shop === shop && Date.now() - t.at < 30000);
+      if (cached.length) return cached.map(([target_id, t]) => ({ target_id, name: t.account, observed_at: t.at / 1000 }));
       const left = await read<{ dialogs: number; popovers: number } | string>(TRANSFER_LEFTOVERS).catch(() => "script_failed");
       if (typeof left === "string" || left.dialogs || left.popovers || !valid()) return [];
       const pt = await read<Point | string>(textTargetScript("转移会话", ".chat-list, li.chat-item, .el-dialog")).catch(() => "script_failed");
