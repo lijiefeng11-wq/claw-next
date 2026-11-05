@@ -184,6 +184,7 @@ export class ShopRuntime {
   private started = false;
   private timer: NodeJS.Timeout | null = null;
   private readonly sendingConversations = new Set<string>();
+  private deliveryTail: Promise<void> = Promise.resolve();
   /** unknown 自动核对的定时器；停止时清除。 */
   private readonly checkTimers = new Set<NodeJS.Timeout>();
   /** 本次运行中按原因累计的 unknown 次数，只用于日志统计。 */
@@ -1153,6 +1154,16 @@ export class ShopRuntime {
   }
 
   private async considerSend(ev: EventRecord) {
+    const previous = this.deliveryTail;
+    let release!: () => void;
+    this.deliveryTail = new Promise<void>(resolve => { release = resolve; });
+    await previous;
+    try { await this.considerSendNow(ev); }
+    finally { release(); }
+  }
+
+  /** 同一店铺只有一个平台页面；排队结束后才重新核验并申请许可。 */
+  private async considerSendNow(ev: EventRecord) {
     const action = ev.snapshot?.decision?.action;
     if (action !== "reply" && action !== "send_item" && action !== "mark" && action !== "transfer") return;
     const blocked = this.sendingConversations.has(ev.conversation_id) ? "conversation_busy" : this.sendBlocker(ev);

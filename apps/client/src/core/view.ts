@@ -109,6 +109,9 @@ export const REASONS: Record<string, string> = {
   // 平台页面操作与回执（发送、附加发送、点击）：只说明原因，结果由界面标签表示，unknown 永不重发。
   pdd_send_busy: "平台页面正在处理另一项发送",
   pdd_send_button_covered: "平台页面的发送按钮被遮挡",
+  pdd_send_button_not_ready: "发送按钮暂不可点击，请检查页面遮挡或布局",
+  pdd_send_control_unverified: "未能唯一识别发送按钮，本条未发送",
+  pdd_playwright_click_uncertain: "已尝试点击发送，结果待核查，本条不会重发",
   pdd_send_button_hidden: "平台页面的发送按钮不可见",
   pdd_send_blocked_mismatch: "页面发出的发送请求与本次不符，拦截结果未确认",
   pdd_send_request_not_observed: "点击后没有看到页面发出发送请求",

@@ -115,3 +115,16 @@ test("实际生成的监听脚本支持列表替换，忽略无关变化，只�
   callback([{ target: node(true, false), addedNodes: [], removedNodes: [] }]);
   assert.deepEqual(signals, ["changed", "changed"]);
 });
+
+
+test("Playwright子通道的上下文和绑定通知不污染原收消息监听", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const h = harness(); t.after(() => h.watcher.close()); await settle();
+  const name = h.calls.find(c => c.method === "Runtime.addBinding")!.params.name;
+  h.dbg.emit("message", {}, "Runtime.executionContextsCleared", {}, "playwright-child");
+  h.dbg.emit("message", {}, "Runtime.bindingCalled", { executionContextId: 11, name, payload: "changed" }, "playwright-child");
+  t.mock.timers.tick(50); await settle();
+  assert.equal(h.scans(), 0);
+  h.notify(); t.mock.timers.tick(50); await settle();
+  assert.equal(h.scans(), 1, "原通道通知仍有效且只扫描一次");
+});

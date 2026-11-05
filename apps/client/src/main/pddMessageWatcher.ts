@@ -106,7 +106,8 @@ export class PddMessageWatcher {
     this.scheduler.request();
   };
 
-  private readonly message = (_event: unknown, method: string, params: any) => {
+  private readonly message = (_event: unknown, method: string, params: any, sessionId?: string) => {
+    if (sessionId) return;
     if (method === "Runtime.executionContextsCleared" || (method === "Runtime.executionContextDestroyed" && params.executionContextId === this.context)) {
       this.invalidate();
     } else if (method === "Runtime.bindingCalled" && !this.closed && this.context !== null && params.name === this.binding && params.executionContextId === this.context && params.payload === "changed") {

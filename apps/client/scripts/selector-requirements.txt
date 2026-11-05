@@ -1,4 +1,4 @@
-# Developer-only parser; no browser/fetcher extras and no backend/runtime dependency.
+# Local parser bundled with the client; no browser/fetcher extras or backend dependency.
 scrapling==0.5
 cssselect==1.6.0
 lxml==6.1.3

@@ -1,4 +1,4 @@
-// Playwright 检查虚构页面的可点击性；Scrapling 离线对照当前生产选择器。
+// 旧选择器的开发补充检查；真实发送流程另由 test-text-send-location.cjs 验证。
 // 不连接运行中的客户端，不接受网址/用户目录参数，不把静态匹配当买家身份或发送回执。
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -66,7 +66,7 @@ try {
   assert.equal(swept.dismissed.length, 1);
   assert.equal(await page.getByRole("button", { name: "我知道了" }).count(), 0);
   checks.push("actual popup script: harmless fictional guide closes");
-  console.log(JSON.stringify({ ok: true, playwright: true, scrapling: true, fictional_only: true, production_driver_replaced: false, checks }));
+  console.log(JSON.stringify({ ok: true, playwright: true, scrapling: true, fictional_only: true, development_check_only: true, checks }));
 } finally {
   try { if (electron) await electron.close(); }
   finally { fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
