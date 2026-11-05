@@ -17,6 +17,7 @@ function harness(opts: { names?: readonly string[]; changeOnRows?: boolean; hang
   a.settleTransfer = async () => "unknown:left_list_observed";
   a.run = async (script: string) => {
     scripts.push(script);
+    if (script.includes('"转移失败"')) return null;
     if (script.includes("const popovers")) return { dialogs: 0, popovers: 0 };
     if (script.includes("el-dialog__headerbtn")) return CLOSE;
     if (script.includes("return { cells")) {

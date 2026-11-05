@@ -1011,9 +1011,9 @@
       account.addEventListener("input", function () { policy.account = account.value;edited(); });
       field("接收人账号名", account);
       const allow = document.createElement("input");allow.type = "checkbox";allow.className = "policy-unmark";allow.checked = policy.allow_unmark === true;
-      allow.addEventListener("change", function () { policy.allow_unmark = allow.checked;allow.disabled = state.formDisabled || !allow.checked;edited(); });
-      field("取消收藏后转接（本版本暂不支持，可关闭旧策略）", allow);
-      allow.disabled = state.formDisabled || !allow.checked;
+      allow.addEventListener("change", function () { policy.allow_unmark = allow.checked;edited(); });
+      field("已收藏时，取消收藏并转人工", allow);
+      allow.disabled = state.formDisabled;
     }
     return group;
   }
@@ -1382,7 +1382,7 @@
     });
     ["fallback-controls", "rules-list"].forEach(function (id) {
       el[id].querySelectorAll(".policy-unmark").forEach(function (node) {
-        node.disabled = disabled || !node.checked;
+        node.disabled = disabled;
       });
     });
     syncTemplateSelect();

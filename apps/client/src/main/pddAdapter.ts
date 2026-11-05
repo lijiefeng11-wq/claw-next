@@ -737,6 +737,11 @@ export function starOptionsScript(check?: { x: number; y: number; color: StarCol
 
 type Point = { x: number; y: number };
 type TransferRow = { cells: string[]; button: Point | null };
+type TransferHooks = {
+  check: () => string | null;
+  click: (pt: Point, action: boolean, beforePress?: () => void) => Promise<PageClickResult>;
+  unmark: (pt: Point) => Promise<PageClickResult>;
+};
 
 /** 页面内可见、文字恰为 text 的最深层元素中心坐标，排除位于 exclude 内的元素。不唯一或缺失时返回原因。 */
 function textTargetScript(text: string, exclude: string): string {
@@ -864,6 +869,37 @@ const TRANSFER_FAIL_DIALOG = `(() => {
   const at = (s) => { const b = leaf(box, s); if (b.length !== 1) return null; const r = b[0].getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; };
   return { text: t(box).replace(/\\s+/g, " ").slice(0, 80), unfav: at("取消收藏并转移"), keep: at("暂不转移收藏会话") };
 })()`;
+
+/** 正式转接只认唯一新出现的收藏拒绝框；买家、两个固定按钮及点击命中在同一快照核对。 */
+export function transferUnmarkScript(buyer: string, check?: Point, keepFavorite = false): string {
+  return `(() => {
+    const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
+    const t = (e) => (e.innerText ?? "").trim();
+    const leaf = (root, text) => [...root.querySelectorAll("*")].filter(e => vis(e) && t(e) === text && ![...e.children].some(c => t(c) === text));
+    const titles = leaf(document.body, "转移失败");
+    if (!titles.length) return null;
+    if (titles.length !== 1) return "failure_not_unique";
+    const keys = [...document.querySelectorAll(${JSON.stringify(ITEM)})].filter(e => vis(e) && e.classList.contains("active")).map(e => e.getAttribute("data-random") || "");
+    const buyers = new Set(keys.map(k => /^([0-9]{1,32})-/.exec(k)?.[1] ?? null));
+    if (buyers.size !== 1 || !buyers.has(${JSON.stringify(buyer)})) return "conversation_mismatch";
+    let box = titles[0].parentElement;
+    for (let i = 0; i < 8 && box && box !== document.body; i++, box = box.parentElement) {
+      const unfav = leaf(box, "取消收藏并转移"), keep = leaf(box, "暂不转移收藏会话");
+      if (!unfav.length || !keep.length) continue;
+      if (unfav.length !== 1 || keep.length !== 1 || !t(box).includes("已收藏")) return "failure_invalid";
+      const button = ${keepFavorite ? 'keep[0]' : 'unfav[0]'};
+      if (button.closest('button[disabled], [aria-disabled="true"]')) return "unmark_disabled";
+      const r = button.getBoundingClientRect();
+      const x = Math.round(r.left + r.width / 2), y = Math.round(r.top + r.height / 2);
+      const point = ${JSON.stringify(check ?? null)} ?? { x, y };
+      const hit = document.elementFromPoint(point.x, point.y);
+      if (!hit || !(button === hit || button.contains(hit))) return "unmark_covered";
+      const at = (e) => { const r = e.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; };
+      return ${check ? '"ok"' : '{ text: "已收藏", unfav: at(unfav[0]), keep: at(keep[0]) }'};
+    }
+    return "failure_unrecognized";
+  })()`;
+}
 
 const TRANSFER_DIALOG_CLOSE = `(() => {
   const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
@@ -2818,27 +2854,29 @@ export class PddPageAdapter implements PlatformAdapter {
 
   async transferConversation(request: TransferRequest): Promise<TransferResult> {
     const target = this.formalTransferTargets.get(request.target_id);
-    if (!target || request.allow_unmark || Date.now() - target.at > 30000) return { status: "not_sent", reason: "transfer_target_unknown" };
+    if (!target || (request.allow_unmark && !request.before_unmark) || Date.now() - target.at > 30000) return { status: "not_sent", reason: "transfer_target_unknown" };
     const { page, epoch, shop, account } = target;
     if (this.sending || this.outgoing || this.markWatch) return { status: "not_sent", reason: "pdd_send_busy" };
     const watch = newMarkWatch(request.conversation_id, 2, epoch);
     let started = false;
     const checkPage = () => {
-      if (Date.now() - target.at > 30000) return "transfer_target_expired";
-      if (this.window !== page || page.isDestroyed() || this.watchEpoch !== epoch) return "conv_state_changed";
+      if (watch.invalid) return watch.invalid;
+      if (Date.now() - target.at > 30000) return watch.invalid = "transfer_target_expired";
+      if (this.window !== page || page.isDestroyed() || this.watchEpoch !== epoch) return watch.invalid = "conv_state_changed";
       const status = this.tracker.status(true);
-      if (!status.logged_in || status.identity?.platform_shop_id !== shop) return "platform_changed";
+      if (!status.logged_in || status.identity?.platform_shop_id !== shop) return watch.invalid = "platform_changed";
       return watch.foreign || watch.before ? "conv_state_changed" : null;
     };
     const check = () => checkPage() ?? (Date.now() / 1000 >= request.deadline ? "claim_expiring" : null) ?? request.recheck();
     this.markWatch = watch; this.markPage = page; this.markCheck = check;
-    const click = async (pt: Point, action: boolean) => {
+    const click = async (pt: Point, action: boolean, beforePress?: () => void) => {
       watch.expected = ["mouseDown", "mouseUp"];
-      try { return await dispatchPageClick(page.webContents, pt, action ? check : checkPage, action ? () => { started = true; } : undefined); }
+      try { return await dispatchPageClick(page.webContents, pt, action ? check : checkPage, action ? () => { beforePress?.(); started = true; } : undefined); }
       finally { watch.expected = []; }
     };
     try {
-      const result = await this.performTransfer(account, true, this.convTokenFor(request.conversation_id), request.deadline * 1000, false, { check, click });
+      const result = await this.performTransfer(account, true, this.convTokenFor(request.conversation_id), request.deadline * 1000, request.allow_unmark,
+        { check, click, unmark: pt => click(pt, true, request.before_unmark) });
       // Without positive request-origin binding, all attempted transfers remain unknown.
       return started ? { status: "unknown", reason: "transfer_binding_unproven", page_observed: result.includes("left_list_observed") ? "left_list" : "unknown" } : { status: "not_sent", reason: "not_started" };
     } catch {
@@ -2860,7 +2898,7 @@ export class PddPageAdapter implements PlatformAdapter {
   }
 
   private async performTransfer(target: string, confirm: boolean, conv: string, exp: number, allowUnfavorite: boolean,
-    hooks?: { check: () => string | null; click: (pt: Point, action: boolean) => Promise<PageClickResult> }): Promise<string> {
+    hooks?: TransferHooks): Promise<string> {
     if (!this.window || this.window.isDestroyed() || !this.tracker.status(true).logged_in) return "not_executed:not_ready";
     if (this.sending || this.outgoing || this.popupSweep) return "not_executed:busy";
     if (!target.trim()) return "not_executed:no_target";
@@ -2968,6 +3006,7 @@ export class PddPageAdapter implements PlatformAdapter {
       // 这次扫描读到的买家须与请求携带的对话令牌一致，之后的页面快照按这个买家核对。
       if (this.convTokenFor(uid) !== conv) return "not_executed:conversation_mismatch";
       buyer = uid;
+      if (hooks && await read(transferUnmarkScript(uid)).catch(() => "script_failed") !== null) return "not_executed:leftover_failure";
       // 上次留下的对话框或确认气泡还开着时，点“转移会话”可能只是关掉气泡；不在这种状态下开始。
       const left = await read<{ dialogs: number; popovers: number } | string>(TRANSFER_LEFTOVERS).catch(() => "script_failed");
       if (typeof left === "string" || left.dialogs || left.popovers) {
@@ -3050,7 +3089,7 @@ export class PddPageAdapter implements PlatformAdapter {
       }
       opened = false;
       popoverMaybe = false;
-      return await this.settleTransfer(uid, page, epoch, same, gate, allowUnfavorite, log, hooks ? read : undefined);
+      return await this.settleTransfer(uid, page, epoch, same, gate, allowUnfavorite, log, hooks ? read : undefined, hooks);
     } finally {
       // 收尾出错不得让本适配器一直处于忙碌：无论收尾结果如何都释放 sending。
       try {
@@ -3080,11 +3119,16 @@ export class PddPageAdapter implements PlatformAdapter {
    * （没有平台回执与目标关联）；其他失败对话框记为页面失败。不重试。
    */
   private async settleTransfer(uid: string, page: PlatformPage, epoch: number, same: () => Promise<boolean>, gate: () => Promise<string | null>, allowUnfavorite: boolean, log: (rec: Record<string, unknown>) => void,
-    read?: <T>(script: string) => Promise<T>): Promise<string> {
+    read?: <T>(script: string) => Promise<T>, hooks?: TransferHooks): Promise<string> {
     let unfavorited = false;
     for (let i = 0; i < 30; i++) {
       await sleep(300);
-      const fail = await (read ?? this.run.bind(this))<{ text: string; unfav: Point | null; keep: Point | null } | null>(TRANSFER_FAIL_DIALOG).catch(() => null);
+      if (hooks) {
+        const blocked = hooks.check();
+        if (blocked) return `unknown:${blocked}`;
+      }
+      const fail = await (read ?? this.run.bind(this))<{ text: string; unfav: Point | null; keep: Point | null } | string | null>(hooks ? transferUnmarkScript(uid, undefined, !allowUnfavorite) : TRANSFER_FAIL_DIALOG).catch(() => "script_failed");
+      if (typeof fail === "string") return `unknown:${fail}`;
       if (fail && !unfavorited) {
         if (!fail.text.includes("已收藏") || !fail.unfav) {
           log({ phase: "page_failed", kind: "other" });
@@ -3092,7 +3136,12 @@ export class PddPageAdapter implements PlatformAdapter {
         }
         if (!allowUnfavorite) {
           log({ phase: "needs_confirmation", kind: "favorited" });
-          if (fail.keep && (await same())) await this.nativeClick(fail.keep, page, epoch);
+          if (hooks && fail.keep) {
+            const blocked = await gate();
+            if (blocked) return `unknown:${blocked}`;
+            const owned = await read!<string>(transferUnmarkScript(uid, fail.keep, true)).catch(() => "script_failed");
+            if (owned === "ok") await hooks.click(fail.keep, true);
+          } else if (fail.keep && (await same())) await this.nativeClick(fail.keep, page, epoch);
           return "needs_confirmation:unfavorite";
         }
         // 首次转移已点过，结果仍按 unknown；过期或换了对话就不再补做取消收藏。
@@ -3100,6 +3149,14 @@ export class PddPageAdapter implements PlatformAdapter {
         if (blocked) {
           log({ phase: "unknown", reason: `${blocked}_before_unfavorite` });
           return `unknown:${blocked}_before_unfavorite`;
+        }
+        if (hooks) {
+          // 最后一个异步读取同时核对买家、唯一拒绝框和命中；之后只有同步守护与一次点击。
+          const owned = await read!<string>(transferUnmarkScript(uid, fail.unfav)).catch(() => "script_failed");
+          if (owned !== "ok") return `unknown:${owned}`;
+          const click = await hooks.unmark(fail.unfav);
+          // 平台按钮同时取消收藏并转移；结果无法确认时不再另点、恢复收藏或补做转接。
+          return `unknown:unmark_and_transfer_${click.status}`;
         }
         log({ phase: "unfavorite_and_transfer" });
         const click = await this.nativeClick(fail.unfav, page, epoch);

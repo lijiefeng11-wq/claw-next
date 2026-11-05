@@ -10,7 +10,7 @@ const targets = () => [{ target_id: "t-main", name: "fictional-main", observed_a
 const running: ShopRuntime[] = [];
 afterEach(async () => { for (const rt of running.splice(0)) await rt.stop(false); });
 
-async function harness(opts: { declare?: boolean; confirm?: boolean; target?: string; marked?: boolean | null; allowUnmark?: boolean; staleAtDecision?: boolean; cleanupReply?: boolean; mode?: "auto" | "observe" | "manual"; takeover?: boolean; result?: "unknown" | "confirmed" | "not_sent" } = {}) {
+async function harness(opts: { declare?: boolean; confirm?: boolean; target?: string; marked?: boolean | null; allowUnmark?: boolean; unmarkStart?: boolean; staleAtDecision?: boolean; cleanupReply?: boolean; mode?: "auto" | "observe" | "manual"; takeover?: boolean; result?: "unknown" | "confirmed" | "not_sent" } = {}) {
   const state = { heartbeats: [] as any[], bodies: [] as any[], claims: [] as any[], receipts: [] as any[], transfers: [] as TransferRequest[], discoveries: 0, discoveryBusy: false, submittedDuringCleanup: false, sends: 0, events: new Map<string, any>() };
   const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
   const fetchImpl = (async (input: any, init?: any) => {
@@ -50,6 +50,7 @@ async function harness(opts: { declare?: boolean; confirm?: boolean; target?: st
     const blocked = request.recheck();
     if (blocked) return { status: "not_sent", reason: blocked };
     state.transfers.push(request);
+    if (opts.unmarkStart) request.before_unmark!();
     return opts.result === "confirmed" ? { status: "confirmed", page_observed: "left_list" } : opts.result === "not_sent" ? { status: "not_sent", reason: "conv_state_changed" } : { status: "unknown", reason: "transfer_binding_unproven", page_observed: "left_list" };
   };
   (h.mock as any).send = async () => {
@@ -83,9 +84,31 @@ test("target list and readable state are frozen in this event; unknown transfers
   await settle(h.rt); assert.equal(h.state.transfers.length, 1);
 });
 
-for (const [label, opts] of [["unknown state", { marked: null }], ["already marked", { marked: true }], ["unretained target", { target: "other" }], ["expired original observation", { staleAtDecision: true }], ["unsupported unmark", { allowUnmark: true }]] as const) {
+for (const [label, opts] of [["unknown state", { marked: null }], ["already marked without permission", { marked: true }], ["unretained target", { target: "other" }], ["expired original observation", { staleAtDecision: true }]] as const) {
   test(`${label}: zero claim and zero platform operation`, async () => { const h = await harness(opts); assert.equal(h.state.claims.length, 0); assert.equal(h.state.transfers.length, 0); assert.equal(h.state.sends, 0); });
 }
+
+for (const marked of [true, false]) {
+  test(`allow-unmark policy accepts a known ${marked ? "marked" : "unmarked"} conversation without claiming a cancellation happened`, async () => {
+    const h = await harness({ marked, allowUnmark: true });
+    assert.equal(h.state.discoveries, 1); assert.equal(h.state.claims.length, 1);
+    assert.equal(h.state.transfers.length, 1); assert.equal(h.state.transfers[0].allow_unmark, true);
+    assert.deepEqual(h.state.receipts[0].steps, [{ step: "transfer", status: "unknown" }]);
+  });
+}
+
+test("native unmark intent is durable before the command; even an optimistic adapter result stays unknown and is never retried", async () => {
+  const h = await harness({ marked: true, allowUnmark: true, unmarkStart: true, result: "confirmed" });
+  assert.equal(h.state.receipts[0].status, "unknown");
+  assert.deepEqual(h.state.receipts[0].steps, [{ step: "transfer", status: "not_sent", reason: "blocked_by_mark" }, { step: "unmark_and_transfer", status: "unknown", unmarked: null }]);
+  assert.equal(h.state.sends, 0); await settle(h.rt); assert.equal(h.state.transfers.length, 1);
+});
+
+test("interrupted unmark intent retains both receipt steps without inventing a known cancellation", () => {
+  const ev = { snapshot: { decision: { action: "transfer", transfer: { unmark_policy: { allow: true } } } }, attempt: { detail: "unmark_and_transfer" } } as any;
+  const extra = receiptExtra(ev, "unknown", "interrupted_during_send")!;
+  assert.deepEqual(extra.steps, [{ step: "transfer", status: "not_sent", reason: "blocked_by_mark" }, { step: "unmark_and_transfer", status: "unknown", unmarked: null }]);
+});
 
 test("not started receipt omits steps; normal reply remains unaffected", async () => {
   const h = await harness({ result: "not_sent" }); assert.equal(h.state.receipts[0].status, "not_sent"); assert.equal(h.state.receipts[0].steps, undefined); assert.equal(h.state.receipts[0].reason, "conv_state_changed");
