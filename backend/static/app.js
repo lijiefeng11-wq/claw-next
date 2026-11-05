@@ -1584,6 +1584,7 @@
         setText(el["template-editor-status"], creating ? "模版已保存，请到“店铺配置”选择使用。" : "模版已保存，已选用的店铺已同步话术。");
       } else if (state.editor.id === id) {
         Object.assign(state.editor, {id: data.template_id, version: data.version, snapshot: JSON.parse(JSON.stringify(data))});
+        el["template-name"].value = data.name;
         setText(el["template-editor-status"], "提交时的模版已保存，之后的编辑仍保留，尚未保存。");
       }
       syncTemplateSelect();

@@ -106,6 +106,15 @@ let passed=0;
     assert.equal(h.state.templates.length,0);assert.equal(h.state.editor.id,'');passed++;
   }
   {
+    let done;const {h,ids,calls,window}=setup((c,server)=>c.method==='POST'?new Promise(resolve=>{done=data=>{server.templates.push(data);resolve(response(data,201));};}):undefined);
+    h.loadTemplateEditor(tpl);window.prompt=()=> '延迟副本';const pending=h.saveTemplate(true);
+    ids['prompt-input'].value='等待另存期间继续编辑';h.onFormEdit();
+    done({...tpl,template_id:'b'.repeat(32),name:'延迟副本',version:1});await pending;await tick();
+    assert.equal(ids['template-name'].value,'延迟副本');assert.equal(ids['prompt-input'].value,'等待另存期间继续编辑');
+    await h.saveTemplate(false);await tick();const next=mutations(calls)[1];
+    assert.equal(next.method,'PUT');assert.equal(next.body.name,'延迟副本');assert.equal(next.body.system_prompt,'等待另存期间继续编辑');passed++;
+  }
+  {
     const {h,ids}=setup();h.loadTemplateEditor(tpl);ids['prompt-input'].value='本地编辑';h.onFormEdit();
     h.applyTemplatesSnapshot([{...tpl,version:4,system_prompt:'别处更新'}]);
     assert.equal(ids['prompt-input'].value,'本地编辑');assert.equal(h.state.editor.version,3);
