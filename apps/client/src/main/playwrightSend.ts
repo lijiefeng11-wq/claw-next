@@ -6,7 +6,7 @@ import type { PageClickResult } from "./pddClick.js";
 
 /** Real send preparation and one click. Confirmation still comes from the platform response. */
 export async function clickSendWithPlaywright(wc: WebContents, uid: string, text: string, deadline: number, current: () => string | null,
-  clicked: (pressed: boolean) => void): Promise<PageClickResult> {
+  clicked: (pressed: boolean) => void, filled: () => void): Promise<PageClickResult> {
   let pressed = false, released = false, active = true;
   let connection: Awaited<ReturnType<typeof connectExistingPage>> | null = null;
   let refusal: string | null = null;
@@ -51,6 +51,7 @@ export async function clickSendWithPlaywright(wc: WebContents, uid: string, text
         return null;
       }, { uid, text, until: deadline * 1000 - 1500 });
       if (fill) return stop(fill);
+      filled();
       const block = blocked(); if (block) return stop(block);
       await page.waitForFunction(() => [...document.querySelectorAll<HTMLElement>("div.reply-box .reply-footer *")].some(e => {
         const r = e.getBoundingClientRect();

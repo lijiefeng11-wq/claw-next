@@ -1996,7 +1996,7 @@ export class PddPageAdapter implements PlatformAdapter {
       // 第一阶段：打开对话、检查输入框。失败均未触碰发送按钮。
       const notOpened = await this.openConversation(uid);
       if (notOpened) return notSent(notOpened);
-      let didPress = false;
+      let didPress = false, didFill = false;
       const deadline = request.deadline ?? Date.now() / 1000 + 8;
       const left = () => deadline - Date.now() / 1000;
       const recheck = () => this.window !== page || this.watchEpoch !== epoch ? "pdd_page_changed" :
@@ -2005,11 +2005,11 @@ export class PddPageAdapter implements PlatformAdapter {
       const result = new Promise<SendResult>(resolve => {
         this.outgoing = { to_uid: uid, text, matched: null, blocked: 0, recheck, clicked: () => didPress, resolve: r => { observed = r; resolve(r); } };
       });
-      const click = await this.clickText(page.webContents, uid, text, deadline, recheck, value => { didPress = value; });
+      const click = await this.clickText(page.webContents, uid, text, deadline, recheck, value => { didPress = value; }, () => { didFill = true; });
       if (click.status !== "dispatched") {
         if (didPress && observed && (observed as SendResult).status === "confirmed") return observed;
-        if (click.status === "not_sent" && this.window === page && this.watchEpoch === epoch) {
-          await Promise.race([this.clearInput(text).catch(() => undefined), sleep(500)]);
+        if (click.status === "not_sent" && didFill && this.window === page && this.watchEpoch === epoch) {
+          await Promise.race([this.clearInput(text, uid).catch(() => undefined), sleep(500)]);
         }
         return click;
       }
@@ -3134,8 +3134,10 @@ export class PddPageAdapter implements PlatformAdapter {
     return `unknown:not_observed${unfavorited ? ",unfavorited" : ""}`;
   }
 
-  private async clearInput(text: string) {
+  private async clearInput(text: string, uid?: string) {
     await this.run(`(() => {
+      ${uid === undefined ? "" : `const keys = [...document.querySelectorAll("li.chat-item .chat-item-box.active[data-random]")].map(e => /^([0-9]{1,32})-/.exec(e.getAttribute("data-random") || "")?.[1]);
+      if (!keys.length || !keys.every(k => k === ${JSON.stringify(uid)})) return;`}
       const ta = document.querySelector(${JSON.stringify(TEXTAREA)});
       if (!ta || ta.value !== ${JSON.stringify(text)}) return;
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(ta, "");

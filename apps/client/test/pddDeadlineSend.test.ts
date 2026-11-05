@@ -17,8 +17,8 @@ function fixture() {
 // Adapter wiring tests; actual Playwright input failures are exercised in the Electron fixture.
 test("发送引擎收到最新时限核验，过期零点击并清除本次输入", async () => {
   const adapter = fixture(); let calls = 0, clears = 0, checked = 0;
-  adapter.clickText = async (_wc: unknown, _uid: string, _text: string, _until: number, check: () => string | null) => {
-    calls++; return { status: "not_sent", reason: check() };
+  adapter.clickText = async (_wc: unknown, _uid: string, _text: string, _until: number, check: () => string | null, _clicked: unknown, filled: () => void) => {
+    calls++; filled(); return { status: "not_sent", reason: check() };
   };
   adapter.clearInput = async () => { clears++; };
   const result = await adapter.send({ conversation_id: "9001", text: "虚构回复", attempt_id: "fixture", deadline: Date.now() / 1000 + 8, recheck: () => { checked++; return "reply_deadline_exceeded"; } });
@@ -62,8 +62,8 @@ test("准备正好到达1500ms余量边界：按到期返回并释放忙碌", as
   let now = 10_000, clears = 0;
   t.mock.method(Date, "now", () => now);
   const adapter = fixture();
-  adapter.clickText = async (_wc: unknown, _uid: string, _text: string, _until: number, check: () => string | null) => {
-    now = 10_201; return { status: "not_sent", reason: check() };
+  adapter.clickText = async (_wc: unknown, _uid: string, _text: string, _until: number, check: () => string | null, _clicked: unknown, filled: () => void) => {
+    filled(); now = 10_201; return { status: "not_sent", reason: check() };
   };
   adapter.clearInput = async () => { clears++; };
   assert.deepEqual(await adapter.send({ conversation_id: "9001", text: "虚构回复", attempt_id: "fixture", deadline: 11.7 }), { status: "not_sent", reason: "claim_expiring" });

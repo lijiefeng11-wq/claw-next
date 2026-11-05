@@ -23,7 +23,7 @@ function html(s) {
     ${s.css || ""}${s.revealButton || s.revealDelay || s.neverReveal ? '#composer .send-btn{visibility:hidden}' : ""}</style>
     <ul><li class="chat-item"><div class="chat-item-box active" data-random="${s.otherBuyer ? "9002" : "9001"}-fixture"></div></li></ul>
     ${s.offscreenDuplicate ? '<div class="reply-box" style="left:-1200px"><div class="reply-footer">' + button + '</div></div>' : ""}
-    <div class="reply-box" id="composer"><div class="reply-input"><textarea></textarea></div>
+    <div class="reply-box" id="composer"><div class="reply-input"><textarea>${s.existingDraft ? '虚构回复' : ''}</textarea></div>
       <div class="reply-footer">${s.hiddenDuplicate ? '<div class="send-btn" style="display:none"></div>' : ""}
       ${s.insertDelay ? "" : button}${s.ambiguous ? button : ""}</div></div>
     ${s.mask ? '<div style="position:fixed;inset:0;background:#fff;z-index:10"></div>' : ""}
@@ -66,6 +66,7 @@ app.whenReady().then(async () => {
     { name: "two_visible_buttons_are_ambiguous", ambiguous: true, status: "not_sent", reason: "pdd_send_control_unverified" },
     { name: "different_conversation", otherBuyer: true, status: "not_sent", reason: "pdd_conversation_changed" },
     { name: "human_draft_changed", changeDraft: true, status: "not_sent", reason: "pdd_input_mismatch" },
+    { name: "existing_identical_human_draft_is_preserved", existingDraft: true, status: "not_sent", reason: "pdd_input_not_empty" },
     { name: "conversation_changes_just_before_press", switchBeforePress: true, status: "not_sent", reason: "pdd_conversation_changed" },
     { name: "human_draft_changes_just_before_press", draftBeforePress: true, status: "not_sent", reason: "pdd_input_mismatch" },
     { name: "page_changed_after_location", pageChanged: true, status: "not_sent", reason: "pdd_page_changed" },
@@ -106,6 +107,8 @@ app.whenReady().then(async () => {
         assert.equal(adapter.sending, false);
         assert.equal(adapter.outgoing, null);
         if (s.changeDraft || s.draftBeforePress) assert.equal(await wc.executeJavaScript('document.querySelector("textarea").value'), "人工草稿");
+        if (s.existingDraft) assert.equal(await wc.executeJavaScript('document.querySelector("textarea").value'), "虚构回复");
+        if (s.switchBeforePress || s.switchWhileWaiting) assert.equal(await wc.executeJavaScript('document.querySelector("textarea").value'), "虚构回复", "切换到其他买家后不清除输入");
         if (s.neverReveal) assert.ok(elapsed < 3000, "等待必须有界");
         results.push({ name: s.name, ok: true, result, clicks, commands, elapsed });
       } catch (error) {
