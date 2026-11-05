@@ -122,7 +122,6 @@ describe("标星：适用范围（claim 之前）", () => {
   for (const [name, decision] of [
     ["颜色不合法", { action: "mark", mark: { color: "yellow" }, policy_version: 3 }],
     ["缺 policy_version", { action: "mark", mark: { color: "red" } }],
-    ["transfer 本阶段不执行", { action: "transfer", transfer: { target_id: "t-1", unmark_policy: { allow: true, version: 3 } }, policy_version: 3 }],
   ] as const) {
     test(`${name}：按 none 记录，不 claim`, async () => {
       const fake = fakeBackend({ decision: { ...decision, reason: "fallback:unhandled", expires_at: Date.now() / 1000 + 120 } });
@@ -132,6 +131,15 @@ describe("标星：适用范围（claim 之前）", () => {
       assert.deepEqual([fake.state.claims.length, h.mock.platformMarks.length], [0, 0]);
     });
   }
+
+  test("transfer 未声明能力：保留决定但不 claim", async () => {
+    const fake = fakeBackend({ decision: { action: "transfer", transfer: { target_id: "t-1", unmark_policy: { allow: false, version: 3 } }, policy_version: 3, reason: "fallback:unhandled", expires_at: Date.now() / 1000 + 120 } });
+    const h = await shop(fake);
+    const ev = await decided(fake, h);
+    assert.equal(ev.snapshot?.decision?.action, "transfer");
+    assert.equal(ev.blocked, "capability_not_confirmed");
+    assert.deepEqual([fake.state.claims.length, h.mock.platformMarks.length], [0, 0]);
+  });
 
   test("仅观察模式：不 claim", async () => {
     const fake = fakeBackend();

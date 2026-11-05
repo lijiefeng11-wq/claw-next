@@ -832,8 +832,8 @@
     [{ value: "", label: "文字回复" }].concat(SEND_TYPES.map(function (type) {
       return { value: type, label: SEND_TYPE_LABELS[type] };
     }), [
-      { value: "handling:mark", label: "收藏标星（尚未启用）" },
-      { value: "handling:transfer", label: "转人工（尚未启用）" },
+      { value: "handling:mark", label: "收藏标星" },
+      { value: "handling:transfer", label: "转人工" },
       { value: "handling:handoff", label: "建议人工处理" },
       { value: "handling:none", label: "不处理" }
     ]).forEach(function (entry) {
@@ -847,7 +847,7 @@
     sendSelect.disabled = state.formDisabled;
     sendLabel.appendChild(sendTitle);
     sendLabel.appendChild(sendSelect);
-    help(sendLabel, "每条规则只执行一种处理。收藏与转人工可先保存配置，目前尚未启用；保存本项不会开启自动回复或平台动作。");
+    help(sendLabel, "每条规则只执行一种处理。收藏与转人工需新版客户端连接并确认能力，且当前店铺为自动处理；保存配置不会自动开启回复。");
     replyGroup.appendChild(sendLabel);
 
     const matchLabel = document.createElement("label");
@@ -1000,19 +1000,19 @@
     } else if (policy.action === "transfer") {
       const account = document.createElement("input");
       account.type = "text";account.maxLength = 40;account.value = policy.account || "";
-      account.placeholder = "例如：主账号（须与转移框第一列账号名完全一致）";
+      account.placeholder = "填写转移框第一列的完整账号名";
       account.addEventListener("input", function () { policy.account = account.value;onFormEdit(); });
       field("接收人账号名", account);
-      const allow = document.createElement("input");allow.type = "checkbox";allow.checked = policy.allow_unmark === true;
-      allow.addEventListener("change", function () { policy.allow_unmark = allow.checked;onFormEdit(); });
-      field("遇到已收藏的会话时，允许取消收藏后再转一次", allow);
+      const allow = document.createElement("input");allow.type = "checkbox";allow.checked = policy.allow_unmark === true;allow.disabled = !allow.checked;
+      allow.addEventListener("change", function () { policy.allow_unmark = allow.checked;allow.disabled = !allow.checked;onFormEdit(); });
+      field("取消收藏后转接（本版本暂不支持，可关闭旧策略）", allow);
     }
     return group;
   }
 
   function newPolicy(action) {
     if (action === "mark") return { action: action, color: "red" };
-    if (action === "transfer") return { action: action, account: "", allow_unmark: true };
+    if (action === "transfer") return { action: action, account: "", allow_unmark: false };
     return { action: action };
   }
 
@@ -1026,7 +1026,7 @@
       const label = document.createElement("label");label.className = "field";
       const title = document.createElement("span");setText(title, entry[1]);label.appendChild(title);
       const select = document.createElement("select");
-      [["handoff", "建议人工处理"], ["none", "不处理"], ["mark", "收藏标星（尚未启用）"], ["transfer", "转人工（尚未启用）"]].forEach(function (item) {
+      [["handoff", "建议人工处理"], ["none", "不处理"], ["mark", "收藏标星"], ["transfer", "转人工"]].forEach(function (item) {
         const option = document.createElement("option");option.value = item[0];setText(option, item[1]);select.appendChild(option);
       });
       select.value = state.fallback[key].action;select.disabled = state.formDisabled;label.appendChild(select);group.appendChild(label);

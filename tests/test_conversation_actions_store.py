@@ -25,7 +25,8 @@ class StoreActionTests(unittest.TestCase):
     def heartbeat(self, caps):
         return self.store.heartbeat(self.identity, {"instance_id": "instance", "session_id": "session", "capabilities": list(caps)})
 
-    def event(self, name="e", revision=1, marked=False, caps=ca.CAPABILITIES, **extra):
+    def event(self, name="e", revision=1, marked=False, caps=None, **extra):
+        caps = self.lease["capabilities"] if caps is None else caps
         now = time.time()
         ctx = {"history_complete": True, "messages": [{"id": name, "role": "buyer", "kind": "text", "content": "x", "created_at": now}]}
         if any(cap in caps for cap in ca.CAPABILITIES):ctx["conv_state"] = {"marked": marked, "color": None, "observed_at": now}
@@ -57,6 +58,7 @@ class StoreActionTests(unittest.TestCase):
         self.code("not_reply", self.claim)
 
     def test_capability_combinations_and_required_fields(self):
+        self.store.update_settings("a", {**self.settings, "fallback": {"unhandled": TRANSFER}})
         for i, caps in enumerate(([], ["mark_conversation"], ["transfer_conversation"], list(ca.CAPABILITIES))):
             self.lease = self.heartbeat(caps)
             value = self.event("e"+str(i), i+1, caps=caps)
@@ -70,6 +72,7 @@ class StoreActionTests(unittest.TestCase):
         self.assertEqual(result["policy_version"], self.store.shops()[0]["settings"]["version"])
         self.assertEqual(self.claim()["delivery"]["status"], "claimed")
         self.store.update_settings("a", {**self.settings, "rules": [], "fallback": {"unhandled": TRANSFER}})
+        self.lease = self.heartbeat(ca.CAPABILITIES)
         _, result = self.ready(self.event("other", 2))
         self.assertEqual(result["action"], "transfer");self.assertEqual(result["transfer"]["target_id"], "t1")
         self.assertNotIn("虚构客服", str(result));self.assertNotIn("text", result)
@@ -113,6 +116,7 @@ class StoreActionTests(unittest.TestCase):
         result["mark"]["color"] = "blue"
         self.assertEqual(self.store.finish(job, result)["reason"], "invalid_conversation_action")
         self.store.update_settings("a", {**self.settings, "rules": [{"id": "r", "contains": "x", "handling": {**TRANSFER, "allow_unmark": False}}]})
+        self.lease = self.heartbeat(ca.CAPABILITIES)
         self.store.enqueue(self.identity, self.event("other", 2));job = self.store.next_job();result = decide(job)
         result["transfer"]["unmark_policy"]["allow"] = True
         self.assertEqual(self.store.finish(job, result)["action"], "none")
@@ -127,6 +131,7 @@ class StoreActionTests(unittest.TestCase):
 
     def test_partial_unmark_failure_preserved_and_cannot_be_retried(self):
         self.store.update_settings("a", {**self.settings, "rules": [{"id": "r", "contains": "x", "handling": TRANSFER}]})
+        self.lease = self.heartbeat(ca.CAPABILITIES)
         self.ready(self.event(marked=True));self.claim()
         steps = [{"step": "transfer", "status": "not_sent", "reason": "blocked_by_mark"}, {"step": "unmark_and_transfer", "status": "not_sent", "unmarked": True}]
         view = self.receipt("not_sent", steps);self.assertTrue(view["delivery"]["steps"][-1]["unmarked"])
@@ -154,3 +159,10 @@ class StoreActionTests(unittest.TestCase):
         self.assertEqual(self.store.get(self.identity, "e")["delivery"]["status"], "unknown")
         self.code("delivery_terminal", self.claim)
         self.assertIsNone(self.store.next_job())
+
+    def test_transfer_discovery_negotiated_only_for_explicit_saved_policy(self):
+        self.assertNotIn("transfer_conversation", self.heartbeat(ca.CAPABILITIES)["capabilities"])
+        self.store.update_settings("a", {**self.settings, "fallback": {"error": {**TRANSFER, "allow_unmark": False}}})
+        self.assertIn("transfer_conversation", self.heartbeat(ca.CAPABILITIES)["capabilities"])
+        self.store.update_settings("a", self.settings)
+        self.assertNotIn("transfer_conversation", self.heartbeat(ca.CAPABILITIES)["capabilities"])

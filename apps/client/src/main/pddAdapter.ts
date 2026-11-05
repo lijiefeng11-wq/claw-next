@@ -1,3 +1,5 @@
+import type { TransferRequest, TransferResult } from "../core/adapter.js";
+import type { TransferTarget } from "../core/protocol.js";
 import { session } from "electron";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -760,6 +762,9 @@ const TRANSFER_ROWS = `(() => {
   });
 })()`;
 
+/** Formal targets keep full account names; oversize, duplicate or incomplete rows are rejected. */
+const FORMAL_TRANSFER_ROWS = TRANSFER_ROWS.replace('.trim().slice(0, 40)', '.trim()');
+
 /** “转移会话”对话框里第一列“账号名”恰为 target 的唯一行及其唯一“转移”按钮（页面内脚本片段，供下面两个脚本共用）。 */
 function transferTargetSnippet(target: string): string {
   return `
@@ -767,7 +772,7 @@ function transferTargetSnippet(target: string): string {
     const t = (e) => (e.innerText ?? "").trim();
     const dlg = [...document.querySelectorAll("div.el-dialog")].filter(vis).find((d) => t(d.querySelector(".el-dialog__title") ?? d) === "转移会话");
     if (!dlg) return "dialog_missing";
-    const trs = [...dlg.querySelectorAll("tr.el-table__row")].filter((tr) => t(tr.querySelector("td") ?? tr).slice(0, 40) === ${JSON.stringify(target)});
+    const trs = [...dlg.querySelectorAll("tr.el-table__row")].filter((tr) => t(tr.querySelector("td") ?? tr) === ${JSON.stringify(target)});
     if (trs.length !== 1) return trs.length ? "target_not_unique" : "target_missing";
     const btns = [...trs[0].querySelectorAll("*")].filter((e) => vis(e) && t(e) === "转移" && ![...e.children].some((c) => t(c) === "转移"));
     if (btns.length !== 1) return "target_button_not_unique";
@@ -775,8 +780,14 @@ function transferTargetSnippet(target: string): string {
 }
 
 /** 目标行的“转移”按钮：滚动到可见区域后取中心坐标，并核对该点确实落在这个按钮上（行在表格滚动区外、被遮挡都不点）。 */
-function transferTargetScript(target: string): string {
+function transferTargetScript(target: string, buyer?: string): string {
   return `(() => {${transferTargetSnippet(target)}
+    const buyer = ${JSON.stringify(buyer ?? null)};
+    if (buyer !== null) {
+      const keys = [...document.querySelectorAll(${JSON.stringify(ITEM)})].filter(e => e.classList.contains("active")).map(e => e.getAttribute("data-random") || "");
+      const buyers = new Set(keys.map(k => /^([0-9]{1,32})-/.exec(k)?.[1] ?? null));
+      if (buyers.size !== 1 || !buyers.has(buyer)) return "conversation_mismatch";
+    }
     btn.scrollIntoView({ block: "nearest" });
     const r = btn.getBoundingClientRect();
     const x = Math.round(r.left + r.width / 2), y = Math.round(r.top + r.height / 2);
@@ -787,8 +798,14 @@ function transferTargetScript(target: string): string {
 }
 
 /** 目标行“转移”按钮当前中心坐标（不滚动、不核对遮挡）：点行后确认气泡可能盖住按钮，这里只核对行仍唯一且没挪位置。 */
-function transferTargetRectScript(target: string): string {
+function transferTargetRectScript(target: string, buyer?: string): string {
   return `(() => {${transferTargetSnippet(target)}
+    const buyer = ${JSON.stringify(buyer ?? null)};
+    if (buyer !== null) {
+      const keys = [...document.querySelectorAll(${JSON.stringify(ITEM)})].filter(e => e.classList.contains("active")).map(e => e.getAttribute("data-random") || "");
+      const buyers = new Set(keys.map(k => /^([0-9]{1,32})-/.exec(k)?.[1] ?? null));
+      if (buyers.size !== 1 || !buyers.has(buyer)) return "conversation_mismatch";
+    }
     const r = btn.getBoundingClientRect();
     return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
   })()`;
@@ -946,6 +963,7 @@ export class PddPageAdapter implements PlatformAdapter {
   /** 诊断转移（transferTest）的上下文：seq 为本进程内递增的诊断批次序号；账号名只在内存里比较，不写盘。 */
   private transferProbeCtx: { seq: number; target: string; epoch: number; startedAt: number; attemptAt: number | null } | null = null;
   private transferDiagSeq = 0;
+  private formalTransferTargets = new Map<string, { account: string; page: PlatformPage; epoch: number; shop: string; at: number }>();
   /**
    * 诊断模式下各客服列表类接口（/latitude/assign/*，按路径区分来源）最近一次结果：候选与键值，只在内存里与转移请求的 csid 比较，不写盘。
    * at 为该响应对应请求的发出时间（迟到的响应不重新计时）；candidates/tokens 为 null 表示该来源最近一次无法解析或读取失败。
@@ -2744,28 +2762,121 @@ export class PddPageAdapter implements PlatformAdapter {
     }
   }
 
+  /** Read complete account names from the current shop/conversation; never choose a recipient by position. */
+  async readTransferTargets(conversationId: string, timeoutMs: number): Promise<TransferTarget[]> {
+    const page = this.window, epoch = this.watchEpoch, status = this.tracker.status(true);
+    const shop = status.identity?.platform_shop_id;
+    if (!page || page.isDestroyed() || !status.logged_in || !shop || this.sending || this.outgoing || this.popupSweep || this.warmRun || timeoutMs < 300) return [];
+    const deadline = Date.now() + Math.min(timeoutMs, 2000);
+    const valid = () => this.window === page && !page.isDestroyed() && this.watchEpoch === epoch && this.tracker.status(true).logged_in && this.tracker.status(true).identity?.platform_shop_id === shop && Date.now() < deadline;
+    const read = <T>(script: string): Promise<T> => Promise.race([
+      this.run<T>(script), sleep(Math.max(1, Math.min(500, deadline - Date.now()))).then(() => { throw Error("transfer_read_timeout"); }),
+    ]);
+    const active = () => Promise.race([this.freshActive(epoch), sleep(500).then(() => null)]);
+    this.sending = true;
+    let opened = false;
+    try {
+      if ((await active()) !== conversationId || !valid()) return [];
+      const left = await read<{ dialogs: number; popovers: number } | string>(TRANSFER_LEFTOVERS).catch(() => "script_failed");
+      if (typeof left === "string" || left.dialogs || left.popovers || !valid()) return [];
+      const pt = await read<Point | string>(textTargetScript("转移会话", ".chat-list, li.chat-item, .el-dialog")).catch(() => "script_failed");
+      if (typeof pt === "string" || !valid()) return [];
+      const click = await dispatchPageClick(page.webContents, pt, () => valid() ? null : "page_changed");
+      if (click.status === "not_sent") return [];
+      opened = true;
+      let rows: TransferRow[] | string = "dialog_missing";
+      while (valid() && (typeof rows === "string" || rows.length === 0)) {
+        await sleep(100);
+        rows = await read<TransferRow[] | string>(FORMAL_TRANSFER_ROWS).catch(() => "script_failed");
+      }
+      if (!valid() || (await active()) !== conversationId || !valid() || typeof rows === "string" || rows.length > 50) return [];
+      const names = rows.map(row => row.cells[0]);
+      if (names.some(n => typeof n !== "string" || !n || n !== n.trim() || n.length > 40) || new Set(names).size !== names.length || rows.some(row => !row.button)) return [];
+      const at = Date.now();
+      for (const [id, target] of this.formalTransferTargets) if (at - target.at > 30000 || target.epoch !== epoch) this.formalTransferTargets.delete(id);
+      return names.map(name => {
+        const id = crypto.createHash("sha256").update(JSON.stringify([this.shopId, shop, epoch, name])).digest("hex").slice(0, 32);
+        this.formalTransferTargets.set(id, { account: name, page, epoch, shop, at });
+        return { target_id: id, name, observed_at: at / 1000 };
+      });
+    } finally {
+      try {
+        if (opened && this.window === page && !page.isDestroyed() && this.watchEpoch === epoch) {
+          const close = await Promise.race([this.run<Point | string>(TRANSFER_DIALOG_CLOSE), sleep(500).then(() => "missing")]).catch(() => "missing");
+          if (typeof close !== "string") await this.nativeClick(close, page, epoch);
+        }
+      } finally { this.sending = false; }
+    }
+  }
+
+  async transferConversation(request: TransferRequest): Promise<TransferResult> {
+    const target = this.formalTransferTargets.get(request.target_id);
+    if (!target || request.allow_unmark || Date.now() - target.at > 30000) return { status: "not_sent", reason: "transfer_target_unknown" };
+    const { page, epoch, shop, account } = target;
+    if (this.sending || this.outgoing || this.markWatch) return { status: "not_sent", reason: "pdd_send_busy" };
+    const watch = newMarkWatch(request.conversation_id, 2, epoch);
+    let started = false;
+    const checkPage = () => {
+      if (Date.now() - target.at > 30000) return "transfer_target_expired";
+      if (this.window !== page || page.isDestroyed() || this.watchEpoch !== epoch) return "conv_state_changed";
+      const status = this.tracker.status(true);
+      if (!status.logged_in || status.identity?.platform_shop_id !== shop) return "platform_changed";
+      return watch.foreign || watch.before ? "conv_state_changed" : null;
+    };
+    const check = () => checkPage() ?? (Date.now() / 1000 >= request.deadline ? "claim_expiring" : null) ?? request.recheck();
+    this.markWatch = watch; this.markPage = page; this.markCheck = check;
+    const click = async (pt: Point, action: boolean) => {
+      watch.expected = ["mouseDown", "mouseUp"];
+      try { return await dispatchPageClick(page.webContents, pt, action ? check : checkPage, action ? () => { started = true; } : undefined); }
+      finally { watch.expected = []; }
+    };
+    try {
+      const result = await this.performTransfer(account, true, this.convTokenFor(request.conversation_id), request.deadline * 1000, false, { check, click });
+      // Without positive request-origin binding, all attempted transfers remain unknown.
+      return started ? { status: "unknown", reason: "transfer_binding_unproven", page_observed: result.includes("left_list_observed") ? "left_list" : "unknown" } : { status: "not_sent", reason: "not_started" };
+    } catch {
+      return started ? { status: "unknown", reason: "transfer_exception_or_timeout" } : { status: "not_sent", reason: "not_started" };
+    } finally {
+      watch.closed = true; this.markWatch = null; this.markPage = null; this.markCheck = null;
+    }
+  }
+
   /**
-   * 诊断模式下的人工触发测试：把当前对话转移给名称含 target 的唯一客服。
+   * 诊断模式下的人工触发测试：把当前对话转移给账号名完全等于 target 的唯一客服。
    * confirm=false 只打开转移对话框和确认气泡、记录内容后关闭，不点确认；confirm=true 才点确认。
    * 每次点击前核对当前对话仍是 conv 指定的那个，不符则不点。点确认前写本地尝试记录；结果只看页面状态，无平台回执；不重试。
    * 平台拒绝转移已收藏会话时，只有 allowUnfavorite 才点“取消收藏并转移”，否则返回需确认。
    */
   async transferTest(target: string, confirm: boolean, conv: string, exp: number, allowUnfavorite = false): Promise<string> {
     if (!this.probeFile) return "not_executed:probe_mode_required";
+    return this.performTransfer(target, confirm, conv, exp, allowUnfavorite);
+  }
+
+  private async performTransfer(target: string, confirm: boolean, conv: string, exp: number, allowUnfavorite: boolean,
+    hooks?: { check: () => string | null; click: (pt: Point, action: boolean) => Promise<PageClickResult> }): Promise<string> {
     if (!this.window || this.window.isDestroyed() || !this.tracker.status(true).logged_in) return "not_executed:not_ready";
     if (this.sending || this.outgoing || this.popupSweep) return "not_executed:busy";
     if (!target.trim()) return "not_executed:no_target";
     const page = this.window, epoch = this.watchEpoch;
-    const log = (rec: Record<string, unknown>) => fs.appendFileSync(path.join(path.dirname(this.probeFile!), "transfer-test.jsonl"), JSON.stringify({ at: new Date().toISOString(), confirm, ...rec }) + "\n", { mode: 0o600 });
+    const log = (rec: Record<string, unknown>) => { if (this.probeFile && !hooks) fs.appendFileSync(path.join(path.dirname(this.probeFile), "transfer-test.jsonl"), JSON.stringify({ at: new Date().toISOString(), confirm, ...rec }) + "\n", { mode: 0o600 }); };
     const ctx = { seq: ++this.transferDiagSeq, target, epoch, startedAt: Date.now(), attemptAt: null as number | null };
-    this.transferProbeCtx = ctx;
-    const same = async () => this.watchEpoch === epoch && (await this.activeConvToken()) === conv && conv !== null;
-    const gate = () => this.actionGate(epoch, conv, exp);
-    const leftovers = () => this.run<{ dialogs: number; popovers: number } | string>(TRANSFER_LEFTOVERS).catch(() => "script_failed");
+    if (!hooks) this.transferProbeCtx = ctx;
+    const read = <T>(script: string): Promise<T> => !hooks ? this.run<T>(script) : Promise.race([
+      this.run<T>(script), sleep(Math.max(1, Math.min(500, exp - Date.now()))).then(() => { throw Error("transfer_read_timeout"); }),
+    ]);
+    const same = async () => this.watchEpoch === epoch && (await (!hooks ? this.activeConvToken() : Promise.race([this.activeConvToken(), sleep(500).then(() => null)]))) === conv && conv !== null;
+    const gate = async () => {
+      const before = hooks?.check();
+      if (before) return before;
+      const result = await (!hooks ? this.actionGate(epoch, conv, exp) : Promise.race([this.actionGate(epoch, conv, exp), sleep(500).then(() => "transfer_read_timeout")]));
+      return result ?? hooks?.check() ?? null;
+    };
+    const clickPage = (pt: Point, action = false) => hooks ? hooks.click(pt, action) : this.nativeClick(pt, page, epoch);
+    const leftovers = () => read<{ dialogs: number; popovers: number } | string>(TRANSFER_LEFTOVERS).catch(() => "script_failed");
     const clickAt = async (script: string): Promise<string> => {
-      const pt = await this.run<Point | string>(script).catch(() => "script_failed");
+      const pt = await read<Point | string>(script).catch(() => "script_failed");
       if (typeof pt === "string") return pt;
-      const c = await this.nativeClick(pt, page, epoch);
+      const c = await clickPage(pt);
       return c.status === "dispatched" ? "dispatched" : `${c.status}:${c.reason}`;
     };
     // 收尾：逐步关掉确认气泡和对话框，每步之后重读残留并记录。真实平台的气泡里没有“取消”（只有转移原因、“发送”和
@@ -2821,19 +2932,19 @@ export class PddPageAdapter implements PlatformAdapter {
       if (buyer === null) return "skipped:no_buyer";
       let blocked = await gate();
       if (blocked) return `skipped:${blocked}`;
-      const list = await this.run<{ text: string; x: number; y: number }[] | string>(popoverButtonsScript(target)).catch(() => "script_failed");
+      const list = await read<{ text: string; x: number; y: number }[] | string>(popoverButtonsScript(target)).catch(() => "script_failed");
       if (typeof list === "string") return `skipped:${list}`;
       const cancels = list.filter((b) => b.text === "取消");
       if (cancels.length !== 1) return `skipped:cancel_${cancels.length ? "not_unique" : "missing"}`;
       blocked = await gate();
       if (blocked) return `skipped:${blocked}`;
       // 最后一次页面快照里同时核对：当前对话仍是本次买家、“取消”属于目标行关联的唯一气泡、命中点落在它上面。
-      const owned = await this.run<string>(popoverButtonsScript(target, { x: cancels[0].x, y: cancels[0].y, text: "取消", buyer })).catch(() => "script_failed");
+      const owned = await read<string>(popoverButtonsScript(target, { x: cancels[0].x, y: cancels[0].y, text: "取消", buyer })).catch(() => "script_failed");
       if (owned !== "ok") return `skipped:${owned}`;
       // 快照之后不再等任何页面读取；提交点击前同步复核页面代次与期限。
       if (this.watchEpoch !== epoch) return "skipped:conversation_mismatch";
       if (Date.now() > exp) return "skipped:expired";
-      const click = await this.nativeClick(cancels[0], page, epoch);
+      const click = await clickPage(cancels[0]);
       return click.status === "dispatched" ? "dispatched" : `${click.status}:${click.reason}`;
     };
     this.sending = true;
@@ -2842,31 +2953,33 @@ export class PddPageAdapter implements PlatformAdapter {
     try {
       let blocked = await gate();
       if (blocked) return `not_executed:${blocked}`;
-      const active = (await this.scanKeepingFresh())?.items.find((i) => i.active);
+      const scan = hooks ? await read<Scan>(SCAN).catch(() => null) : await this.scanKeepingFresh();
+      if (scan?.freshBuyer) this.pendingFreshBuyer = true;
+      const active = scan?.items.find((i) => i.active);
       const uid = active ? buyerFromListKey(active.key) : null;
       if (!uid) return "not_executed:no_active_conversation";
       // 这次扫描读到的买家须与请求携带的对话令牌一致，之后的页面快照按这个买家核对。
       if (this.convTokenFor(uid) !== conv) return "not_executed:conversation_mismatch";
       buyer = uid;
       // 上次留下的对话框或确认气泡还开着时，点“转移会话”可能只是关掉气泡；不在这种状态下开始。
-      const left = await this.run<{ dialogs: number; popovers: number } | string>(TRANSFER_LEFTOVERS).catch(() => "script_failed");
+      const left = await read<{ dialogs: number; popovers: number } | string>(TRANSFER_LEFTOVERS).catch(() => "script_failed");
       if (typeof left === "string" || left.dialogs || left.popovers) {
         log({ phase: "not_executed", reason: "leftover_popup", detail: typeof left === "string" ? left : left });
         return "not_executed:leftover_popup";
       }
-      const open = await this.run<Point | string>(textTargetScript("转移会话", ".chat-list, li.chat-item, .el-dialog")).catch(() => "script_failed");
+      const open = await read<Point | string>(textTargetScript("转移会话", ".chat-list, li.chat-item, .el-dialog")).catch(() => "script_failed");
       if (typeof open === "string") return `not_executed:open_button_${open}`;
       blocked = await gate();
       if (blocked) return `not_executed:${blocked}`;
       // 打开对话框：not_sent 保持原样；unknown 表示按下命令已发出、可能已经生效，不补点，记一条结果后按页面观察继续。
-      const openClick = await this.nativeClick(open, page, epoch);
+      const openClick = await clickPage(open);
       if (openClick.status === "not_sent") return "not_executed:open_click_failed";
       opened = true;
       if (openClick.status === "unknown") log({ phase: "open_click", result: "unknown", reason: openClick.reason });
       let rows: TransferRow[] | string = "dialog_missing";
       for (let i = 0; i < 10 && (typeof rows === "string" || !rows.length); i++) {
         await sleep(300);
-        rows = await this.run<TransferRow[] | string>(TRANSFER_ROWS).catch(() => "script_failed");
+        rows = await read<TransferRow[] | string>(hooks ? FORMAL_TRANSFER_ROWS : TRANSFER_ROWS).catch(() => "script_failed");
       }
       if (typeof rows === "string") return `not_executed:${rows}`;
       // 只认第一列（客服名）与用户指定名称完全相同；备注、状态等其他列命中不算。
@@ -2874,11 +2987,11 @@ export class PddPageAdapter implements PlatformAdapter {
       log({ phase: "rows", rows: rows.length, matches: matches.length });
       if (matches.length !== 1 || !matches[0].button) return `not_executed:target_${matches.length ? "not_unique_or_no_button" : "missing"}`;
       // 对话框打开有动画：连续两次（间隔 300ms）读到同一位置才算稳定，否则不点。
-      let btn: Point | string = await this.run<Point | string>(transferTargetScript(target)).catch(() => "script_failed");
+      let btn: Point | string = await read<Point | string>(transferTargetScript(target, uid)).catch(() => "script_failed");
       let stable = false;
       for (let i = 0; i < 6 && typeof btn !== "string" && !stable; i++) {
         await sleep(300);
-        const next = await this.run<Point | string>(transferTargetScript(target)).catch(() => "script_failed");
+        const next = await read<Point | string>(transferTargetScript(target, uid)).catch(() => "script_failed");
         stable = typeof next !== "string" && Math.abs(next.x - btn.x) <= 1 && Math.abs(next.y - btn.y) <= 1;
         btn = next;
       }
@@ -2889,16 +3002,19 @@ export class PddPageAdapter implements PlatformAdapter {
       }
       blocked = await gate();
       if (blocked) return `not_executed:${blocked}`;
-      if ((await this.nativeClick(btn, page, epoch)).status !== "dispatched") return "not_executed:row_click_failed";
+      // Last DOM read before pressing: do not await another scan after the hit/owner snapshot.
+      btn = await read<Point | string>(transferTargetScript(target, uid)).catch(() => "script_failed");
+      if (typeof btn === "string") return `not_executed:${btn}`;
+      if ((await clickPage(btn, true)).status !== "dispatched") return "not_executed:row_click_failed";
       popoverMaybe = true;
       await sleep(500);
       // 点行后重读：目标行须仍唯一且仍在刚才点的位置（表格重排/身份变化时可能点到了别人）。确认气泡可能盖住按钮，所以这里不核对遮挡。
-      const again = await this.run<Point | string>(transferTargetRectScript(target)).catch(() => "script_failed");
+      const again = await read<Point | string>(transferTargetRectScript(target, uid)).catch(() => "script_failed");
       if (typeof again === "string" || Math.abs(again.x - btn.x) > 2 || Math.abs(again.y - btn.y) > 2) {
         log({ phase: "not_executed", reason: "target_moved", detail: typeof again === "string" ? again : "moved", dx: typeof again === "string" ? null : again.x - btn.x, dy: typeof again === "string" ? null : again.y - btn.y });
         return "not_executed:target_moved";
       }
-      const buttons = await this.run<{ text: string; x: number; y: number }[] | string>(popoverButtonsScript(target)).catch(() => "script_failed");
+      const buttons = await read<{ text: string; x: number; y: number }[] | string>(popoverButtonsScript(target)).catch(() => "script_failed");
       log({ phase: "popover", buttons: typeof buttons === "string" ? buttons : buttons.length, kinds: typeof buttons === "string" ? null : popoverButtonKinds(buttons) });
       if (typeof buttons === "string") return `not_executed:${buttons}`;
       // 气泡里另有转移原因和“发送”（可能向买家发消息），只认“无原因直接转移”。
@@ -2909,26 +3025,24 @@ export class PddPageAdapter implements PlatformAdapter {
       }
       if (ok.length !== 1) return `not_executed:confirm_button_${ok.length ? "not_unique" : "missing"}`;
       // 点确认前在同一次页面核对里确认：命中点属于目标行关联的唯一气泡中那一个“无原因直接转移”控件。
-      const owned = await this.run<string>(popoverButtonsScript(target, { x: ok[0].x, y: ok[0].y, text: "无原因直接转移" })).catch(() => "script_failed");
+      blocked = await gate();
+      if (blocked) return `not_executed:${blocked}`;
+      const owned = await read<string>(popoverButtonsScript(target, { x: ok[0].x, y: ok[0].y, text: "无原因直接转移", buyer: uid })).catch(() => "script_failed");
       if (owned !== "ok") {
         log({ phase: "not_executed", reason: owned });
         return `not_executed:${owned}`;
       }
-      blocked = await gate();
-      if (blocked) {
-        log({ phase: "not_executed", reason: blocked });
-        return `not_executed:${blocked}`;
-      }
+      if (this.watchEpoch !== epoch || Date.now() > exp) return "not_executed:expired_or_page_changed";
       log({ phase: "attempt" });
       ctx.attemptAt = Date.now();
-      const click = await this.nativeClick(ok[0], page, epoch);
+      const click = await clickPage(ok[0], true);
       if (click.status !== "dispatched") {
         log({ phase: click.status, reason: click.reason });
         return `${click.status}:${click.reason}`;
       }
       opened = false;
       popoverMaybe = false;
-      return await this.settleTransfer(uid, page, epoch, same, gate, allowUnfavorite, log);
+      return await this.settleTransfer(uid, page, epoch, same, gate, allowUnfavorite, log, hooks ? read : undefined);
     } finally {
       // 收尾出错不得让本适配器一直处于忙碌：无论收尾结果如何都释放 sending。
       try {
@@ -2957,11 +3071,12 @@ export class PddPageAdapter implements PlatformAdapter {
    * 否则点“暂不转移收藏会话”（保持原状）并返回需确认。会话离开非空列表只记为观察结果，业务上仍是 unknown
    * （没有平台回执与目标关联）；其他失败对话框记为页面失败。不重试。
    */
-  private async settleTransfer(uid: string, page: PlatformPage, epoch: number, same: () => Promise<boolean>, gate: () => Promise<string | null>, allowUnfavorite: boolean, log: (rec: Record<string, unknown>) => void): Promise<string> {
+  private async settleTransfer(uid: string, page: PlatformPage, epoch: number, same: () => Promise<boolean>, gate: () => Promise<string | null>, allowUnfavorite: boolean, log: (rec: Record<string, unknown>) => void,
+    read?: <T>(script: string) => Promise<T>): Promise<string> {
     let unfavorited = false;
     for (let i = 0; i < 30; i++) {
       await sleep(300);
-      const fail = await this.run<{ text: string; unfav: Point | null; keep: Point | null } | null>(TRANSFER_FAIL_DIALOG).catch(() => null);
+      const fail = await (read ?? this.run.bind(this))<{ text: string; unfav: Point | null; keep: Point | null } | null>(TRANSFER_FAIL_DIALOG).catch(() => null);
       if (fail && !unfavorited) {
         if (!fail.text.includes("已收藏") || !fail.unfav) {
           log({ phase: "page_failed", kind: "other" });
@@ -2987,7 +3102,8 @@ export class PddPageAdapter implements PlatformAdapter {
         unfavorited = true;
         continue;
       }
-      const scan = await this.scanKeepingFresh();
+      const scan = read ? await read<Scan>(SCAN).catch(() => null) : await this.scanKeepingFresh();
+      if (scan?.freshBuyer) this.pendingFreshBuyer = true;
       // 列表为空可能是筛选/刷新/加载中，不算观察到离开。
       if (!fail && scan && scan.items.length > 0 && !scan.items.some((it) => buyerFromListKey(it.key) === uid)) {
         log({ phase: "unknown", observed: "left_list", unfavorited });

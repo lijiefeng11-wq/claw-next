@@ -1,9 +1,9 @@
-"""Prepared conversation actions; platform capabilities remain disabled pending evidence."""
+"""Conversation actions negotiated with explicitly enabled compatible clients."""
 from .orders import unix_seconds
 
 CAPABILITIES = ("mark_conversation", "transfer_conversation")
-# A separate reviewed implementation/evidence change is required to enable either.
-READY_CAPABILITIES = ()
+# Older clients and missing explicit saved policies remain inert.
+READY_CAPABILITIES = CAPABILITIES
 COLORS = ("red", "orange", "blue", "green")
 REASONS = ("blocked_by_mark", "platform_rejected", "conv_state_unavailable", "conv_state_changed",
            "capability_withdrawn", "deadline_exceeded", "not_started")

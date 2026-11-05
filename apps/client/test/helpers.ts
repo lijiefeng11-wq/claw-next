@@ -124,6 +124,7 @@ export async function makeShop(opts: {
   monotonicNow?: () => number;
   log?: (line: string) => void;
   declareMark?: boolean;
+  declareTransfer?: boolean;
   updateHold?: () => boolean;
 }): Promise<Harness> {
   const shop = opts.shop ?? "shop-a";
@@ -141,6 +142,7 @@ export async function makeShop(opts: {
     monotonicNow: opts.monotonicNow,
     log: opts.log,
     declareMark: opts.declareMark,
+    declareTransfer: opts.declareTransfer,
     updateHold: opts.updateHold,
   });
   await rt.start();
