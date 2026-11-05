@@ -2608,22 +2608,27 @@ export class PddPageAdapter implements PlatformAdapter {
         watch.expected = [];
       }
     };
-    const hover = (pt: Point) => own(["mouseMove"], () => page.webContents.debugger.sendCommand("Input.dispatchMouseEvent", { type: "mouseMoved", x: pt.x, y: pt.y }).catch(() => undefined));
+    const hover = (pt: Point) => own(["mouseMove"], () => Promise.race([
+      Promise.resolve().then(() => page.webContents.debugger.sendCommand("Input.dispatchMouseEvent", { type: "mouseMoved", x: pt.x, y: pt.y })), sleep(500),
+    ]).catch(() => undefined));
+    const read = <T>(script: string): Promise<T> => Promise.race([
+      this.run<T>(script), sleep(Math.max(1, Math.min(500, request.deadline * 1000 - Date.now()))).then(() => { throw Error("mark_read_timeout"); }),
+    ]);
     let hovered = false;
     this.sending = true;
     try {
-      const notOpened = await this.openConversation(uid);
+      const notOpened = await Promise.race([this.openConversation(uid), sleep(1000).then(() => "pdd_conversation_read_timeout")]);
       if (notOpened) return notSent(notOpened);
       let stop = guard();
       if (stop) return notSent(stop);
       // 核对 2–4：同一次快照里的打开会话与星标状态。
-      const snap = await this.run<{ keys: unknown[]; active: boolean } | string>(CONV_STAR_SNAPSHOT).catch(() => "script_failed");
+      const snap = await read<{ keys: unknown[]; active: boolean } | string>(CONV_STAR_SNAPSHOT).catch(() => "script_failed");
       if ((stop = guard())) return notSent(stop);
       if (typeof snap === "string" || !Array.isArray(snap?.keys) || typeof snap.active !== "boolean") return notSent("conv_state_unavailable", typeof snap === "string" ? snap : "snapshot_invalid");
       if (onlyBuyer(snap.keys) !== uid) return notSent("conv_state_changed", "conversation_mismatch");
       if (snap.active) return notSent("conv_state_changed", "already_marked");
       // 核对 5：悬停星标等浮层出现；浮层须由星标关联、可见、唯一、至少三种已知颜色。
-      const star = await this.run<{ x: number; y: number; active: boolean } | string>(STAR_ICON).catch(() => "script_failed");
+      const star = await read<{ x: number; y: number; active: boolean } | string>(STAR_ICON).catch(() => "script_failed");
       if ((stop = guard())) return notSent(stop);
       if (typeof star === "string") return notSent("conv_state_unavailable", star);
       hovered = true;
@@ -2631,7 +2636,7 @@ export class PddPageAdapter implements PlatformAdapter {
       let pop: StarSnapshot | string = "popover_missing";
       for (let i = 0; i < 8 && typeof pop === "string" && !guard(); i++) {
         await sleep(200);
-        pop = await this.run<StarSnapshot | string>(starOptionsScript()).catch(() => "script_failed");
+        pop = await read<StarSnapshot | string>(starOptionsScript()).catch(() => "script_failed");
       }
       if ((stop = guard())) return notSent(stop);
       if (typeof pop === "string" || !Array.isArray(pop?.keys) || typeof pop.active !== "boolean" || !Array.isArray(pop.options)) return notSent("conv_state_unavailable", typeof pop === "string" ? pop : "popover_invalid");
@@ -2643,7 +2648,7 @@ export class PddPageAdapter implements PlatformAdapter {
       // 鼠标移到目标颜色项（浮层保持展开）后，在该点核对命中元素属于星标浮层中目标颜色的列表项。
       await hover(target);
       // 最终核对在同一次页面快照里完成：命中目标颜色项（唯一、未勾选）、唯一打开的会话仍是本事件买家、星标仍未收藏。
-      const owned = await this.run<string>(starOptionsScript({ ...target, color: request.color, buyer: uid })).catch(() => "script_failed");
+      const owned = await read<string>(starOptionsScript({ ...target, color: request.color, buyer: uid })).catch(() => "script_failed");
       if ((stop = guard())) return notSent(stop);
       if (owned === "conversation_mismatch" || owned === "already_marked") return notSent("conv_state_changed", owned);
       if (owned !== "ok") return notSent("conv_state_unavailable", owned);

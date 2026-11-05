@@ -778,7 +778,7 @@ export class ShopRuntime {
     }
     if (this.transferExecutable() && request.context.conv_state?.marked === false) {
       const targets = await measured("transfer_targets", () =>
-        withTimeout(this.adapter.readTransferTargets!(conversationId, prepLeft()), prepLeft()).catch(() => [] as TransferTarget[]));
+        this.adapter.readTransferTargets!(conversationId, prepLeft()).catch(() => [] as TransferTarget[]));
       if (this.expired(conversationId, messageId)) return;
       const names = new Set<string>(), ids = new Set<string>();
       if (targets.length <= 50 && targets.every(t => typeof t.target_id === "string" && t.target_id.length > 0 && t.target_id.length <= 64 &&

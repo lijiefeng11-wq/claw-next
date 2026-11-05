@@ -139,7 +139,7 @@ export interface PlatformAdapter {
    * 按该请求自己的响应判定。只有成功判据全部满足才返回 confirmed。
    */
   markConversation?(request: MarkRequest): Promise<MarkResult>;
-  /** Read current-account rows only; target IDs are page-bound and kept in memory. */
+  /** Read current-account rows only; IDs stay in memory. Resolves after bounded cleanup has released the page. */
   readTransferTargets?(conversationId: string, timeoutMs: number): Promise<TransferTarget[]>;
   transferConversation?(request: TransferRequest): Promise<TransferResult>;
   /**

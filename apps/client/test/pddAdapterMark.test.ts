@@ -602,3 +602,23 @@ describe("真实浮层脚本（虚构 DOM）", () => {
     assert.equal(runStar(fakeDom({ activeKeys: [`${BUYER}-0`], starActive: true }), at), "already_marked");
   });
 });
+
+
+test("formal mark: hung page read releases busy and never clicks or retries", async () => {
+  const h = harness(), wc = h.adapter.window.webContents, original = wc.executeJavaScriptInIsolatedWorld;
+  wc.executeJavaScriptInIsolatedWorld = () => new Promise(() => {});
+  const start = Date.now(), result = await h.mark();
+  assert.equal(result.status, "not_sent"); assert(Date.now() - start < 2500);
+  assert.equal(h.adapter.sending, false); assert.deepEqual(h.log.clicks, []);
+  wc.executeJavaScriptInIsolatedWorld = original;
+  const next = await h.mark("red", 3, () => "superseded");
+  assert(next.status !== "not_sent" || next.reason !== "pdd_send_busy"); assert.deepEqual(h.log.clicks, []);
+});
+
+test("formal mark: hung final hover releases busy after one attempt", async () => {
+  const h = harness({ onClick: pageSends() }), dbg = h.adapter.window.webContents.debugger, original = dbg.sendCommand;
+  dbg.sendCommand = (method: string, params: any) => params.type === "mouseMoved" && params.x === 1 && params.y === 1 ? new Promise(() => {}) : original(method, params);
+  const start = Date.now(), result = await h.mark();
+  assert.equal(result.status, "unknown"); assert(Date.now() - start < 2500);
+  assert.equal(h.adapter.sending, false); assert.equal(h.log.clicks.length, 1); assert.equal(h.adapter.markWatch, null);
+});
