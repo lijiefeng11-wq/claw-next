@@ -86,6 +86,10 @@ export const REASONS: Record<string, string> = {
   pdd_adapter_not_implemented: "拼多多收发尚未接入",
   pdd_send_not_implemented: "拼多多发送尚未接入，未调用平台",
   update_pending: "客户端正在安装更新，暂停发送",
+  transfer_blocked_by_mark: "会话已收藏，保留收藏并请在平台核对转接",
+  transfer_target_unknown: "接收账号已变化或当前未读到，未转接",
+  transfer_binding_unproven: "已尝试转接，结果需在平台核对",
+  unmark_not_supported: "当前不自动取消收藏，请先在平台核对",
   mark_invalid: "标星决定格式不对，未执行",
   conv_state_not_retained: "提交时的会话状态未保留（客户端重启），不标星",
   conv_state_not_unmarked: "提交时会话已收藏或状态未读到，不标星",
@@ -222,6 +226,15 @@ function markStatus(ev: EventRecord, color: MarkColor | undefined): MessageStatu
   return { label: "建议标星", tone: "suggest", reason: ev.blocked ? `未执行：${reasonText(ev.blocked)}` : name };
 }
 
+function transferStatus(ev: EventRecord): MessageStatus {
+  const attempt = ev.attempt;
+  if (attempt?.phase === "sent") return { label: "已转人工", tone: "ok", reason: "平台已确认" };
+  if (attempt?.phase === "unknown" || ev.snapshot?.delivery.status === "unknown") return { label: "转接结果待核查", tone: "error", reason: "请到平台核对接收账号，不会重试。" };
+  if (attempt && ["not_sent", "aborted_before_send", "claim_failed"].includes(attempt.phase)) return { label: "未转接", tone: "warn", reason: reasonText(attempt.detail) };
+  if (attempt) return { label: "转接中", tone: "wait", reason: "" };
+  return { label: "建议转人工", tone: "suggest", reason: ev.blocked ? `未执行：${reasonText(ev.blocked)}` : "" };
+}
+
 export function messageStatus(message: StoredMessage, ev: EventRecord | undefined, note: string | undefined): MessageStatus | null {
   if (message.role !== "buyer") return null;
   if (!ev) {
@@ -231,6 +244,7 @@ export function messageStatus(message: StoredMessage, ev: EventRecord | undefine
     return { label: "等待处理", tone: "wait", reason: "" };
   }
   if (ev.snapshot?.decision?.action === "mark") return markStatus(ev, ev.snapshot.decision.mark?.color);
+  if (ev.snapshot?.decision?.action === "transfer") return transferStatus(ev);
   const a = ev.attempt;
   if (a) {
     if (["not_sent", "aborted_before_send", "claim_failed"].includes(a.phase) && a.detail === "reply_deadline_exceeded") return { label: "本条待人工", tone: "handoff", reason: reasonText(a.detail) };
@@ -266,6 +280,8 @@ export function messageStatus(message: StoredMessage, ev: EventRecord | undefine
       return { label: "无需回复", tone: "muted", reason: reasonText(s.decision.reason) };
     case "mark":
       return markStatus(ev, s.decision.mark?.color);
+    case "transfer":
+      return transferStatus(ev);
   }
 }
 
@@ -275,6 +291,7 @@ function decisionText(rt: ShopRuntime, ev: EventRecord | undefined): string | nu
   if (!ev || !d) return ev ? rt.itemLabel(ev) : null;
   if (d.action === "reply") return d.text;
   if (d.action === "mark") return d.mark ? `标星：${MARK_COLOR_NAMES[d.mark.color]}` : "标星";
+  if (d.action === "transfer") return "转人工";
   return rt.itemLabel(ev);
 }
 

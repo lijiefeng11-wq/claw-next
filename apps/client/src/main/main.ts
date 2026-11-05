@@ -344,6 +344,8 @@ class Controller {
         onChange: () => this.push(),
         log: (line) => console.log(`[${shopId}] ${line}`),
         updateHold: () => this.updateHold,
+        declareMark: config.adapter === "pdd",
+        declareTransfer: config.adapter === "pdd",
       });
     } catch (err) {
       adapter.dispose();

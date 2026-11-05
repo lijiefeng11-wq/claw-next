@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { AdapterEvent, HistoryResult, MarkResult, PlatformAdapter, PlatformMessage, PlatformSendOption, SendResult } from "./adapter.js";
+import type { AdapterEvent, HistoryResult, MarkResult, TransferResult, PlatformAdapter, PlatformMessage, PlatformSendOption, SendResult } from "./adapter.js";
 import type { OrderGoods, PlatformOrder } from "./pddOrders.js";
 import { buildGoodsSnapshot } from "./goodsSnapshot.js";
 import { productKey, type ProductDoc } from "./productLearning.js";
@@ -11,6 +11,8 @@ import {
   CAP_PRODUCT_KNOWLEDGE,
   ProductLearningRequest,
   CAP_MARK_CONVERSATION,
+  CAP_TRANSFER_CONVERSATION,
+  TransferTarget,
   CAP_REPLY_DEADLINE,
   CAP_SEND_ITEM,
   ContextMessage,
@@ -129,6 +131,7 @@ export type RuntimeOptions = {
    * 默认关闭：实现合并不等于启用，正式启用须另行明确安排并经审查。
    */
   declareMark?: boolean;
+  declareTransfer?: boolean;
   /**
    * 客户端“检查更新”安装期间的全局保持（#34），由主进程统一提供，对之后新建的运行时同样生效。
    * 为真时禁止新的准备提交、领取、附加发送与标星；已领取的尝试照常归结，unknown 不变。
@@ -206,6 +209,8 @@ export class ShopRuntime {
   /** 事件提交时的 conv_state，只在内存；重启后该事件的 mark 不执行。 */
   private readonly eventConvState = new Map<string, ConvState>();
   private readonly declareMark: boolean;
+  private readonly declareTransfer: boolean;
+  private readonly eventTransferTargets = new Map<string, TransferTarget[]>();
   /** 客户端“检查更新”安装期间的全局保持（见 RuntimeOptions.updateHold）。 */
   private readonly updateHold: () => boolean;
   /** 最近一次成功心跳确认的能力，随租约（instance+session+generation）变化重置。 */
@@ -229,6 +234,7 @@ export class ShopRuntime {
     this.log = options.log ?? (() => undefined);
     this.onChange = options.onChange ?? (() => undefined);
     this.declareMark = options.declareMark === true;
+    this.declareTransfer = options.declareTransfer === true;
     this.updateHold = options.updateHold ?? (() => false);
     this.backend = new BackendClient(options.config.backend_url, options.token, options.fetchImpl, this.timing.requestTimeoutMs);
     this.journal = new Journal(options.dataDir);
@@ -345,7 +351,7 @@ export class ShopRuntime {
     if (!session || this.stopped) return;
     const started = this.now();
     try {
-      const lease = await this.backend.heartbeat(this.instanceId, session, [...(this.adapter.sendItem ? [CAP_SEND_ITEM] : []), CAP_REPLY_DEADLINE, CAP_GOODS_SNAPSHOT, ...(this.adapter.collectProducts ? [CAP_PRODUCT_KNOWLEDGE] : []), ...(this.markDeclared() ? [CAP_MARK_CONVERSATION] : [])]);
+      const lease = await this.backend.heartbeat(this.instanceId, session, [...(this.adapter.sendItem ? [CAP_SEND_ITEM] : []), CAP_REPLY_DEADLINE, CAP_GOODS_SNAPSHOT, ...(this.adapter.collectProducts ? [CAP_PRODUCT_KNOWLEDGE] : []), ...(this.markDeclared() ? [CAP_MARK_CONVERSATION] : []), ...(this.transferDeclared() ? [CAP_TRANSFER_CONVERSATION] : [])]);
       if (lease.instance_id !== this.instanceId || lease.session_id !== session || lease.shop_id !== this.config.shop_id) {
         this.lease = { state: "error", generation: 0, valid_until: 0, detail: "lease_response_mismatch" };
         return;
@@ -441,6 +447,14 @@ export class ShopRuntime {
   /** 本客户端声明 mark_conversation：已明确开启，且适配器能读收藏状态、能执行标星。 */
   private markDeclared() {
     return this.declareMark && !!this.adapter.readConvState && !!this.adapter.markConversation;
+  }
+
+  private transferDeclared() {
+    return this.declareTransfer && !!this.adapter.readConvState && !!this.adapter.readTransferTargets && !!this.adapter.transferConversation;
+  }
+
+  transferExecutable() {
+    return this.transferDeclared() && this.lease.state === "held" && this.capabilities.has(CAP_TRANSFER_CONVERSATION);
   }
 
   /** 可以执行标星：本客户端声明了能力，且本租约确认了它。 */
@@ -754,13 +768,22 @@ export class ShopRuntime {
     const candidates = this.buildSendOptions(conversationId, conv.revision);
     if (candidates) request.context.send_options = candidates.options;
     // 契约“会话操作（1.3 草案）”：能力确认后必带 conv_state；读不到如实报 marked=null，不捏造 false、不丢弃事件。
-    if (this.markConfirmed()) {
+    if (this.markConfirmed() || this.transferExecutable()) {
       const read = await measured("conv_state", () =>
         withTimeout(this.adapter.readConvState?.(conversationId, prepLeft()) ?? Promise.resolve(null), prepLeft()).catch(() => null),
       );
       if (this.expired(conversationId, messageId)) return;
       const marked = read?.marked ?? null;
       request.context.conv_state = { marked, color: marked === true ? (read?.color ?? null) : null, observed_at: this.now() };
+    }
+    if (this.transferExecutable() && request.context.conv_state?.marked === false) {
+      const targets = await measured("transfer_targets", () =>
+        this.adapter.readTransferTargets!(conversationId, prepLeft()).catch(() => [] as TransferTarget[]));
+      if (this.expired(conversationId, messageId)) return;
+      const names = new Set<string>(), ids = new Set<string>();
+      if (targets.length <= 50 && targets.every(t => typeof t.target_id === "string" && t.target_id.length > 0 && t.target_id.length <= 64 &&
+          typeof t.name === "string" && t.name.trim().length > 0 && t.name.length <= 40 && Number.isFinite(t.observed_at) && t.observed_at <= this.now() + 1 && this.now() - t.observed_at <= 30 &&
+          !names.has(t.name) && !ids.has(t.target_id) && !!names.add(t.name) && !!ids.add(t.target_id))) request.context.transfer_targets = targets;
     }
     const images = await measured("images", () => this.latestImages(last));
     if (this.expired(conversationId, messageId)) return;
@@ -796,6 +819,7 @@ export class ShopRuntime {
     if (memoryOnly) this.fullBodies.set(request.event_id, body);
     if (candidates) this.eventOptions.set(request.event_id, candidates.map);
     if (request.context.conv_state) this.eventConvState.set(request.event_id, request.context.conv_state);
+    if (request.context.transfer_targets) this.eventTransferTargets.set(request.event_id, request.context.transfer_targets);
     this.journal.addEvent({
       event_id: request.event_id,
       conversation_id: conversationId,
@@ -964,7 +988,7 @@ export class ShopRuntime {
     if (this.stopped || this.config.mode !== "auto" || ev.cancel || ev.attempt || ev.stage !== "submitted" || this.cancelling.has(ev.event_id)) return;
     const s = ev.snapshot;
     if (!s || s.delivery.status !== "unclaimed" || s.delivery.attempt_id !== null) return;
-    if (s.state === "ready" && s.decision?.action !== "reply" && s.decision?.action !== "send_item" && s.decision?.action !== "mark") return;
+    if (s.state === "ready" && s.decision?.action !== "reply" && s.decision?.action !== "send_item" && s.decision?.action !== "mark" && s.decision?.action !== "transfer") return;
     if (ev.instance_id !== this.instanceId || ev.session_id !== this.sessionId || !this.deadlineConfirmed(ev.generation) || !this.leaseValid(ev.generation)) return;
     this.cancelling.add(ev.event_id);
     this.journal.setCancel(ev.event_id, { phase: "intent", detail: null, at: this.now() });
@@ -1038,6 +1062,9 @@ export class ShopRuntime {
     } else if (decision.action === "mark") {
       const blocked = this.markBlocker(ev);
       if (blocked) return blocked;
+    } else if (decision.action === "transfer") {
+      const blocked = this.transferBlocker(ev);
+      if (blocked) return blocked;
     } else if (decision.action !== "reply" || !decision.text.trim()) return "not_reply";
     if (decision.expires_at - this.now() < this.timing.decisionSafety) return "decision_expired";
     if (!afterClaim && ev.attempt) return "already_attempted";
@@ -1072,6 +1099,18 @@ export class ShopRuntime {
     return null;
   }
 
+  private transferBlocker(ev: EventRecord): string | null {
+    const d = ev.snapshot?.decision?.transfer;
+    if (!d) return "transfer_invalid";
+    if (!this.transferExecutable()) return "capability_not_confirmed";
+    if (typeof this.eventConvState.get(ev.event_id)?.marked !== "boolean") return "conv_state_not_retained";
+    if (this.eventConvState.get(ev.event_id)?.marked === true) return "transfer_blocked_by_mark";
+    if (d.unmark_policy.allow) return "unmark_not_supported";
+    const target = this.eventTransferTargets.get(ev.event_id)?.find(t => t.target_id === d.target_id);
+    if (!target || this.now() - target.observed_at > 30) return "transfer_target_unknown";
+    return null;
+  }
+
   /** 界面展示用：send_item 决定对应的候选名称（只在内存，重启后只显示类型）。 */
   itemLabel(ev: EventRecord): string | null {
     const item = ev.snapshot?.decision?.action === "send_item" ? ev.snapshot.decision.item : undefined;
@@ -1084,7 +1123,7 @@ export class ShopRuntime {
 
   private async considerSend(ev: EventRecord) {
     const action = ev.snapshot?.decision?.action;
-    if (action !== "reply" && action !== "send_item" && action !== "mark") return;
+    if (action !== "reply" && action !== "send_item" && action !== "mark" && action !== "transfer") return;
     const blocked = this.sendingConversations.has(ev.conversation_id) ? "conversation_busy" : this.sendBlocker(ev);
     if (blocked) {
       this.journal.setBlocked(ev.event_id, blocked);
@@ -1142,7 +1181,8 @@ export class ShopRuntime {
     const isItem = snap.decision?.action === "send_item";
     // 标星的确认截止同附加发送：许可到期前 2 秒（契约 1.3“前台执行”第 5 条）。
     const isMark = snap.decision?.action === "mark";
-    const sendWindow = (d.claim_expires_at ?? 0) - this.now() - (isItem || isMark ? this.timing.itemReceiptReserve : this.timing.receiptReserve);
+    const isTransfer = snap.decision?.action === "transfer";
+    const sendWindow = (d.claim_expires_at ?? 0) - this.now() - (isItem || isMark || isTransfer ? this.timing.itemReceiptReserve : this.timing.receiptReserve);
     const blocked = this.sendBlocker(ev, true) ?? (sendWindow < Math.max(this.timing.minSendWindow, this.timing.claimSafety) ? "claim_expiring" : null);
     if (blocked) {
       this.journal.setBlocked(ev.event_id, blocked);
@@ -1153,6 +1193,7 @@ export class ShopRuntime {
     // 平台请求开始前落盘；此后任何中断都只能是 unknown。
     this.journal.setAttempt(ev.event_id, attemptId, "sending");
     if (isMark) return this.deliverMark(ev, attemptId, d.claim_expires_at ?? 0, sendWindow);
+    if (isTransfer) return this.deliverTransfer(ev, attemptId, d.claim_expires_at ?? 0, sendWindow);
     const sendStartedMs = Date.now();
     const knownAgentIds = new Set(this.journal.conversation(ev.conversation_id).messages.filter((m) => m.role === "agent").map((m) => m.id));
     this.changed();
@@ -1203,6 +1244,29 @@ export class ShopRuntime {
     if (result.status === "confirmed") this.finish(ev, attemptId, "sent", null, "sent", null, observed);
     else this.finish(ev, attemptId, result.status, result.reason, result.status, null, observed);
     if (result.status === "unknown") this.countUnknown("mark", result.reason);
+  }
+
+  private async deliverTransfer(ev: EventRecord, attemptId: string, claimExpiresAt: number, sendWindow: number) {
+    const target = ev.snapshot?.decision?.transfer;
+    let result: TransferResult;
+    const deadline = Date.now() / 1000 + Math.min(this.timing.sendTimeoutMs / 1000, sendWindow);
+    try {
+      const recheck = () => this.sendBlocker(ev, true) ?? (Date.now() / 1000 >= deadline ? "claim_expiring" : null);
+      const call = this.adapter.transferConversation && target ? this.adapter.transferConversation({
+        conversation_id: ev.conversation_id, target_id: target.target_id, allow_unmark: target.unmark_policy.allow,
+        attempt_id: attemptId, deadline, recheck,
+      }) : Promise.resolve({ status: "not_sent" as const, reason: "capability_not_confirmed" });
+      result = await this.timed(ev.event_id, "platform_transfer", () => withTimeout(call, Math.min(this.timing.sendTimeoutMs, sendWindow * 1000) + 1000));
+    } catch {
+      result = { status: "unknown", reason: "transfer_exception_or_timeout" };
+    }
+    if (result.status === "confirmed" && (claimExpiresAt - this.now() < this.timing.itemReceiptReserve || this.platformCheck() || ev.session_id !== this.sessionId)) {
+      result = { status: "unknown", reason: "transfer_confirmation_invalid" };
+    }
+    const observed = result.status === "not_sent" ? undefined : result.page_observed;
+    if (result.status === "confirmed") this.finish(ev, attemptId, "sent", null, "sent", null, observed);
+    else this.finish(ev, attemptId, result.status, result.reason, result.status, null, observed);
+    if (result.status === "unknown") this.countUnknown("transfer", result.reason);
   }
 
   private countUnknown(kind: string, reason: string) {
@@ -1368,6 +1432,10 @@ function pendingReceipt(status: ReceiptStatus, platformMessageId: string | null 
  */
 export function receiptExtra(ev: EventRecord, status: ReceiptStatus, detail: string | null, observed?: PageObserved): ReceiptExtra | undefined {
   const d = ev.snapshot?.decision;
+  if (d?.action === "transfer" && d.transfer) {
+    if (status === "not_sent") return { reason: convActionReason(detail) };
+    return { steps: [{ step: "transfer", status }], ...(observed ? { page_observed: observed } : {}) };
+  }
   if (d?.action !== "mark" || !d.mark) return undefined;
   if (status === "not_sent") return { reason: convActionReason(detail) };
   return { steps: [{ step: "mark", status, color: d.mark.color }], ...(observed ? { page_observed: observed } : {}) };

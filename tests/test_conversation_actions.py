@@ -47,7 +47,7 @@ class ActionDataTests(unittest.TestCase):
             with self.assertRaises(ApiError):ca.validate_context({"transfer_targets": targets}, require)
 
     def test_only_explicit_policy_and_readable_state_can_resolve(self):
-        self.assertEqual(ca.READY_CAPABILITIES, ())
+        self.assertEqual(ca.READY_CAPABILITIES, ca.CAPABILITIES)
         for policy in (MARK, TRANSFER):
             for ctx, caps in ((context(None), ca.CAPABILITIES), ({}, ca.CAPABILITIES), (context(), [])):
                 self.assertEqual(resolved(policy, ctx, caps)["action"], "handoff")

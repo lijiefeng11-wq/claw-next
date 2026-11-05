@@ -29,7 +29,7 @@ let checks=0;
   h.loadRules([{id:'r',contains:'x',reply:'old text',handling:{action:'mark',color:'orange'}}]);
   const rule=h.collectRules();assert.equal(rule.ok,true);assert.deepEqual(plain(rule.value[0].handling),{action:'mark',color:'orange'});assert.ok(!('reply' in rule.value[0]));assert.ok(!('send' in rule.value[0]));checks++;
   const select=h.el['rules-list'].querySelectorAll('.rule-send-type')[0];select.value='handling:transfer';select.fire('change');
-  assert.equal(h.state.rules[0].handling.allow_unmark,true);
+  assert.equal(h.state.rules[0].handling.allow_unmark,false);
   const account=h.el['rules-list'].querySelectorAll('.policy-details')[0].querySelectorAll('input')[0];account.value='  虚构客服  ';account.fire('input');
   assert.equal(h.collectRules().value[0].handling.account,'虚构客服');checks++;
   select.value='';select.fire('change');assert.equal(h.collectRules().value[0].reply,'old text');assert.ok(!('handling' in h.collectRules().value[0]));checks++;

@@ -1,3 +1,4 @@
+import type { TransferTarget } from "./protocol.js";
 import type { Card, ImageMime, Kind, MarkColor, PageObserved, Role } from "./protocol.js";
 import type { PlatformOrder } from "./pddOrders.js";
 import type { PageHealthView } from "./pageHealth.js";
@@ -98,6 +99,9 @@ export type MarkResult =
   | { status: "not_sent"; reason: string }
   | { status: "unknown"; reason: string; page_observed?: PageObserved };
 
+export type TransferRequest = { conversation_id: string; target_id: string; allow_unmark: boolean; attempt_id: string; deadline: number; recheck: () => string | null };
+export type TransferResult = MarkResult;
+
 export type AdapterEvent =
   | { type: "status" }
   /** 平台会话建立或重新登录：运行时必须换新 session_id。 */
@@ -135,6 +139,9 @@ export interface PlatformAdapter {
    * 按该请求自己的响应判定。只有成功判据全部满足才返回 confirmed。
    */
   markConversation?(request: MarkRequest): Promise<MarkResult>;
+  /** Read current-account rows only; IDs stay in memory. Resolves after bounded cleanup has released the page. */
+  readTransferTargets?(conversationId: string, timeoutMs: number): Promise<TransferTarget[]>;
+  transferConversation?(request: TransferRequest): Promise<TransferResult>;
   /**
    * 通过平台页面自身按钮发送一项已有内容。只有平台明确成功且聊天记录相对点击前恰好新增一条
    * 对应对象的客服消息时才返回 confirmed（附该消息编号）；点击前放弃返回 not_sent；其余 unknown。

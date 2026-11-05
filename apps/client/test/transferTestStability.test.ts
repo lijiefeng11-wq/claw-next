@@ -172,6 +172,12 @@ test("点行后读不到目标行：记具体原因，不点确认", async () =>
   assert.equal(h.clicks.some((c) => same(c, CONFIRM)), false);
 });
 
+test("点行后快照发现买家已切换：保留会话不符原因，不误归为目标行挪位", async () => {
+  const h = harness({ ...stable, rect: "conversation_mismatch" });
+  assert.equal(await run(h, true), "not_executed:conversation_mismatch");
+  assert.equal(h.clicks.some(c => same(c, CONFIRM)), false);
+});
+
 test("复审反例：点行后切到别的会话或已过期——收尾不点“取消”，只记跳过原因", async () => {
   for (const g of ["conversation_mismatch", "expired"]) {
     for (const confirm of [false, true]) {

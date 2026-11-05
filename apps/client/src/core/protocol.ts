@@ -11,7 +11,7 @@ export const IMAGE_MISSING = "[图片，前台未取到]";
 
 export type Role = "buyer" | "agent" | "system";
 export type Kind = "text" | "image" | "card" | "unsupported";
-export type Action = "reply" | "handoff" | "none" | "send_item" | "mark";
+export type Action = "reply" | "handoff" | "none" | "send_item" | "mark" | "transfer";
 export type DeliveryStatus = "unclaimed" | "claimed" | "sent" | "not_sent" | "unknown";
 export type ReceiptStatus = "sent" | "not_sent" | "unknown";
 
@@ -67,8 +67,14 @@ export type ConvActionReason = "blocked_by_mark" | "platform_rejected" | "conv_s
 export type PageObserved = "marked" | "left_list" | "unchanged" | "unknown";
 /** mark 只有一个步骤；只列已开始的步骤。 */
 export type MarkStep = { step: "mark"; status: ReceiptStatus; color: MarkColor };
+/** 转接（1.3）：能力名、目标与“转接前取消标星”策略。 */
+export const CAP_TRANSFER_CONVERSATION = "transfer_conversation";
+export type TransferTarget = { target_id: string; name: string; observed_at: number };
+/** transfer 只有一个步骤；unmarked=null 表示本次没有可靠读到取消标星结果。 */
+export type TransferStep = { step: "transfer"; status: ReceiptStatus; reason?: ConvActionReason };
+export type UnmarkTransferStep = { step: "unmark_and_transfer"; status: ReceiptStatus; unmarked: boolean | null; reason?: ConvActionReason };
 /** 会话操作回执在 attempt_id / status 之外的字段；reply / send_item 不带。 */
-export type ReceiptExtra = { steps?: MarkStep[]; reason?: ConvActionReason; page_observed?: PageObserved };
+export type ReceiptExtra = { steps?: (MarkStep | TransferStep | UnmarkTransferStep)[]; reason?: ConvActionReason; page_observed?: PageObserved };
 
 /**
  * 本地阻止原因 → 契约回执原因。页面状态两类原样；能力撤回与确认截止各自归类；
@@ -119,14 +125,15 @@ export type EventRequest = {
   received_at: number;
   /** 契约 A：仅在本租约确认 reply_deadline 后提交；冻结后不再改变。 */
   remaining_budget_ms?: number;
-  context: { history_complete: boolean; messages: ContextMessage[]; orders?: ContextOrder[]; goods?: GoodsSnapshot[]; send_options?: SendOptions; conv_state?: ConvState };
+  context: { history_complete: boolean; messages: ContextMessage[]; orders?: ContextOrder[]; goods?: GoodsSnapshot[]; send_options?: SendOptions; conv_state?: ConvState; transfer_targets?: TransferTarget[] };
 };
 
 /**
  * send_item 不附文字，text 为空串；item 只在 send_item 时存在。
  * mark（契约 1.3）不附文字，mark.color 与 policy_version（正整数）只在 mark 时存在。
+ * transfer（契约 1.3）不附文字；transfer 只在 transfer 时存在，policy_version 为本事件策略版本。
  */
-export type Decision = { action: Action; text: string; reason: string; expires_at: number; item?: SendItem; mark?: { color: MarkColor }; policy_version?: number };
+export type Decision = { action: Action; text: string; reason: string; expires_at: number; item?: SendItem; mark?: { color: MarkColor }; transfer?: { target_id: string; unmark_policy: { allow: boolean; version: number } }; policy_version?: number };
 
 export type Delivery = {
   status: DeliveryStatus;
@@ -268,7 +275,24 @@ export function parseLease(value: unknown): Lease {
 
 const ITEM_TYPES: readonly string[] = ["instruction", "goods_card", "video"];
 
-/** 不认识的 action（或格式不对的 send_item / mark，以及 transfer）一律按 none 记录，绝不执行。 */
+/**
+ * transfer 的严格校验：transfer 与 unmark_policy 为普通对象；target_id 为非空字符串且 ≤64；
+ * allow 为真布尔；unmark_policy.version 与 policy_version 为相等的正整数。不合格返回 null。
+ */
+function transferFields(value: unknown, policyVersion: unknown): { target_id: string; allow: boolean; version: number } | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const t = value as Record<string, unknown>;
+  if (typeof t.target_id !== "string" || t.target_id.trim().length === 0 || t.target_id.length > 64) return null;
+  const p = t.unmark_policy;
+  if (typeof p !== "object" || p === null || Array.isArray(p)) return null;
+  const u = p as Record<string, unknown>;
+  if (typeof u.allow !== "boolean") return null;
+  if (typeof u.version !== "number" || !Number.isInteger(u.version) || u.version <= 0) return null;
+  if (typeof policyVersion !== "number" || !Number.isInteger(policyVersion) || policyVersion <= 0 || policyVersion !== u.version) return null;
+  return { target_id: t.target_id, allow: u.allow, version: u.version };
+}
+
+/** 不认识的 action（或格式不对的 send_item / mark / transfer）一律按 none 记录，绝不执行。 */
 function parseDecision(value: unknown): Decision | null {
   if (value === null) return null;
   const v = obj(value);
@@ -285,6 +309,10 @@ function parseDecision(value: unknown): Decision | null {
   const mark = v.mark as Record<string, unknown> | null | undefined;
   if (v.action === "mark" && mark && typeof mark === "object" && !Array.isArray(mark) && MARK_COLORS.includes(mark.color as MarkColor) && Number.isInteger(v.policy_version) && (v.policy_version as number) > 0) {
     return { action: "mark", text: "", ...base, mark: { color: mark.color as MarkColor }, policy_version: v.policy_version as number };
+  }
+  if (v.action === "transfer") {
+    const t = transferFields(v.transfer, v.policy_version);
+    if (t) return { action: "transfer", text: "", ...base, transfer: { target_id: t.target_id, unmark_policy: { allow: t.allow, version: t.version } }, policy_version: t.version };
   }
   return { action: "none", text: "", reason: `unsupported_action:${typeof v.action === "string" ? v.action.slice(0, 32) : "invalid"}`, expires_at: base.expires_at };
 }
