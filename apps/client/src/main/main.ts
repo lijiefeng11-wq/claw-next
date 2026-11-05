@@ -1,5 +1,6 @@
 import { ClientWindow } from "./clientWindow.js";
 import { PlatformWorkspace } from "./platformWorkspace.js";
+import { prewarmSelector, stopSelector } from "./scraplingSelector.js";
 import { IpcMainInvokeEvent, Notification, app, dialog, ipcMain, screen, session, shell } from "electron";
 import { shopAlert, type ShopAlert } from "../core/pageHealth.js";
 import fs from "node:fs";
@@ -899,6 +900,7 @@ app.whenReady().then(async () => {
   hardenSessions();
   registerIpc();
   await createWindow();
+  if (!SMOKE) prewarmSelector();
   // 有时间条件的店铺提醒（未登录超过 1 分钟、登录 12 小时内过期）每 30 秒重新判断一次。
   setInterval(() => controller.tickAlerts(), 30_000).unref?.();
   // 替换脚本据此判断新版本已能正常启动（只含运行序号、进程号与时间）。
@@ -935,5 +937,5 @@ app.on("before-quit", (event) => {
   if (quitting || !controller) return;
   event.preventDefault();
   quitting = true;
-  void controller.stopAll().finally(() => app.quit());
+  void controller.stopAll().finally(() => { stopSelector(); app.quit(); });
 });

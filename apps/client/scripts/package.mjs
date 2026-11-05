@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { packager } from "@electron/packager";
 import { bundleElectronLicenses, verifyZipEntries } from "./licenses.mjs";
+import { buildSelectorHelper } from "./build-selector-helper.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
@@ -29,7 +30,7 @@ if (!["arm64", "x64"].includes(arch)) throw new Error(`unsupported arch: ${arch}
 
 const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 const electronVersion = require("electron/package.json").version;
-if (Object.keys(pkg.dependencies ?? {}).length) throw new Error("运行时依赖需要一并打包，请先更新本脚本");
+if (Object.keys(pkg.dependencies ?? {}).some(name => name !== "playwright-core")) throw new Error("Unexpected runtime dependency; update package staging explicitly");
 
 // 1. 在全新的临时目录编译（与测试同一 tsconfig），再复制静态文件，确认主进程入口存在。
 const build = path.join(root, "out", "build");
@@ -44,6 +45,7 @@ const stage = path.join(root, "out", "stage");
 fs.rmSync(stage, { recursive: true, force: true });
 fs.mkdirSync(stage, { recursive: true });
 const runtimePkg = { name: pkg.name, productName: pkg.productName, version: pkg.version, description: pkg.description, license: pkg.license, private: true, main: pkg.main };
+runtimePkg.dependencies = pkg.dependencies;
 if (!runtimePkg.license) throw new Error("package.json 缺少 license 字段");
 fs.writeFileSync(path.join(stage, "package.json"), JSON.stringify(runtimePkg, null, 2));
 // 项目许可证随应用一起分发（放在应用目录内）；Electron 自带的第三方许可证由打包工具保留，不替换。
@@ -51,6 +53,7 @@ const license = path.join(root, "..", "..", "LICENSE");
 if (!fs.existsSync(license)) throw new Error(`missing project LICENSE: ${license}`);
 fs.copyFileSync(license, path.join(stage, "LICENSE"));
 fs.cpSync(path.join(build, "src"), path.join(stage, "dist", "src"), { recursive: true });
+fs.cpSync(path.dirname(require.resolve("playwright-core/package.json")), path.join(stage, "node_modules", "playwright-core"), { recursive: true, dereference: true });
 fs.rmSync(build, { recursive: true, force: true });
 
 // 构建信息（客户端“检查更新”用）：完整提交 SHA、CI 运行序号、目标平台与架构，放在包外资源
@@ -75,6 +78,7 @@ if (process.argv.includes("--stage-only")) {
 
 // 3. 生成应用。
 let paths;
+const selectorHelper = buildSelectorHelper(platform, arch);
 try {
   paths = await packager({
     dir: stage,
@@ -98,6 +102,8 @@ try {
 }
 for (const p of paths) {
   const res = platform === "darwin" ? path.join(p, `${pkg.productName}.app`, "Contents", "Resources") : path.join(p, "resources");
+  // packager's extraResource copy rewrites relative Python framework links to the build path.
+  fs.cpSync(selectorHelper, path.join(res, "claw-selector"), { recursive: true, verbatimSymlinks: true });
   if (fs.readFileSync(path.join(res, "build-info.json"), "utf8") !== fs.readFileSync(buildInfo, "utf8")) throw new Error(`build-info.json 未按原样进入包：${path.relative(root, p)}`);
 }
 for (const p of paths) console.log(`packaged: ${path.relative(root, p)}`);

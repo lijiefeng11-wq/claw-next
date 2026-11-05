@@ -26,10 +26,17 @@ test("待打包内容来自全新编译：dist 中的旧残留不进包；只含
     assert.ok(files.includes("dist/src/renderer/index.html") && files.includes("dist/src/renderer/style.css"));
     assert.ok(!files.some((f) => f.includes("zz-removed-source-fixture")), "旧残留被打进了包");
     assert.ok(!files.some((f) => f.startsWith("dist/test/") || f.includes("/test/")), "测试代码被打进了包");
-    // 每个打包的 .js 都对应当前的 .ts 源文件。
-    for (const f of files.filter((x) => x.endsWith(".js"))) assert.ok(fs.existsSync(path.join(root, f.replace(/^dist\//, "").replace(/\.js$/, ".ts"))), `无对应源文件：${f}`);
+    // 本项目代码对应本次源文件；唯一运行依赖与锁定安装内容逐字节相同。
+    for (const f of files.filter((x) => x.startsWith("dist/") && x.endsWith(".js"))) assert.ok(fs.existsSync(path.join(root, f.replace(/^dist\//, "").replace(/\.js$/, ".ts"))), `无对应源文件：${f}`);
+    const dependencies = files.filter(f => f.startsWith("node_modules/"));
+    assert.ok(dependencies.includes("node_modules/playwright-core/package.json"));
+    for (const f of dependencies) {
+      assert.ok(f.startsWith("node_modules/playwright-core/"), `意外运行依赖：${f}`);
+      assert.deepEqual(fs.readFileSync(path.join(stage, f)), fs.readFileSync(path.join(root, f)), `运行依赖被修改：${f}`);
+    }
     const pkg = JSON.parse(fs.readFileSync(path.join(stage, "package.json"), "utf8"));
-    assert.deepEqual(Object.keys(pkg).sort(), ["description", "license", "main", "name", "private", "productName", "version"]);
+    assert.deepEqual(Object.keys(pkg).sort(), ["dependencies", "description", "license", "main", "name", "private", "productName", "version"]);
+    assert.deepEqual(pkg.dependencies, { "playwright-core": "1.64.0" });
     assert.equal(pkg.license, "MIT");
     // 项目许可证随应用分发，内容与仓库根目录的 LICENSE 一致。
     assert.ok(files.includes("LICENSE"), "缺少项目 LICENSE");

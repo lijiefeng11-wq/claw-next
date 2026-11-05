@@ -1,3 +1,4 @@
+import { clickSendWithPlaywright } from "./playwrightSend.js";
 import type { TransferRequest, TransferResult } from "../core/adapter.js";
 import type { TransferTarget } from "../core/protocol.js";
 import { session } from "electron";
@@ -974,8 +975,9 @@ export class PddPageAdapter implements PlatformAdapter {
   private readonly listeners: ((e: AdapterEvent) => void)[] = [];
   private readonly tracker = new PddSessionTracker((e) => this.emit(e));
   private probing = false;
-  private outgoing: { to_uid: string; text: string; matched: string | null; blocked: number; resolve: (r: SendResult) => void } | null = null;
+  private outgoing: { to_uid: string; text: string; matched: string | null; blocked: number; recheck?: () => string | null; clicked?: () => boolean; resolve: (r: SendResult) => void } | null = null;
   private sendingValue = false;
+  private clickText = clickSendWithPlaywright;
   private messageWatcher: PddMessageWatcher | null = null;
   private watchEpoch = 0;
   private pendingFreshBuyer = false;
@@ -1096,7 +1098,8 @@ export class PddPageAdapter implements PlatformAdapter {
       seen.add(key);
       write({ kind, path: p, schema });
     };
-    dbg.on("message", (_e, method, params: any) => {
+    dbg.on("message", (_e, method, params: any, sessionId?: string) => {
+      if (sessionId) return;
       if (method === "Network.requestWillBeSent") {
         if (transferFile) {
           try {
@@ -1270,7 +1273,10 @@ export class PddPageAdapter implements PlatformAdapter {
   /** 页面发出的每个 send_message 都在此核对；有进行中的自动发送时，不一致即拦截，请求不会到达平台。 */
   private onSendPaused(dbg: Electron.Debugger, params: any) {
     const out = this.outgoing;
-    const decision = out?.matched ? "block" : decideOutgoing(out, parseSendRequest(jsonOrNull(params.request?.postData)));
+    let invalid = false;
+    try { invalid = !!out && !!(out.matched || out.recheck?.() || (out.clicked && !out.clicked())); }
+    catch { invalid = true; }
+    const decision = invalid ? "block" : decideOutgoing(out, parseSendRequest(jsonOrNull(params.request?.postData)));
     console.log(`[${this.shopId}] platform send_message ${decision}`);
     if (decision === "block") {
       if (out) out.blocked += 1;
@@ -1990,71 +1996,21 @@ export class PddPageAdapter implements PlatformAdapter {
       // 第一阶段：打开对话、检查输入框。失败均未触碰发送按钮。
       const notOpened = await this.openConversation(uid);
       if (notOpened) return notSent(notOpened);
-      const guard = `const act = document.querySelector(${JSON.stringify(ITEM.replace("[data-random]", ".active[data-random]"))});
-        if (!act || !(act.getAttribute("data-random") || "").startsWith(${JSON.stringify(uid + "-")})) return "pdd_conversation_changed";
-        const ta = document.querySelector(${JSON.stringify(TEXTAREA)});
-        if (!ta) return "pdd_input_missing";
-        const box = ta.closest("div.reply-box");
-        if (!box) return "pdd_input_missing";`;
-      const filled = await this.run<string>(`(() => { ${guard}
-        if (ta.value.trim()) return "pdd_input_not_empty";
-        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(ta, ${JSON.stringify(text)});
-        ta.dispatchEvent(new Event("input", { bubbles: true }));
-        return "filled"; })()`).catch(() => "pdd_page_script_failed");
-      if (filled !== "filled") return notSent(filled);
-      const left = () => (request.deadline ?? Infinity) - Date.now() / 1000;
-      if (left() < 1.5) {
-        await this.clearInput(text);
-        return notSent("claim_expiring");
-      }
-      const result = new Promise<SendResult>((resolve) => {
-        this.outgoing = { to_uid: uid, text, matched: null, blocked: 0, resolve };
+      let didPress = false, didFill = false;
+      const deadline = request.deadline ?? Date.now() / 1000 + 8;
+      const left = () => deadline - Date.now() / 1000;
+      const recheck = () => this.window !== page || this.watchEpoch !== epoch ? "pdd_page_changed" :
+        request.recheck?.() ?? (left() < 1.5 ? "claim_expiring" : null);
+      let observed: SendResult | null = null;
+      const result = new Promise<SendResult>(resolve => {
+        this.outgoing = { to_uid: uid, text, matched: null, blocked: 0, recheck, clicked: () => didPress, resolve: r => { observed = r; resolve(r); } };
       });
-      // CDP 使用页面视口 CSS 坐标，不依赖桌面焦点或页面缩放。
-      const locate = () => this.run<string | { x: number; y: number }>(`(() => { ${guard}
-        if (ta.value !== ${JSON.stringify(text)}) return "pdd_input_mismatch";
-        // 有些页面在输入后才创建或显示按钮；存在性、可见性与唯一性在填入后检查。
-        const buttons = [...box.querySelectorAll(${JSON.stringify(SEND_BTN)})].filter(btn => {
-          const r = btn.getBoundingClientRect(), style = getComputedStyle(btn);
-          return btn.closest("div.reply-box") === box && style.visibility === "visible" &&
-            r.width >= 4 && r.height >= 4 && r.right > 0 && r.bottom > 0 && r.left < innerWidth && r.top < innerHeight;
-        });
-        if (buttons.length !== 1) return "pdd_input_missing";
-        const btn = buttons[0];
-        const r = btn.getBoundingClientRect();
-        const left = Math.max(0, r.left), right = Math.min(innerWidth, r.right);
-        const top = Math.max(0, r.top), bottom = Math.min(innerHeight, r.bottom);
-        if (right - left < 4 || bottom - top < 4) return "pdd_send_button_hidden";
-        const y = (top + bottom) / 2;
-        // 只在同一个按钮的可见部分找命中点；定位可探测多点，真实点击仍只有一次。
-        for (const fraction of [0.5, 0.25, 0.75]) {
-          const x = left + (right - left) * fraction;
-          if (document.elementFromPoint(x, y)?.closest(${JSON.stringify(SEND_BTN)}) === btn) return { x, y };
-        }
-        return "pdd_send_button_covered"; })()`).catch(() => "pdd_page_script_failed");
-      // 只等按钮就绪，不固定停顿，也不重做填入或点击。到期前留出原有发送余量。
-      const clickDeadline = (request.deadline ?? Infinity) * 1000 - 1500;
-      const readyUntil = Math.min(Date.now() + 1000, clickDeadline);
-      let located = await locate();
-      while (typeof located === "string" && ["pdd_input_missing", "pdd_send_button_hidden", "pdd_send_button_covered"].includes(located) && Date.now() < readyUntil) {
-        await sleep(Math.min(50, readyUntil - Date.now()));
-        if (this.window !== page || this.watchEpoch !== epoch) { located = "pdd_page_changed"; break; }
-        if (Date.now() >= clickDeadline) { located = "claim_expiring"; break; }
-        located = await locate();
-      }
-      if (typeof located === "string" && Date.now() >= clickDeadline) located = "claim_expiring";
-      const win = this.window;
-      if (typeof located === "string" || !win || win.isDestroyed()) {
-        this.outgoing = null;
-        await this.clearInput(text);
-        return notSent(typeof located === "string" ? located : "platform_window_closed");
-      }
-      const click = await dispatchPageClick(win.webContents, located, () => {
-        if (this.window !== page || this.watchEpoch !== epoch) return "pdd_page_changed";
-        return request.recheck?.() ?? (left() < 1.5 ? "claim_expiring" : null);
-      });
+      const click = await this.clickText(page.webContents, uid, text, deadline, recheck, value => { didPress = value; }, () => { didFill = true; });
       if (click.status !== "dispatched") {
-        if (click.status === "not_sent") await this.clearInput(text);
+        if (didPress && observed && (observed as SendResult).status === "confirmed") return observed;
+        if (click.status === "not_sent" && didFill && this.window === page && this.watchEpoch === epoch) {
+          await Promise.race([this.clearInput(text, uid).catch(() => undefined), sleep(500)]);
+        }
         return click;
       }
       // 第二阶段：已点发送；此后除平台确认外一律不确定。
@@ -2062,7 +2018,6 @@ export class PddPageAdapter implements PlatformAdapter {
       const out = this.outgoing as { matched: string | null; blocked: number } | null;
       this.outgoing = null;
       if (r) return r;
-      if (!out?.matched) await this.clearInput(text);
       if (out && !out.matched && out.blocked > 0) return { status: "unknown", reason: "pdd_send_blocked_mismatch" };
       return { status: "unknown", reason: out?.matched ? "send_timeout" : "pdd_send_request_not_observed" };
     } finally {
@@ -3179,8 +3134,11 @@ export class PddPageAdapter implements PlatformAdapter {
     return `unknown:not_observed${unfavorited ? ",unfavorited" : ""}`;
   }
 
-  private async clearInput(text: string) {
+  private async clearInput(text: string, uid?: string) {
     await this.run(`(() => {
+      const buyer = ${JSON.stringify(uid ?? null)};
+      const keys = [...document.querySelectorAll("li.chat-item .chat-item-box.active[data-random]")].map(e => /^([0-9]{1,32})-/.exec(e.getAttribute("data-random") || "")?.[1]);
+      if (buyer !== null && (!keys.length || !keys.every(k => k === buyer))) return;
       const ta = document.querySelector(${JSON.stringify(TEXTAREA)});
       if (!ta || ta.value !== ${JSON.stringify(text)}) return;
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(ta, "");

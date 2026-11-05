@@ -10,19 +10,20 @@ const temp = parentOwned || fs.mkdtempSync(path.join(os.tmpdir(), "claw-send-loc
 fs.mkdirSync(temp, { recursive: true });
 app.setPath("userData", temp);
 const { PddPageAdapter } = require("../dist/src/main/pddAdapter.js");
+const { selectSendControl, stopSelector } = require("../dist/src/main/scraplingSelector.js");
 const results = [];
 const watchdog = setTimeout(() => app.exit(2), 45_000);
 
 function html(s) {
-  const button = '<div class="send-btn" onclick="clicks++"><span>发送</span></div>';
+  const button = `<div class="${s.renamed ? 'new-send-control' : 'send-btn'}" onclick="clicks++"><span>发送${s.hint ? '(Enter)' : ''}</span></div>`;
   return `<!doctype html><meta charset="utf-8"><style>
     body{margin:0} .reply-box{position:absolute;left:120px;top:100px;width:300px}
     textarea{width:200px;height:60px} .reply-footer{position:relative}
-    .send-btn{position:relative;display:inline-block;width:100px;height:40px;background:#69f}
+    .send-btn,.new-send-control{position:relative;display:inline-block;width:100px;height:40px;background:#69f}
     ${s.css || ""}${s.revealButton || s.revealDelay || s.neverReveal ? '#composer .send-btn{visibility:hidden}' : ""}</style>
     <ul><li class="chat-item"><div class="chat-item-box active" data-random="${s.otherBuyer ? "9002" : "9001"}-fixture"></div></li></ul>
     ${s.offscreenDuplicate ? '<div class="reply-box" style="left:-1200px"><div class="reply-footer">' + button + '</div></div>' : ""}
-    <div class="reply-box" id="composer"><div class="reply-input"><textarea></textarea></div>
+    <div class="reply-box" id="composer"><div class="reply-input"><textarea>${s.existingDraft ? '虚构回复' : ''}</textarea></div>
       <div class="reply-footer">${s.hiddenDuplicate ? '<div class="send-btn" style="display:none"></div>' : ""}
       ${s.insertDelay ? "" : button}${s.ambiguous ? button : ""}</div></div>
     ${s.mask ? '<div style="position:fixed;inset:0;background:#fff;z-index:10"></div>' : ""}
@@ -34,17 +35,25 @@ function html(s) {
 }
 
 app.whenReady().then(async () => {
-  const win = new BrowserWindow({ show: false, width: 900, height: 700, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } });
+  await selectSendControl('<div class="reply-footer"><button data-claw-candidate="0">发送</button></div>', 15000);
+  const win = new BrowserWindow({ show: false, width: 900, height: 700, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } });
   const wc = win.webContents;
   wc.session.webRequest.onBeforeRequest((details, callback) => callback({ cancel: !details.url.startsWith("data:") }));
   wc.debugger.attach("1.3");
+  const nativeCommand = wc.debugger.sendCommand.bind(wc.debugger);
   const scenarios = [
+    { name: "below_viewport_scrolls_before_click", css: "#composer{top:1000px}body{height:1500px}", status: "confirmed" },
+    { name: "ancestor_clipping_scrolls_before_click", css: "#composer{height:70px;overflow:hidden}", status: "confirmed" },
     { name: "normal", status: "confirmed" },
+    { name: "press_rejected_no_release_or_retry", rejectPress: true, status: "unknown", reason: "pdd_playwright_click_uncertain" },
+    { name: "press_hangs_bounded_no_release_or_retry", hangPress: true, status: "unknown", reason: "pdd_playwright_click_uncertain" },
+    { name: "button_hint_enter", hint: true, status: "confirmed" },
+    { name: "renamed_control_class", renamed: true, status: "confirmed" },
     { name: "button_appears_after_input", revealButton: true, status: "confirmed" },
     { name: "button_appears_after_350ms", revealDelay: 350, status: "confirmed" },
     { name: "button_appears_after_650ms", revealDelay: 650, status: "confirmed" },
     { name: "button_created_after_input", insertDelay: 350, status: "confirmed" },
-    { name: "waiting_never_retries_a_click", neverReveal: true, status: "not_sent", reason: "pdd_input_missing" },
+    { name: "waiting_never_retries_a_click", neverReveal: true, status: "not_sent", reason: "pdd_send_button_not_ready" },
     { name: "conversation_changes_while_waiting", revealDelay: 650, switchWhileWaiting: true, status: "not_sent", reason: "pdd_conversation_changed" },
     { name: "page_changes_while_waiting", revealDelay: 650, pageChanged: true, status: "not_sent", reason: "pdd_page_changed" },
     { name: "deadline_expires_while_waiting", revealDelay: 650, shortDeadline: true, status: "not_sent", reason: "claim_expiring" },
@@ -53,10 +62,13 @@ app.whenReady().then(async () => {
     { name: "partly_clipped_button", css: "#composer{left:-80px}", status: "confirmed" },
     { name: "center_covered_but_same_button_has_clear_point", css: ".reply-footer::after{content:'';position:absolute;left:40px;top:0;width:20px;height:40px;background:#fff;z-index:1}", status: "confirmed" },
     { name: "zoom80", zoom: 0.8, status: "confirmed" },
-    { name: "fully_covered", mask: true, status: "not_sent", reason: "pdd_send_button_covered" },
-    { name: "two_visible_buttons_are_ambiguous", ambiguous: true, status: "not_sent", reason: "pdd_input_missing" },
+    { name: "fully_covered", mask: true, status: "not_sent", reason: "pdd_send_button_not_ready" },
+    { name: "two_visible_buttons_are_ambiguous", ambiguous: true, status: "not_sent", reason: "pdd_send_control_unverified" },
     { name: "different_conversation", otherBuyer: true, status: "not_sent", reason: "pdd_conversation_changed" },
     { name: "human_draft_changed", changeDraft: true, status: "not_sent", reason: "pdd_input_mismatch" },
+    { name: "existing_identical_human_draft_is_preserved", existingDraft: true, status: "not_sent", reason: "pdd_input_not_empty" },
+    { name: "conversation_changes_just_before_press", switchBeforePress: true, status: "not_sent", reason: "pdd_conversation_changed" },
+    { name: "human_draft_changes_just_before_press", draftBeforePress: true, status: "not_sent", reason: "pdd_input_mismatch" },
     { name: "page_changed_after_location", pageChanged: true, status: "not_sent", reason: "pdd_page_changed" },
     { name: "deadline_recheck_blocks_click", recheck: "reply_deadline_exceeded", status: "not_sent", reason: "reply_deadline_exceeded" },
   ];
@@ -66,25 +78,23 @@ app.whenReady().then(async () => {
       wc.setZoomFactor(s.zoom || 1);
       const commands = [];
       const adapter = new PddPageAdapter("fixture", "虚构店铺");
-      const debug = {
-        isAttached: () => wc.debugger.isAttached(),
-        sendCommand: async (method, params) => {
-          commands.push(params.type);
-          const result = await wc.debugger.sendCommand(method, params);
-          if (params.type === "mouseReleased") {
-            const clicked = await wc.executeJavaScript("window.clicks");
-            adapter.outgoing?.resolve(clicked === 1 ? { status: "confirmed", platform_message_id: "fixture-only" } : { status: "unknown", reason: "fixture_click_missed" });
-          }
-          return result;
-        },
+      wc.debugger.sendCommand = async (method, params = {}, sessionId) => {
+        if (params.type === "mouseMoved" && s.switchBeforePress) await wc.executeJavaScript('document.querySelector(".chat-item-box").setAttribute("data-random","9002-fixture")');
+        if (params.type === "mouseMoved" && s.draftBeforePress) await wc.executeJavaScript('document.querySelector("textarea").value="人工草稿"');
+        if (["mousePressed", "mouseReleased"].includes(params.type)) commands.push(params.type);
+        if (params.type === "mousePressed" && s.rejectPress) throw new Error("fictional_input_failure");
+        if (params.type === "mousePressed" && s.hangPress) return new Promise(() => {});
+        const result = await nativeCommand(method, params, sessionId);
+        if (s.pageChanged && method === "DOM.scrollIntoViewIfNeeded") adapter.watchEpoch++;
+        if (params.type === "mouseReleased") {
+          const clicked = await wc.executeJavaScript("window.clicks");
+          adapter.outgoing?.resolve(clicked === 1 ? { status: "confirmed", platform_message_id: "fixture-only" } : { status: "unknown", reason: "fixture_click_missed" });
+        }
+        return result;
       };
-      adapter.window = { isDestroyed: () => win.isDestroyed(), webContents: { isDestroyed: () => wc.isDestroyed(), debugger: debug, executeJavaScriptInIsolatedWorld: (...args) => wc.executeJavaScriptInIsolatedWorld(...args) } };
+      adapter.window = { isDestroyed: () => win.isDestroyed(), webContents: wc };
       adapter.tracker = { status: () => ({ logged_in: true }) };
       adapter.openConversation = async () => null;
-      if (s.pageChanged) {
-        const run = adapter.run.bind(adapter);
-        adapter.run = async code => { const value = await run(code); if (code.includes("pdd_send_button_covered")) adapter.watchEpoch++; return value; };
-      }
       const started = Date.now();
       const result = await adapter.send({ conversation_id: "9001", text: "虚构回复", attempt_id: "fixture-only", deadline: Date.now() / 1000 + (s.shortDeadline ? 1.7 : 10), recheck: () => s.recheck || null });
       const elapsed = Date.now() - started;
@@ -93,10 +103,12 @@ app.whenReady().then(async () => {
         assert.equal(result.status, s.status);
         if (s.reason) assert.equal(result.reason, s.reason);
         assert.equal(clicks, s.status === "confirmed" ? 1 : 0);
-        assert.deepEqual(commands, s.status === "confirmed" ? ["mousePressed", "mouseReleased"] : []);
+        assert.deepEqual(commands, s.status === "confirmed" ? ["mousePressed", "mouseReleased"] : s.rejectPress || s.hangPress ? ["mousePressed"] : []);
         assert.equal(adapter.sending, false);
         assert.equal(adapter.outgoing, null);
-        if (s.changeDraft) assert.equal(await wc.executeJavaScript('document.querySelector("textarea").value'), "人工草稿");
+        if (s.changeDraft || s.draftBeforePress) assert.equal(await wc.executeJavaScript('document.querySelector("textarea").value'), "人工草稿");
+        if (s.existingDraft) assert.equal(await wc.executeJavaScript('document.querySelector("textarea").value'), "虚构回复");
+        if (s.switchBeforePress || s.switchWhileWaiting) assert.equal(await wc.executeJavaScript('document.querySelector("textarea").value'), "虚构回复", "切换到其他买家后不清除输入");
         if (s.neverReveal) assert.ok(elapsed < 3000, "等待必须有界");
         results.push({ name: s.name, ok: true, result, clicks, commands, elapsed });
       } catch (error) {
@@ -107,11 +119,12 @@ app.whenReady().then(async () => {
     results.push({ name: "fixture", ok: false, error: String(error.stack || error) });
   } finally {
     win.destroy();
+    stopSelector();
     clearTimeout(watchdog);
     if (!parentOwned) fs.rmSync(temp, { recursive: true, force: true });
   }
   const ok = results.length === scenarios.length && results.every(r => r.ok);
-  console.log(JSON.stringify({ ok, fictional_data_page_only: true, real_adapter_and_native_hit_test: true, platform_receipt_stubbed: true, results }));
+  console.log(JSON.stringify({ ok, fictional_data_page_only: true, real_adapter_and_native_hit_test: true, runtime_driver: "playwright+scrapling", platform_receipt_stubbed: true, results }));
   app.exit(ok ? 0 : 1);
 }).catch(error => {
   clearTimeout(watchdog);
