@@ -10,8 +10,8 @@ const targets = () => [{ target_id: "t-main", name: "fictional-main", observed_a
 const running: ShopRuntime[] = [];
 afterEach(async () => { for (const rt of running.splice(0)) await rt.stop(false); });
 
-async function harness(opts: { declare?: boolean; confirm?: boolean; target?: string; marked?: boolean | null; allowUnmark?: boolean; staleAtDecision?: boolean; cleanupReply?: boolean; result?: "unknown" | "confirmed" | "not_sent" } = {}) {
-  const state = { heartbeats: [] as any[], bodies: [] as any[], claims: [] as any[], receipts: [] as any[], transfers: [] as TransferRequest[], discoveryBusy: false, submittedDuringCleanup: false, sends: 0, events: new Map<string, any>() };
+async function harness(opts: { declare?: boolean; confirm?: boolean; target?: string; marked?: boolean | null; allowUnmark?: boolean; staleAtDecision?: boolean; cleanupReply?: boolean; mode?: "auto" | "observe" | "manual"; takeover?: boolean; result?: "unknown" | "confirmed" | "not_sent" } = {}) {
+  const state = { heartbeats: [] as any[], bodies: [] as any[], claims: [] as any[], receipts: [] as any[], transfers: [] as TransferRequest[], discoveries: 0, discoveryBusy: false, submittedDuringCleanup: false, sends: 0, events: new Map<string, any>() };
   const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
   const fetchImpl = (async (input: any, init?: any) => {
     const p = new URL(String(input)).pathname, body = init?.body ? JSON.parse(init.body) : null, now = Date.now() / 1000;
@@ -35,10 +35,11 @@ async function harness(opts: { declare?: boolean; confirm?: boolean; target?: st
     if (snap) return response(snap);
     return response({ error: { code: "not_found" } }, 404);
   }) as FetchLike;
-  const h = await makeShop({ backend: { url: "http://127.0.0.1:9" } as TestBackend, fetchImpl, login: false, declareTransfer: opts.declare !== false, ...(opts.cleanupReply ? { timing: { prepBudgetMs: 20 } } : {}) });
+  const h = await makeShop({ backend: { url: "http://127.0.0.1:9" } as TestBackend, fetchImpl, login: false, mode: opts.mode, declareTransfer: opts.declare !== false, ...(opts.cleanupReply ? { timing: { prepBudgetMs: 20 } } : {}) });
   running.push(h.rt);
   (h.mock as any).readConvState = async () => ({ marked: opts.marked === undefined ? false : opts.marked, color: null });
   (h.mock as any).readTransferTargets = async () => {
+    state.discoveries++;
     if (opts.cleanupReply) {
       state.discoveryBusy = true;
       try { await new Promise(resolve => setTimeout(resolve, 100)); } finally { state.discoveryBusy = false; }
@@ -57,6 +58,7 @@ async function harness(opts: { declare?: boolean; confirm?: boolean; target?: st
     return { status: "unknown", reason: "unexpected_text_send" };
   };
   await h.mock.login(); await waitFor(() => h.rt.lease.state === "held", "lease");
+  if (opts.takeover) { h.rt.journal.conversation("buyer-1"); h.rt.setTakeover("buyer-1", true); }
   h.mock.injectBuyerMessage({ conversation_id: "buyer-1", content: "虚构售后问题" });
   await waitFor(() => state.bodies.length > 0, "submit");
   await waitFor(() => eventsOf(h.rt)[0]?.snapshot?.state === "ready", "ready");
@@ -103,3 +105,11 @@ test("ordinary reply waits for bounded discovery cleanup even after preparation 
   assert.equal(h.state.submittedDuringCleanup, false); assert.equal(h.state.sends, 1);
   assert.equal(h.state.transfers.length, 0); assert.equal(h.state.receipts[0].status, "sent");
 });
+
+for (const opts of [{ mode: "observe" }, { mode: "manual" }, { mode: "auto", takeover: true }] as const) {
+  test(`${opts.mode}${"takeover" in opts ? " with takeover" : ""}: no transfer-dialog discovery or operation`, async () => {
+    const h = await harness(opts);
+    assert.equal(h.state.discoveries, 0); assert.equal(h.state.claims.length, 0); assert.equal(h.state.transfers.length, 0);
+    assert.equal(h.state.bodies[0].context.transfer_targets, undefined);
+  });
+}

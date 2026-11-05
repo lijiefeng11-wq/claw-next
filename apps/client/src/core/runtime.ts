@@ -776,7 +776,7 @@ export class ShopRuntime {
       const marked = read?.marked ?? null;
       request.context.conv_state = { marked, color: marked === true ? (read?.color ?? null) : null, observed_at: this.now() };
     }
-    if (this.transferExecutable() && request.context.conv_state?.marked === false) {
+    if (this.config.mode === "auto" && !conv.takeover && this.transferExecutable() && request.context.conv_state?.marked === false) {
       const targets = await measured("transfer_targets", () =>
         this.adapter.readTransferTargets!(conversationId, prepLeft()).catch(() => [] as TransferTarget[]));
       if (this.expired(conversationId, messageId)) return;
