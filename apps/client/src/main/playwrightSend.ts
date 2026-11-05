@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { WebContents } from "electron";
+import { errors } from "playwright-core";
 import { connectExistingPage } from "./electronPlaywright.js";
 import { selectSendControl } from "./scraplingSelector.js";
 import type { PageClickResult } from "./pddClick.js";
@@ -13,7 +14,12 @@ export async function clickSendWithPlaywright(wc: WebContents, uid: string, text
   let verifyAtPress: () => Promise<string | null> = async () => "pdd_send_control_unverified";
   const disconnect = () => connection?.close();
   const nonce = randomUUID();
-  const left = () => Math.max(1, Math.min(2000, deadline * 1000 - Date.now() - 1500));
+  let deadlineBounded = false;
+  const left = () => {
+    const remaining = deadline * 1000 - Date.now() - 1500;
+    deadlineBounded = remaining <= 2000;
+    return Math.max(1, Math.min(2000, Math.ceil(remaining)));
+  };
   const blocked = () => refusal ?? (!active ? "pdd_page_changed" : current() ?? (Date.now() / 1000 >= deadline - 1.5 ? "claim_expiring" : null));
   const stop = (reason: string): PageClickResult => ({ status: pressed ? "unknown" : "not_sent", reason });
   let timer: NodeJS.Timeout | undefined;
@@ -117,8 +123,8 @@ export async function clickSendWithPlaywright(wc: WebContents, uid: string, text
     return await Promise.race([operation(), new Promise<PageClickResult>(resolve => {
       timer = setTimeout(() => { active = false; connection?.close(); resolve(stop("claim_expiring")); }, Math.max(1, deadline * 1000 - Date.now() - 1000));
     })]);
-  } catch {
-    return stop(pressed ? "pdd_playwright_click_uncertain" : blocked() ?? "pdd_send_button_not_ready");
+  } catch (error) {
+    return stop(pressed ? "pdd_playwright_click_uncertain" : blocked() ?? (deadlineBounded && error instanceof errors.TimeoutError ? "claim_expiring" : "pdd_send_button_not_ready"));
   } finally {
     active = false;
     if (timer) clearTimeout(timer);
