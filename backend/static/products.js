@@ -46,6 +46,7 @@ window.setupProductLearning = function ({state, request, handleError}) {
     if (identity !== active) {
       active = identity; seq++; busy = false; preview = ""; input.value = ""; list.replaceChildren();
       status.textContent = "正在读取当前店铺的产品知识状态。";
+      const summary = document.getElementById("product-summary"); if (summary) summary.textContent = "";
     }
     button.disabled = !c.shop || !c.token || busy;
     if (!c.shop || !c.token || state.route !== "scripts" || document.hidden || polling || busy) return;
@@ -79,6 +80,7 @@ window.setupProductLearning = function ({state, request, handleError}) {
   void refresh();
   return {refresh: function () { void refresh(); }, reset: function () {
     active = null; seq++; busy = false; preview = ""; input.value = ""; list.replaceChildren();
+    const summary = document.getElementById("product-summary"); if (summary) summary.textContent = "";
     status.textContent = "还未学习商品。"; button.disabled = true;
   }};
 };

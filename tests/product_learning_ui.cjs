@@ -15,6 +15,8 @@ function setup(){
  let passed=0;
  const existing=setup();existing.calls[0].resolve({status:'idle',catalog_count:2,products:[]});await tick();
  assert.match(existing.nodes['product-status'].textContent,/已有 2 件/);assert.match(existing.nodes['product-summary'].textContent,/已学 2 件/);passed++;
+ existing.state.selectedShopId='b';existing.control.refresh();assert.equal(existing.nodes['product-summary'].textContent,'');
+ existing.control.reset();assert.equal(existing.nodes['product-summary'].textContent,'');passed++;
  const h=setup();
  h.calls[0].resolve({status:'idle',products:[]});await tick();
  h.nodes['product-source'].value='https://mobile.yangkeduo.com/mall_page.html?ps=fictional';
