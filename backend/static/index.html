@@ -63,7 +63,11 @@
         </button>
         <button class="nav-link" type="button" data-route="scripts">
           <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h16v11H9l-5 4z"/><path d="M8 9.5h8M8 12.5h5"/></svg>
-          <span>话术配置</span>
+          <span>店铺配置</span>
+        </button>
+        <button class="nav-link" type="button" data-route="templates">
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h13v15M4 6h13v15H4zM7 10h7M7 14h7M7 18h4"/></svg>
+          <span>话术模版</span>
         </button>
         <button class="nav-link" type="button" data-route="chat-import">
           <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v12H9l-5 4zM8 8h8M8 12h5"/></svg>
@@ -171,7 +175,7 @@
             <div class="shortcut-grid">
               <button class="shortcut" type="button" data-route="scripts">
                 <svg class="shortcut-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h16v11H9l-5 4z"/><path d="M8 9.5h8M8 12.5h5"/></svg>
-                <span class="shortcut-title">话术配置</span>
+                <span class="shortcut-title">店铺配置</span>
                 <span class="shortcut-desc">开关、判断方式、提示词与回复规则</span>
               </button>
               <button class="shortcut" type="button" data-route="records">
@@ -196,8 +200,8 @@
         <section id="page-scripts" class="page-section" data-page="scripts" aria-labelledby="scripts-title" hidden>
           <div class="page-head">
             <div>
-              <h2 id="scripts-title" class="page-title">话术配置</h2>
-              <p class="page-sub">按店铺保存判断开关、方式、提示词与自动回复规则。</p>
+              <h2 id="scripts-title" class="page-title">店铺配置</h2>
+              <p class="page-sub">选择话术模版，管理本店回复开关、处理方式和商品学习。</p>
             </div>
             <span id="settings-version" class="pill pill-muted" hidden></span>
           </div>
@@ -210,7 +214,7 @@
               <label class="field field-inline">
                 <span class="field-label">店铺</span>
                 <select id="shop-select" aria-describedby="shop-select-help"></select>
-                <span id="shop-select-help" class="field-help">先选店铺，可独立配置或选用共用话术模板；回复开关和兜底处理仍按店铺保存。</span>
+                <span id="shop-select-help" class="field-help">先选店铺，再选择要使用的话术模版；回复开关、处理不了时怎么办和商品知识仍按店铺保存。</span>
               </label>
               <div id="shop-meta" class="shop-meta muted small">尚未加载店铺。</div>
             </div>
@@ -230,18 +234,20 @@
             </div>
 
             <form id="settings-form" class="settings-form" novalidate>
+              <fieldset class="settings-group"><legend>使用的话术模版</legend>
               <div class="form-actions">
                 <label class="field field-inline">
-                  <span class="field-label">话术模板</span>
+                  <span class="field-label">话术模版</span>
                   <select id="template-select" aria-describedby="template-help">
-                    <option value="">本店独立配置</option>
+                    <option value="">保留本店现有话术</option>
                   </select>
                 </label>
-                <button id="template-create" class="btn btn-ghost" type="button">存为新模板</button>
+                <button id="template-create" class="btn btn-ghost" type="button">编辑当前话术</button>
               </div>
-              <p id="template-help" class="field-help">模板共用判断方式、提示词和全部规则。选用后点“保存设置”生效；修改模板会自动同步到已选用的店铺。</p>
+              <p id="template-help" class="field-help">选好模版后点“保存店铺配置”生效。提示词和规则在左侧“话术模版”编辑；修改模版会同步到已选用的店铺。</p>
               <p id="template-status" class="small muted" role="status" aria-live="polite"></p>
-              <div class="settings-grid">
+              </fieldset>
+              <div>
                 <fieldset class="settings-group">
                   <legend>启用状态</legend>
                   <label class="switch-row">
@@ -264,8 +270,58 @@
                   </details>
                 </fieldset>
 
-                <fieldset class="settings-group">
-                  <legend>判断方式</legend>
+
+              </div>
+
+              <details id="product-learning" class="help-box">
+                <summary id="product-title">学习本店商品<span id="product-summary" class="small muted"></span></summary>
+                <p class="field-help">使用客户端当前店铺的登录状态读取在售商品、文字属性和规格组合，再用已配置模型分类整理。买家咨询时按商品编号匹配本店知识。</p>
+                <label class="field"><span class="field-label">店铺或商品链接（选填）</span>
+                  <input id="product-source" type="url" maxlength="1000" placeholder="留空读取当前店铺；商品链接可只学习这一件">
+                </label>
+                <button id="product-learn" type="button" class="btn btn-sm">学习本店商品</button>
+                <p id="product-status" class="small muted" role="status" aria-live="polite">还未学习商品。</p>
+                <p class="field-help">知识按店铺隔离，共用话术模板不会混用商品。只在模型/混合方式调用模型时使用；纯图片里的说明暂未识别，缺失规格仍会询问，不自动开启回复。</p>
+                <details><summary>查看已学产品的关键资料（最近 20 件）</summary><div id="product-preview"></div></details>
+              </details>
+
+              <details id="shop-fallback-section" class="settings-group">
+                <summary>处理不了时怎么办</summary>
+                <p class="field-help">收藏和转人工需客户端连接后台并处于“自动处理”模式，经核验后执行。已收藏会话暂不自动转接；超出回复总时限只提示人工处理。</p>
+                <div id="fallback-controls"></div>
+              </details>
+
+
+
+              <div id="settings-remote-note" class="alert alert-warn" role="status" hidden></div>
+
+              <div class="form-actions">
+                <button id="save-btn" class="btn btn-primary" type="submit">保存店铺配置</button>
+                <button id="reset-btn" class="btn btn-ghost" type="button">撤销修改</button>
+                <span id="save-status" class="small muted" role="status" aria-live="polite"></span>
+              </div>
+            </form>
+          </section>
+        </section>
+
+        <section id="page-templates" class="page-section" data-page="templates" aria-labelledby="templates-title" hidden>
+          <div class="page-head">
+            <div>
+              <h2 id="templates-title" class="page-title">话术模版</h2>
+              <p class="page-sub">在这里维护提示词和规则。一份模版可供多店选用，保存后自动同步已选店铺。</p>
+            </div>
+            <span id="template-editor-version" class="pill pill-muted" hidden></span>
+          </div>
+          <section class="card">
+            <form id="template-editor-form" class="settings-form" novalidate>
+              <div class="form-actions">
+                <label class="field field-inline"><span class="field-label">选择模版</span><select id="template-editor-select"><option value="">新模版（未保存）</option></select></label>
+                <button id="template-new" class="btn btn-ghost" type="button">新建模版</button>
+              </div>
+              <label class="field"><span class="field-label">模版名称</span><input id="template-name" type="text" maxlength="160" placeholder="例如：遮阳挡通用话术"></label>
+              <p id="template-source-note" class="field-help"></p>
+                <details id="template-mode-section" class="settings-group">
+                  <summary>判断方式<span id="template-mode-summary" class="small muted"></span></summary>
                   <label class="field">
                     <span class="field-label">方式</span>
                     <select id="mode-input" aria-describedby="mode-help">
@@ -286,21 +342,8 @@
                       <div><dt>留空</dt><dd>不允许。没有选就保存会被拒绝。</dd></div>
                     </dl>
                   </details>
-                </fieldset>
-              </div>
-
-              <section id="product-learning" class="help-box" aria-labelledby="product-title">
-                <h3 id="product-title">学习本店商品</h3>
-                <p class="field-help">使用客户端当前店铺的登录状态读取在售商品、文字属性和规格组合，再用已配置模型分类整理。买家咨询时按商品编号匹配本店知识。</p>
-                <label class="field"><span class="field-label">店铺或商品链接（选填）</span>
-                  <input id="product-source" type="url" maxlength="1000" placeholder="留空读取当前店铺；商品链接可只学习这一件">
-                </label>
-                <button id="product-learn" type="button" class="btn btn-sm">学习本店商品</button>
-                <p id="product-status" class="small muted" role="status" aria-live="polite">还未学习商品。</p>
-                <p class="field-help">知识按店铺隔离，共用话术模板不会混用商品。只在模型/混合方式调用模型时使用；纯图片里的说明暂未识别，缺失规格仍会询问，不自动开启回复。</p>
-                <details><summary>查看已学产品的关键资料（最近 20 件）</summary><div id="product-preview"></div></details>
-              </section>
-
+                </details>
+              <details id="template-prompt-section" class="settings-group"><summary>模型提示词<span id="template-prompt-summary" class="small muted"></span></summary><div class="settings-form">
               <label class="field">
                 <span class="field-label">模型提示词（模型和混合方式使用）</span>
                 <textarea id="prompt-input" rows="4" spellcheck="false" maxlength="8000"
@@ -347,11 +390,11 @@
                     <span class="field-label">生成的草稿（可手动修改，未应用前不生效）</span>
                     <textarea id="prompt-draft" rows="10" maxlength="8000" spellcheck="false"
                               aria-describedby="prompt-draft-help"></textarea>
-                    <span id="prompt-draft-help" class="field-help">这里是“可编辑、未应用”的草稿。只有点“确认用草稿替换提示词”，再点下方“保存设置”，它才会成为这个店铺的提示词。</span>
+                    <span id="prompt-draft-help" class="field-help">这里是“可编辑、未应用”的草稿。只有点“确认用草稿替换提示词”，再点下方“保存模版”，它才会成为这个店铺的提示词。</span>
                   </label>
                   <div class="prompt-draft-actions">
                     <button id="apply-prompt-draft" class="btn btn-sm" type="button" disabled>确认用草稿替换提示词</button>
-                    <span class="small muted">填入只是替换提示词框里的文字，仍需点“保存设置”。</span>
+                    <span class="small muted">填入只是替换提示词框里的文字，仍需点“保存模版”。</span>
                   </div>
                   <ul class="prompt-draft-caveats">
                     <li>生成内容可能不准确或不完整，请逐条对照你的真实业务核对后再用。</li>
@@ -378,19 +421,15 @@
                     <div id="merge-notes" class="field-help"></div>
                     <label id="merge-confirm-label" class="assist-check" hidden><input id="merge-confirm" type="checkbox">我已逐项核对并处理提示词冲突</label>
                     <button id="merge-apply" class="btn btn-sm" type="button" disabled>确认填入提示词</button>
-                    <p class="field-help">填入后还需点击“保存设置”。原有约束是否被保留、业务事实是否正确，需要你核对。</p>
+                    <p class="field-help">填入后还需点击“保存模版”。原有约束是否被保留、业务事实是否正确，需要你核对。</p>
                   </div>
                 </details>
               </section>
 
-              <fieldset class="settings-group">
-                <legend>处理不了时怎么办</legend>
-                <p class="field-help">收藏和转人工需客户端连接后台并处于“自动处理”模式，经核验后执行。已收藏会话暂不自动转接；超出回复总时限只提示人工处理。</p>
-                <div id="fallback-controls"></div>
-              </fieldset>
-
-              <fieldset class="settings-group rules-group">
-                <legend>自动回复规则</legend>
+              </div>
+              </details>
+              <details id="template-rules-section" class="settings-group rules-group">
+                <summary>自动回复规则<span id="template-rules-summary" class="small muted"></span></summary>
                 <p class="field-help">关键词从上到下匹配。混合方式还会根据适用问题说明理解意思，命中后使用规则回复原文；实际发送由客户端核验后执行。</p>
                 <details class="help-box">
                   <summary>规则和提示词有什么区别，每条规则怎么填</summary>
@@ -417,14 +456,12 @@
                   <button id="rules-next" class="btn btn-ghost btn-sm" type="button">下一页</button>
                 </nav>
                 <p id="rules-error" class="error-text" role="alert" hidden></p>
-              </fieldset>
-
-              <div id="settings-remote-note" class="alert alert-warn" role="status" hidden></div>
-
+              </details>
               <div class="form-actions">
-                <button id="save-btn" class="btn btn-primary" type="submit">保存设置</button>
-                <button id="reset-btn" class="btn btn-ghost" type="button">撤销修改</button>
-                <span id="save-status" class="small muted" role="status" aria-live="polite"></span>
+                <button id="template-save" class="btn btn-primary" type="submit">保存模版</button>
+                <button id="template-save-as" class="btn btn-ghost" type="button">另存模版</button>
+                <button id="template-reset" class="btn btn-ghost" type="button">撤销修改</button>
+                <span id="template-editor-status" class="small muted" role="status" aria-live="polite"></span>
               </div>
             </form>
           </section>
@@ -440,6 +477,7 @@
           <div class="chat-shop-bar">
             <label class="field"><span class="field-label">当前店铺</span><select id="chat-shop-select" aria-describedby="chat-shop-note"></select></label>
             <p id="chat-shop-note" class="field-help">仅为 <strong id="chat-shop-name">请先选择店铺</strong> 整理。切换店铺会清除本页资料。</p>
+            <p class="field-help">草稿填入当前打开的话术模版：<strong id="chat-template-name">未命名模版</strong>。核对后再保存模版。</p>
           </div>
           <section class="card chat-workspace" aria-label="聊天记录整理流程">
             <h3>1. 导入聊天记录</h3>
@@ -468,9 +506,9 @@
             <progress id="chat-analysis-progress" class="chat-progress" max="100" aria-label="问答分析进度" hidden></progress>
             <p id="rule-draft-status" class="field-help" role="status" aria-live="polite"></p>
             <div id="rule-candidates" class="assist-candidates"></div>
-            <button id="rules-apply" class="btn btn-sm" type="button" disabled>把选中的草稿填入话术配置</button>
+            <button id="rules-apply" class="btn btn-sm" type="button" disabled>把选中的草稿填入话术模版</button>
             <p id="rules-apply-status" class="field-help" role="status" aria-live="polite"></p>
-            <p class="field-help">默认跳过全部草稿。核对回复和来源后再新增或替换；填入后仍需到“话术配置”保存设置，不会自动启用店铺。</p>
+            <p class="field-help">默认跳过全部草稿。核对回复和来源后再新增或替换；填入后仍需到“话术模版”保存模版，不会自动启用店铺。</p>
           </section>
         </section>
 

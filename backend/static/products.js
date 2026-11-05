@@ -11,7 +11,7 @@ window.setupProductLearning = function ({state, request, handleError}) {
   function render(value) {
     const n = value.processed || 0, total = Number.isInteger(value.total) ? " / " + value.total : "";
     const labels = {
-      idle: "还未学习商品。选好店铺后点“学习本店商品”。",
+      idle: value.catalog_count > 0 ? "知识库已有 " + value.catalog_count + " 件商品资料，可按需重新学习。" : "还未学习商品。选好店铺后点“学习本店商品”。",
       queued: value.client_ready ? "等待客户端读取本店在售商品。" : "等待客户端更新到支持商品学习的版本并连接后台，请保持本店平台已登录。",
       collecting: "正在读取本店在售商品，已整理 " + n + total + " 件。",
       learning: "正在用已配置的模型整理商品资料，已整理 " + n + total + " 件。",
@@ -21,6 +21,10 @@ window.setupProductLearning = function ({state, request, handleError}) {
         "本次读取未完成，原有产品知识保持不变。请确认本店平台已登录、身份正确、客户端已连接后重新学习。"
     };
     status.textContent = labels[value.status] || "暂时无法确认学习进度，请刷新。";
+    const summary = document.getElementById("product-summary");
+    if (summary) summary.textContent = ["queued", "collecting", "learning"].includes(value.status)
+      ? " · 学习中 " + n + total + " 件"
+      : " · 已学 " + (Number.isInteger(value.catalog_count) ? value.catalog_count : 0) + " 件";
     const products = Array.isArray(value.products) ? value.products : [], snapshot = JSON.stringify(products);
     if (snapshot !== preview) {
       preview = snapshot; list.replaceChildren();

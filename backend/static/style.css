@@ -1112,6 +1112,18 @@ button:disabled {
   padding-inline: 5px;
 }
 
+#page-templates details.settings-group > summary,
+#shop-fallback-section > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+#page-templates details.settings-group[open] > summary,
+#shop-fallback-section[open] > summary,
+#product-learning[open] > summary {
+  margin-bottom: 16px;
+}
+
 .switch-row {
   display: flex;
   align-items: flex-start;

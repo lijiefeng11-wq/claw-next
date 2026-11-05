@@ -21,13 +21,14 @@
   const VERIFY_NOTE_MAX = 200;
   const ROUTES = {
     dashboard: "工作台",
-    scripts: "话术配置",
+    scripts: "店铺配置",
+    templates: "话术模版",
     "chat-import": "聊天记录整理",
     records: "处理记录",
     model: "模型配置",
     system: "系统设置"
   };
-  const ROUTE_KEYS = ["dashboard", "scripts", "chat-import", "records", "model", "system"];
+  const ROUTE_KEYS = ["dashboard", "scripts", "templates", "chat-import", "records", "model", "system"];
 
   const state = {
     epoch: 0,
@@ -42,6 +43,7 @@
     templateId: "",
     templateVersion: null,
     templateBusy: false,
+    editor: { id: "", version: null, initialized: false, dirty: false, revision: 0, snapshot: null },
     settingsBusy: false,
     formRevision: 0,
     selectedShopId: null,
@@ -102,10 +104,13 @@
     "change-password-form", "current-password-input", "new-password-input",
     "confirm-password-input", "change-password-btn", "change-password-status",
     "change-password-error",
-    "page-dashboard", "page-scripts", "page-chat-import", "page-records", "page-model", "page-system",
+    "page-dashboard", "page-scripts", "page-templates", "page-chat-import", "page-records", "page-model", "page-system",
     "shop-connection-list", "shop-connection-summary", "shop-connection-meta",
     "shop-select", "shop-meta", "settings-version", "lease-status", "lease-details",
     "template-select", "template-create", "template-help", "template-status",
+    "template-editor-form", "template-editor-select", "template-name", "template-new", "template-save", "template-save-as",
+    "template-reset", "template-editor-status", "template-editor-version", "template-source-note",
+    "template-mode-summary", "template-prompt-summary", "template-rules-summary",
     "lease-instance", "lease-session", "lease-generation", "lease-expires",
     "settings-form", "enabled-input", "enabled-note", "mode-input", "prompt-input",
     "prompt-brief", "generate-prompt", "prompt-draft-status", "prompt-draft", "apply-prompt-draft",
@@ -482,6 +487,7 @@
     if (target === "model" && !state.model.loaded && !state.model.busy) {
       loadModelConfig({ force: false });
     }
+    if (target === "templates" && !state.editor.initialized) loadShopTemplateEditor();
     if (target === "system" && opts.refreshSystem !== false) {
       refreshSystemStatus(false);
       loadHandoffGrants();
@@ -976,7 +982,8 @@
     return "";
   }
 
-  function policyDetails(policy) {
+  function policyDetails(policy, onEdit) {
+    const edited = onEdit || onFormEdit;
     const group = document.createElement("div");
     group.className = "policy-details";
     function field(title, input) {
@@ -995,16 +1002,16 @@
         const option = document.createElement("option");option.value = entry[0];setText(option, entry[1]);color.appendChild(option);
       });
       color.value = policy.color;
-      color.addEventListener("change", function () { policy.color = color.value;onFormEdit(); });
+      color.addEventListener("change", function () { policy.color = color.value;edited(); });
       field("星标颜色", color);
     } else if (policy.action === "transfer") {
       const account = document.createElement("input");
       account.type = "text";account.maxLength = 40;account.value = policy.account || "";
       account.placeholder = "填写转移框第一列的完整账号名";
-      account.addEventListener("input", function () { policy.account = account.value;onFormEdit(); });
+      account.addEventListener("input", function () { policy.account = account.value;edited(); });
       field("接收人账号名", account);
       const allow = document.createElement("input");allow.type = "checkbox";allow.className = "policy-unmark";allow.checked = policy.allow_unmark === true;
-      allow.addEventListener("change", function () { policy.allow_unmark = allow.checked;allow.disabled = state.formDisabled || !allow.checked;onFormEdit(); });
+      allow.addEventListener("change", function () { policy.allow_unmark = allow.checked;allow.disabled = state.formDisabled || !allow.checked;edited(); });
       field("取消收藏后转接（本版本暂不支持，可关闭旧策略）", allow);
       allow.disabled = state.formDisabled || !allow.checked;
     }
@@ -1031,10 +1038,10 @@
         const option = document.createElement("option");option.value = item[0];setText(option, item[1]);select.appendChild(option);
       });
       select.value = state.fallback[key].action;select.disabled = state.formDisabled;label.appendChild(select);group.appendChild(label);
-      let details = policyDetails(state.fallback[key]);group.appendChild(details);
+      let details = policyDetails(state.fallback[key], onShopFormEdit);group.appendChild(details);
       select.addEventListener("change", function () {
         state.fallback[key] = newPolicy(select.value);
-        const next = policyDetails(state.fallback[key]);details.replaceWith(next);details = next;onFormEdit();
+        const next = policyDetails(state.fallback[key], onShopFormEdit);details.replaceWith(next);details = next;onShopFormEdit();
       });
       root.appendChild(group);
     });
@@ -1087,6 +1094,7 @@
   }
 
   function showRulesError(message, focusUid, focusField) {
+    const section = byId("template-rules-section"); if (section) section.open = true;
     setText(el["rules-error"], message);
     el["rules-error"].hidden = false;
     if (focusUid === undefined || focusUid === null) {
@@ -1235,7 +1243,7 @@
       // Provider text is untrusted plain text, never HTML or an automatic settings update.
       el["prompt-draft"].value = data.draft;
       state.promptDraft.shopId = shop;
-      setText(el["prompt-draft-status"], "草稿已生成，尚未生效。请核对材质、安装、退换等事实，编辑后再填入提示词并保存设置。");
+      setText(el["prompt-draft-status"], "草稿已生成，尚未生效。请核对材质、安装、退换等事实，编辑后再填入提示词并保存模版。");
     } catch (err) {
       if (!current()) return;
       if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
@@ -1263,10 +1271,19 @@
     }
     el["prompt-input"].value = draft;
     onFormEdit();
-    setText(el["prompt-draft-status"], "已填入提示词，尚未保存。请核对后点击“保存设置”；纯规则方式不使用模型提示词。");
+    setText(el["prompt-draft-status"], "已填入提示词，尚未保存。请核对后点击“保存模版”；纯规则方式不使用模型提示词。");
   }
 
   function onFormEdit() {
+    state.editor.revision += 1;
+    state.editor.dirty = true;
+    setText(el["template-editor-status"], "有未保存的模版修改。");
+    hideRulesError();
+    syncTemplateEditor();
+    if (assist) assist.sync();
+  }
+
+  function onShopFormEdit() {
     state.formRevision += 1;
     state.formDirty = true;
     setText(el["save-status"], "有未保存的修改。");
@@ -1287,13 +1304,7 @@
     syncTemplateSelect();
     el["enabled-input"].checked = s.enabled === true;
     setText(el["enabled-note"], s.enabled === true ? "服务器当前为开启。" : "服务器当前为关闭。");
-    el["mode-input"].value = ["model", "hybrid"].includes(s.mode) ? s.mode : "rules";
-    el["prompt-input"].value = typeof s.system_prompt === "string" ? s.system_prompt : "";
-    if (state.promptDraft.shopId === state.selectedShopId &&
-        el["prompt-draft"].value.trim() && el["prompt-draft"].value.trim() === el["prompt-input"].value) {
-      setText(el["prompt-draft-status"], "草稿内容已保存到当前店铺。只有模型或混合方式会使用；启用状态仍以服务器返回值为准。");
-    }
-    loadRules(Array.isArray(s.rules) ? s.rules : []);
+    if (!state.editor.initialized) loadShopTemplateEditor(s);
     renderFallback(s.fallback);
     hideRulesError();
     showRemoteNote("");
@@ -1342,9 +1353,6 @@
     syncTemplateSelect();
     el["enabled-input"].checked = false;
     setText(el["enabled-note"], "服务器状态未知。");
-    el["mode-input"].value = "rules";
-    el["prompt-input"].value = "";
-    loadRules([]);
     renderFallback({});
     hideRulesError();
     showRemoteNote("");
@@ -1378,11 +1386,13 @@
       });
     });
     syncTemplateSelect();
+    syncTemplateEditor();
   }
 
   function setSaveBusy(busy) {
     state.settingsBusy = busy;
     syncTemplateSelect();
+    syncTemplateEditor();
   }
 
   function validTemplate(item) {
@@ -1394,22 +1404,29 @@
       && Array.isArray(item.rules) && item.rules.length <= LIMITS.maxRules;
   }
 
+  function rememberTemplates(items) {
+    const byId = new Map(state.templates.map(function (item) { return [item.template_id, item]; }));
+    (items || []).filter(validTemplate).forEach(function (item) {
+      const previous = byId.get(item.template_id);
+      if (!previous || item.version >= previous.version) byId.set(item.template_id, item);
+    });
+    state.templates = Array.from(byId.values()).sort(function (a, b) { return a.name.localeCompare(b.name); });
+  }
+
   function syncTemplateSelect() {
     const select = el["template-select"];
     const signature = JSON.stringify([state.templates.map(function (item) { return [item.template_id, item.name]; }), state.templateId]);
     if (select.dataset.signature !== signature) {
       const own = document.createElement("option");
-      own.value = ""; own.textContent = "本店独立配置";
+      own.value = ""; own.textContent = "保留本店现有话术";
       select.replaceChildren(own);
       state.templates.forEach(function (item) {
         const option = document.createElement("option");
-        option.value = item.template_id; option.textContent = item.name;
-        select.appendChild(option);
+        option.value = item.template_id; option.textContent = item.name; select.appendChild(option);
       });
-      if (state.templateId && !state.templates.some(function (t) { return t.template_id === state.templateId; })) {
-        const missing = document.createElement("option");
-        missing.value = state.templateId; missing.textContent = "当前模板（待刷新）";
-        select.appendChild(missing);
+      if (state.templateId && !state.templates.some(function (item) { return item.template_id === state.templateId; })) {
+        const option = document.createElement("option");
+        option.value = state.templateId; option.textContent = "当前模版（待刷新）"; select.appendChild(option);
       }
       select.dataset.signature = signature;
     }
@@ -1417,73 +1434,177 @@
     const busy = state.settingsBusy || state.templateBusy;
     select.disabled = state.formDisabled || busy;
     el["template-create"].disabled = state.formDisabled || busy;
+    setText(el["template-create"], state.templateId ? "编辑所选模版" : "编辑本店现有话术");
     el["save-btn"].disabled = state.formDisabled || busy;
-    setText(el["save-btn"], state.settingsBusy ? "保存中…" : state.templateId ? "保存并同步模板" : "保存设置");
+    setText(el["save-btn"], state.settingsBusy ? "保存中…" : "保存店铺配置");
     setText(el["template-status"], state.templateId
-      ? "保存后，共用此模板的店铺会自动更新话术；各店开关和兜底处理不变。"
-      : "本店独立维护话术；存为模板后可供其他店铺选用。");
+      ? "保存后使用所选模版；各店开关、处理不了时怎么办和商品知识保持独立。"
+      : "本店原有话术继续保留。可点“编辑本店现有话术”到模版页另存，再回来选用。");
   }
 
   function onTemplateChange() {
     const id = el["template-select"].value;
     if (state.formDisabled || state.settingsBusy || state.templateBusy || id === state.templateId) return;
     const template = state.templates.find(function (item) { return item.template_id === id; });
-    if ((id && !template) || (id && state.formDirty && !window.confirm("选用模板会替换尚未保存的话术、提示词和判断方式，是否继续？店铺开关和兜底处理不变。"))) {
-      el["template-select"].value = state.templateId;
-      return;
-    }
-    clearPromptDraft();
+    if (id && !template) { el["template-select"].value = state.templateId; return; }
     state.templateId = id;
     state.templateVersion = template ? template.version : null;
-    if (template) {
-      el["mode-input"].value = template.mode;
-      el["prompt-input"].value = template.system_prompt;
-      loadRules(template.rules);
-    }
-    onFormEdit();
+    onShopFormEdit();
     syncTemplateSelect();
-    setText(el["save-status"], "尚未保存。" + (id ? "核对后点“保存并同步模板”选用。" : "点“保存设置”后，本店不再跟随模板更新。"));
+    setText(el["save-status"], "尚未保存，点“保存店铺配置”后生效。");
   }
 
-  async function createTemplate() {
-    if (state.formDisabled || !state.token || !currentShop() || state.settingsBusy || state.templateBusy) return;
-    const rules = collectRules();
-    if (!rules.ok) { showRulesError(rules.message, rules.uid, rules.field); return; }
+  function syncTemplateEditor() {
+    const select = el["template-editor-select"], editor = state.editor;
+    const signature = JSON.stringify(state.templates.map(function (item) { return [item.template_id, item.name, item.version]; }));
+    if (select.dataset.signature !== signature) {
+      const option = document.createElement("option"); option.value = ""; option.textContent = "新模版（未保存）";
+      select.replaceChildren(option);
+      state.templates.forEach(function (item) {
+        const row = document.createElement("option"); row.value = item.template_id; row.textContent = item.name; select.appendChild(row);
+      });
+      select.dataset.signature = signature;
+    }
+    select.value = editor.id;
+    const disabled = state.formDisabled || state.settingsBusy || state.templateBusy;
+    ["template-editor-select", "template-name", "template-new", "template-save", "template-save-as", "template-reset"].forEach(function (id) {
+      el[id].disabled = disabled;
+    });
+    setText(el["template-save"], state.templateBusy ? "保存中…" : "保存模版");
+    el["template-editor-version"].hidden = !editor.id;
+    setText(el["template-editor-version"], editor.id ? "第 " + editor.version + " 版" : "");
+    setText(el["template-mode-summary"], " · " + ({rules: "按规则", model: "模型判断", hybrid: "混合判断"}[el["mode-input"].value] || "未选择"));
+    setText(el["template-prompt-summary"], " · " + Array.from(el["prompt-input"].value).length + "字");
+    setText(el["template-rules-summary"], " · " + state.rules.length + "条");
+    const count = state.shops.filter(function (shop) { return shop.settings && shop.settings.template_id === editor.id && editor.id; }).length;
+    setText(el["template-source-note"], editor.id
+      ? "已供 " + count + " 家店铺选用。保存会同步这些店铺的话术，各店开关、兜底处理和商品资料不变。"
+      : "还未存为模版。保存后可在“店铺配置”里选择使用；本店已有话术不会自动改变。");
+  }
+
+  function loadTemplateEditor(data) {
+    clearPromptDraft();
+    const snapshot = {
+      template_id: data.template_id || "", version: data.template_id ? data.version : null,
+      name: data.name || "", mode: data.mode || "hybrid", system_prompt: data.system_prompt || "",
+      rules: JSON.parse(JSON.stringify(data.rules || []))
+    };
+    Object.assign(state.editor, {id: snapshot.template_id, version: snapshot.version, initialized: true,
+      dirty: false, revision: state.editor.revision + 1, snapshot: snapshot});
+    el["template-name"].value = snapshot.name;
+    el["mode-input"].value = snapshot.mode;
+    el["prompt-input"].value = snapshot.system_prompt;
+    loadRules(snapshot.rules);
+    ["template-mode-section", "template-prompt-section", "template-rules-section"].forEach(function (id) {
+      const panel = byId(id); if (panel) panel.open = false;
+    });
+    hideRulesError();
+    setText(el["template-editor-status"], "");
+    syncTemplateEditor();
+    if (assist) assist.sync();
+  }
+
+  function loadShopTemplateEditor(settings) {
+    const template = state.templates.find(function (item) { return item.template_id === state.templateId; });
+    const shop = currentShop(), source = settings || (shop && shop.settings) || {};
+    loadTemplateEditor(template || {name: shop ? shopName(shop) + "话术" : "", mode: source.mode,
+      system_prompt: source.system_prompt, rules: source.rules});
+  }
+
+  function openShopTemplate() {
+    if (state.templateBusy || state.settingsBusy) return;
+    if (state.editor.dirty && !window.confirm("模版有未保存的修改。放弃这些修改，打开本店话术吗？")) return;
+    loadShopTemplateEditor();
+    navigateTo("templates");
+  }
+
+  function newTemplate() {
+    if (state.templateBusy || state.settingsBusy) return;
+    if (state.editor.dirty && !window.confirm("放弃当前未保存的模版修改，创建新模版吗？")) return;
+    loadTemplateEditor({name: "", mode: "hybrid", system_prompt: "", rules: []});
+  }
+
+  function onEditorTemplateChange() {
+    const id = el["template-editor-select"].value;
+    if (state.templateBusy || state.settingsBusy || id === state.editor.id) return;
+    if (state.editor.dirty && !window.confirm("模版有未保存的修改。放弃后切换吗？")) {
+      el["template-editor-select"].value = state.editor.id; return;
+    }
+    const template = state.templates.find(function (item) { return item.template_id === id; });
+    if (id && !template) { el["template-editor-select"].value = state.editor.id; return; }
+    loadTemplateEditor(template || {name: "", mode: "hybrid", system_prompt: "", rules: []});
+  }
+
+  function resetTemplateEditor() {
+    if (state.templateBusy || state.settingsBusy) return;
+    if (state.editor.dirty && !window.confirm("放弃模版中尚未保存的修改吗？")) return;
+    const template = state.templates.find(function (item) { return item.template_id === state.editor.id; });
+    loadTemplateEditor(template || state.editor.snapshot || {name: "", mode: "hybrid", system_prompt: "", rules: []});
+  }
+
+  function applyTemplatesSnapshot(items) {
+    rememberTemplates(items);
+    const template = state.templates.find(function (item) { return item.template_id === state.editor.id; });
+    if (template && template.version > state.editor.version && !state.templateBusy) {
+      if (!state.editor.dirty) loadTemplateEditor(template);
+      else setText(el["template-editor-status"], "模版已有更新。当前草稿保留，请撤销修改载入最新版本后再编辑保存。");
+    }
+    syncTemplateEditor();
+  }
+
+  async function saveTemplate(asCopy) {
+    if (state.formDisabled || !state.token || state.settingsBusy || state.templateBusy) return;
+    const checked = collectRules();
+    if (!checked.ok) { showRulesError(checked.message, checked.uid, checked.field); return; }
     const prompt = el["prompt-input"].value;
-    if (prompt.length > LIMITS.prompt) { showAlert("提示词最多 8000 个字。", "error"); return; }
-    const input = window.prompt("给这份话术模板起个名字（最多80字）：");
-    if (input === null) return;
-    const name = input.trim();
-    if (!name || Array.from(name).length > 80) { setText(el["save-status"], "模板名称请填写1–80字。"); return; }
-    const payload = {name: name, mode: el["mode-input"].value, system_prompt: prompt, rules: rules.value};
-    const epoch = state.epoch, shopId = state.selectedShopId, revision = state.formRevision;
+    if (prompt.length > LIMITS.prompt) { setText(el["template-editor-status"], "提示词最多8000字。"); return; }
+    let name = el["template-name"].value.trim();
+    if (asCopy) {
+      const input = window.prompt("另存为新的模版名称（最多80字）：", name + "副本");
+      if (input === null) return;
+      name = input.trim();
+    }
+    if (!name || Array.from(name).length > 80) { setText(el["template-editor-status"], "模版名称请填写1–80字。"); return; }
+    const id = state.editor.id, revision = state.editor.revision, epoch = state.epoch, token = state.token;
+    const creating = asCopy || !id;
+    const payload = {name: name, mode: el["mode-input"].value, system_prompt: prompt, rules: checked.value};
+    if (!creating) payload.version = state.editor.version;
     state.templateBusy = true;
-    syncTemplateSelect();
-    setText(el["save-status"], "正在保存新模板…");
+    syncTemplateSelect(); syncTemplateEditor();
+    setText(el["template-editor-status"], "正在保存模版…");
     try {
-      const data = await request("/api/v1/admin/reply-templates", {method: "POST", body: payload});
-      if (isStale(epoch)) return;
-      if (!validTemplate(data)) throw new ApiError(0, "bad_response", "模板保存结果未确认。");
-      state.templates = state.templates.filter(function (item) { return item.template_id !== data.template_id; }).concat([data]);
-      if (state.selectedShopId === shopId && state.formRevision === revision) {
-        state.templateId = data.template_id;
-        state.templateVersion = data.version;
-        onFormEdit();
-        setText(el["save-status"], "新模板已保存。点“保存并同步模板”后，本店才会选用。");
-      } else {
-        showAlert("新模板已保存，可从模板列表选用。当前页面的修改已保留。", "info");
+      const data = await request("/api/v1/admin/reply-templates" + (creating ? "" : "/" + encodeURIComponent(id)), {
+        method: creating ? "POST" : "PUT", token: token, body: payload
+      });
+      if (isStale(epoch) || state.token !== token) return;
+      if (!validTemplate(data) || (!creating && data.template_id !== id)) throw new ApiError(0, "bad_response");
+      rememberTemplates([data]);
+      if (state.editor.id === id && state.editor.revision === revision) {
+        loadTemplateEditor(data);
+        setText(el["template-editor-status"], creating ? "模版已保存，请到“店铺配置”选择使用。" : "模版已保存，已选用的店铺已同步话术。");
+      } else if (state.editor.id === id) {
+        Object.assign(state.editor, {id: data.template_id, version: data.version, snapshot: JSON.parse(JSON.stringify(data))});
+        setText(el["template-editor-status"], "提交时的模版已保存，之后的编辑仍保留，尚未保存。");
       }
+      syncTemplateSelect();
+      void fetchShops(epoch, {});
     } catch (err) {
-      if (isStale(epoch)) return;
-      if (err instanceof ApiError && err.status === 401) { handleError(err, "保存模板失败", epoch, state.token); return; }
-      const message = err instanceof ApiError && err.code === "template_name_exists"
-        ? "已有同名模板，请从列表选用，或换个名字。"
-        : "模板保存结果未确认，请刷新模板列表核对；当前话术仍保留。";
-      showAlert(message, "warn");
+      if (isStale(epoch) || state.token !== token) return;
+      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+        handleError(err, "保存模版失败", epoch, token); return;
+      }
+      const message = err.code === "template_name_exists" ? "已有同名模版，请换个名称。" :
+        err.code === "template_changed" ? "模版已有更新。当前草稿保留，请撤销修改载入最新版本后再编辑保存。" :
+        "保存结果未确认，请刷新模版列表核对；当前内容仍保留。";
+      setText(el["template-editor-status"], message);
+      if (err.code === "template_changed") void fetchShops(epoch, {});
     } finally {
-      if (!isStale(epoch)) { state.templateBusy = false; syncTemplateSelect(); }
+      if (!isStale(epoch) && state.token === token) {
+        state.templateBusy = false; syncTemplateSelect(); syncTemplateEditor();
+      }
     }
   }
+
 
   function clearModelDisplay() {
     state.model.testSeq += 1;
@@ -1521,6 +1642,7 @@
     state.shops = [];
     state.templates = [];
     state.templateBusy = false;
+    state.editor = { id: "", version: null, initialized: false, dirty: false, revision: state.editor.revision + 1, snapshot: null };
     state.settingsBusy = false;
     state.selectedShopId = null;
     state.loadedSettings = null;
@@ -1563,6 +1685,8 @@
     });
     clearLeaseDisplay();
     clearSettingsForm();
+    loadTemplateEditor({name: "", mode: "hybrid", system_prompt: "", rules: []});
+    state.editor.initialized = false;
     clearModelDisplay();
     setFormDisabled(true);
     setChangeBusy(false);
@@ -2170,7 +2294,7 @@
 
   function applyShopsSnapshot(shops, options) {
     const opts = options || {};
-    if (Array.isArray(opts.templates)) state.templates = opts.templates.filter(validTemplate);
+    if (Array.isArray(opts.templates)) applyTemplatesSnapshot(opts.templates);
     const previousShopId = state.selectedShopId;
     state.shops = (Array.isArray(shops) ? shops : []).filter(function (shop) {
       return shop && typeof shop.shop_id === "string" && shop.shop_id;
@@ -2206,6 +2330,7 @@
     renderLease(shop ? shop.lease : null);
     applyRemoteSettings(shop ? shop.settings : null);
     syncTemplateSelect();
+    syncTemplateEditor();
     renderShopConnections();
     return true;
   }
@@ -2909,23 +3034,17 @@
       showAlert("保存失败：还没有选择店铺。", "error");
       return;
     }
-    const checked = collectRules();
-    if (!checked.ok) {
-      showRulesError(checked.message, checked.uid, checked.field);
-      setText(el["save-status"], "还没有保存：请先修正规则。");
-      return;
-    }
-    const prompt = el["prompt-input"].value;
-    if (prompt.length > LIMITS.prompt) {
-      showAlert("保存失败：模型提示词最多 " + LIMITS.prompt + " 个字。", "error");
-      el["prompt-input"].focus();
-      return;
+    const shared = state.templateId
+      ? state.templates.find(function (item) { return item.template_id === state.templateId; })
+      : state.remoteSettings || state.loadedSettings || shop.settings;
+    if (!shared || !Array.isArray(shared.rules) || typeof shared.system_prompt !== "string") {
+      setText(el["save-status"], "话术内容还未加载完整，请刷新后再保存。"); return;
     }
     const payload = {
       enabled: el["enabled-input"].checked === true,
-      mode: ["model", "hybrid"].includes(el["mode-input"].value) ? el["mode-input"].value : "rules",
-      system_prompt: prompt,
-      rules: checked.value,
+      mode: shared.mode,
+      system_prompt: shared.system_prompt,
+      rules: JSON.parse(JSON.stringify(shared.rules)),
       fallback: JSON.parse(JSON.stringify(state.fallback))
     };
     payload.template_id = state.templateId || null;
@@ -2972,7 +3091,7 @@
         return;
       }
       renderSettings(saved);
-      setText(el["save-status"], saved.template_id ? "已保存，共用模板的店铺已同步话术。" : "已保存，服务器已确认。");
+      setText(el["save-status"], "店铺配置已保存，服务器已确认。");
       showAlert("");
     } catch (err) {
       if (isStale(epoch)) {
@@ -2997,7 +3116,7 @@
           : "服务器没有返回明确结果") + "。页面上的修改仍保留。）", "warn");
       } else {
         if (err instanceof ApiError && err.code === "template_changed") {
-          setText(el["save-status"], "模板已有更新，请先点“撤销修改”载入最新话术，再修改保存。当前修改仍保留。");
+          setText(el["save-status"], "所选模版已有更新，请撤销店铺修改后重新选择保存。当前修改仍保留。");
           return;
         }
         setText(el["save-status"], "保存失败：" + err.message + "。页面上的修改仍保留。");
@@ -3659,7 +3778,6 @@
     if (state.formDirty && !window.confirm("放弃当前未保存的修改，恢复为服务器上的设置？")) {
       return;
     }
-    clearPromptDraft();
     renderSettings(source);
     setText(el["save-status"], "已恢复为服务器上的设置（未保存的修改已丢弃）。");
   }
@@ -3699,7 +3817,8 @@
       validateRules: collectRules, handleError: handleError, onShopChange: function (id) {
         el["shop-select"].value = id; onShopChange();
       }, onApply: function () {
-        navigateTo("scripts"); showAlert("草稿已填入当前店铺，请核对后保存设置。", "warn");
+        byId("template-rules-section").open = true;
+        navigateTo("templates"); showAlert("草稿已填入当前话术模版，请核对后保存模版。", "warn");
       } });
 
     el["login-form"].addEventListener("submit", function (event) {
@@ -3812,7 +3931,12 @@
 
     el["shop-select"].addEventListener("change", onShopChange);
     el["template-select"].addEventListener("change", onTemplateChange);
-    el["template-create"].addEventListener("click", createTemplate);
+    el["template-create"].addEventListener("click", openShopTemplate);
+    el["template-editor-select"].addEventListener("change", onEditorTemplateChange);
+    el["template-new"].addEventListener("click", newTemplate);
+    el["template-editor-form"].addEventListener("submit", function (event) { event.preventDefault(); saveTemplate(false); });
+    el["template-save-as"].addEventListener("click", function () { saveTemplate(true); });
+    el["template-reset"].addEventListener("click", resetTemplateEditor);
     el["settings-form"].addEventListener("submit", saveSettings);
     el["reset-btn"].addEventListener("click", resetSettings);
     el["generate-prompt"].addEventListener("click", generatePromptDraft);
@@ -3840,10 +3964,11 @@
       refreshSystemStatus(true);
     });
 
-    ["enabled-input", "mode-input", "prompt-input"].forEach(function (id) {
+    ["mode-input", "prompt-input", "template-name"].forEach(function (id) {
       el[id].addEventListener("input", onFormEdit);
       el[id].addEventListener("change", onFormEdit);
     });
+    el["enabled-input"].addEventListener("change", onShopFormEdit);
 
     MODEL_SLOTS.forEach(function (slot) {
       ["base-url", "model", "timeout", "key"].forEach(function (field) {
