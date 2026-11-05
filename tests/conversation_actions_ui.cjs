@@ -18,7 +18,7 @@ const ids={};
 const document={createElement:tag=>new Element(tag),getElementById:id=>ids[id]??=new Element('div')};
 const context={document,console,setTimeout:()=>0,clearTimeout(){},window:{},sessionStorage:{},URL,Date};
 let source=fs.readFileSync(path.join(__dirname,'../backend/static/app.js'),'utf8');
-source=source.replace(/  if \(document.readyState === "loading"\) \{[\s\S]*?\n  \}\n\}\)\(\);\s*$/, '  globalThis.fixture={state,el,IDS,loadRules,collectRules,renderFallback,newPolicy,settingsSignature,policyError,actionBadge,deliveryBadge};\n})();');
+source=source.replace(/  if \(document.readyState === "loading"\) \{[\s\S]*?\n  \}\n\}\)\(\);\s*$/, '  globalThis.fixture={state,el,IDS,loadRules,collectRules,renderFallback,newPolicy,settingsSignature,policyError,actionBadge,deliveryBadge,setFormDisabled};\n})();');
 vm.runInNewContext(source,context);
 const h=context.fixture;assert.ok(h);
 h.IDS.forEach(id=>h.el[id]=document.getElementById(id));
@@ -59,5 +59,25 @@ let checks=0;
   assist.seed({context:{epoch:0,token:'fake',shop:'a',version:3,seq:0},snapshot:JSON.stringify(h.state.rules),modelVersion:0,items:[{candidate:{},choice:{value:'replace:r'},contains:{value:'new'},description:{value:''},reply:{value:'new reply'}}]});
   document.getElementById('rules-apply').fire('click');
   const saved=h.collectRules().value[0];assert.equal(saved.reply,'new reply');assert.ok(!('handling' in saved));checks++;
+}
+{
+  h.renderFallback({unhandled:{action:'transfer',account:'客服甲',allow_unmark:false}});
+  let allow=h.el['fallback-controls'].querySelectorAll('input').find(input=>input.type==='checkbox');
+  assert.equal(allow.checked,false);assert.equal(allow.disabled,true);checks++;
+  h.renderFallback({unhandled:{action:'transfer',account:'客服甲',allow_unmark:true}});
+  allow=h.el['fallback-controls'].querySelectorAll('input').find(input=>input.type==='checkbox');
+  assert.equal(allow.checked,true);assert.equal(allow.disabled,false);
+  allow.checked=false;allow.fire('change');
+  assert.equal(h.state.fallback.unhandled.allow_unmark,false);assert.equal(allow.disabled,true);checks++;
+  h.state.formDisabled=true;
+  h.renderFallback({unhandled:{action:'transfer',account:'客服甲',allow_unmark:true}});
+  allow=h.el['fallback-controls'].querySelectorAll('input').find(input=>input.type==='checkbox');
+  assert.equal(allow.disabled,true);h.state.formDisabled=false;checks++;
+  h.setFormDisabled(true);h.setFormDisabled(false);
+  assert.equal(allow.disabled,false);allow.checked=false;allow.fire('change');
+  h.setFormDisabled(true);h.setFormDisabled(false);assert.equal(allow.disabled,true);checks++;
+  h.loadRules([{id:'r',contains:'x',handling:{action:'transfer',account:'客服甲',allow_unmark:false}}]);
+  allow=h.el['rules-list'].querySelectorAll('input').find(input=>input.type==='checkbox');
+  h.setFormDisabled(true);h.setFormDisabled(false);assert.equal(allow.disabled,true);checks++;
 }
 console.log(JSON.stringify({passed:checks,realManagementFunctions:true,network:false,platform:false}));

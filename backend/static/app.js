@@ -1003,9 +1003,10 @@
       account.placeholder = "填写转移框第一列的完整账号名";
       account.addEventListener("input", function () { policy.account = account.value;onFormEdit(); });
       field("接收人账号名", account);
-      const allow = document.createElement("input");allow.type = "checkbox";allow.checked = policy.allow_unmark === true;allow.disabled = !allow.checked;
-      allow.addEventListener("change", function () { policy.allow_unmark = allow.checked;allow.disabled = !allow.checked;onFormEdit(); });
+      const allow = document.createElement("input");allow.type = "checkbox";allow.className = "policy-unmark";allow.checked = policy.allow_unmark === true;
+      allow.addEventListener("change", function () { policy.allow_unmark = allow.checked;allow.disabled = state.formDisabled || !allow.checked;onFormEdit(); });
       field("取消收藏后转接（本版本暂不支持，可关闭旧策略）", allow);
+      allow.disabled = state.formDisabled || !allow.checked;
     }
     return group;
   }
@@ -1370,6 +1371,11 @@
       if (typeof sync === "function") {
         sync();
       }
+    });
+    ["fallback-controls", "rules-list"].forEach(function (id) {
+      el[id].querySelectorAll(".policy-unmark").forEach(function (node) {
+        node.disabled = disabled || !node.checked;
+      });
     });
     syncTemplateSelect();
   }
