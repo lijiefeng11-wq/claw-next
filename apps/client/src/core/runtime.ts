@@ -190,6 +190,8 @@ export class ShopRuntime {
   private readonly unknownCounts = new Map<string, number>();
   /** 每个买家对话进行中的新消息处理数（准备、提交、判定、发送）；归零后才可预热。 */
   private readonly inFlight = new Map<string, number>();
+  /** 仅保留失联时尚未创建事件的新消息；不包含任何已尝试发送的事件。 */
+  private readonly pendingPreparation = new Map<string, { messageId: string; sessionId: string }>();
   private readonly active = new Set<Promise<unknown>>();
   private readonly resume: EventRecord[] = [];
   private readonly uploading = new Set<string>();
@@ -305,6 +307,7 @@ export class ShopRuntime {
   /** wait=false 时立即停止并关闭日志，不等待进行中的平台请求（等同进程退出）。 */
   async stop(wait = true) {
     this.stopped = true;
+    this.pendingPreparation.clear();
     for (const t of this.checkTimers) clearTimeout(t);
     this.checkTimers.clear();
     if (this.timer) clearInterval(this.timer);
@@ -366,6 +369,7 @@ export class ShopRuntime {
       if (caps.has(CAP_GOODS_SNAPSHOT) !== this.capabilities.has(CAP_GOODS_SNAPSHOT)) this.log(`capability goods_snapshot=${caps.has(CAP_GOODS_SNAPSHOT)}`);
       if (caps.has(CAP_MARK_CONVERSATION) !== this.capabilities.has(CAP_MARK_CONVERSATION)) this.log(`capability mark_conversation=${caps.has(CAP_MARK_CONVERSATION)}`);
       this.capabilities = caps;
+      this.resumePreparation();
       const request = lease.product_learning;
       if (request && caps.has(CAP_PRODUCT_KNOWLEDGE) && !this.productLearning && !this.productRequests.has(request.request_id)) {
         this.productRequests.add(request.request_id);
@@ -375,6 +379,7 @@ export class ShopRuntime {
     } catch (err) {
       const code = errorCode(err);
       if (err instanceof BackendError && err.code === "lease_busy") {
+        this.pendingPreparation.clear();
         this.capabilities = new Set();
         this.lease = { state: "busy", generation: 0, valid_until: 0, detail: "lease_busy" };
       } else if (err instanceof BackendError && err.status === 401) {
@@ -468,6 +473,7 @@ export class ShopRuntime {
   }
 
   private newSession() {
+    this.pendingPreparation.clear();
     this.capabilities = new Set();
     this.sendOptions.clear();
     this.sessionId = `ses-${randomUUID()}`;
@@ -483,6 +489,7 @@ export class ShopRuntime {
         this.track(this.heartbeat());
         break;
       case "session_ended":
+        this.pendingPreparation.clear();
         this.orders.clear();
         this.sendOptions.clear();
         this.capabilities = new Set();
@@ -499,6 +506,7 @@ export class ShopRuntime {
         this.setSendOptions(event.conversation_id, event.options);
         break;
       case "status":
+        if (this.platformCheck()) this.pendingPreparation.clear();
         break;
     }
     this.changed();
@@ -627,6 +635,24 @@ export class ShopRuntime {
     return null;
   }
 
+  /** 恢复连接后继续未开始的准备，沿用原消息的期限、身份与去重记录。 */
+  private resumePreparation() {
+    if (!this.pendingPreparation.size) return;
+    if (this.stopped || this.config.mode !== "auto" || this.updateHold() || this.platformCheck()) {
+      this.pendingPreparation.clear();
+      return;
+    }
+    if (this.submitBlocker()) return;
+    for (const [conversationId, pending] of this.pendingPreparation) {
+      if (this.inFlight.has(conversationId)) continue;
+      this.pendingPreparation.delete(conversationId);
+      const conv = this.journal.conversation(conversationId);
+      if (pending.sessionId !== this.sessionId || conv.takeover || conv.messages.at(-1)?.id !== pending.messageId) continue;
+      if (this.journal.eventForMessage(conversationId, pending.messageId) || this.expired(conversationId, pending.messageId)) continue;
+      this.track(this.submitNew(conversationId, pending.messageId));
+    }
+  }
+
   private platformCheck(): string | null {
     const st = this.adapter.status();
     if (!st.logged_in) return "platform_logged_out";
@@ -698,7 +724,13 @@ export class ShopRuntime {
     if (this.expired(conversationId, messageId)) return;
     const measured = <T>(step: string, fn: () => Promise<T>) => this.replyTiming.measure(this.message(conversationId, messageId)!, step, fn);
     const blocked = this.submitBlocker();
-    if (blocked) return this.journal.note(conversationId, messageId, blocked);
+    if (blocked) {
+      if (this.config.mode === "auto" && this.sessionId && !this.platformCheck() && !this.journal.conversation(conversationId).takeover &&
+        (blocked === "backend_unavailable" || blocked === "lease_invalid")) {
+        this.pendingPreparation.set(conversationId, { messageId, sessionId: this.sessionId });
+      }
+      return this.journal.note(conversationId, messageId, blocked);
+    }
     const session = this.sessionId as string;
     const generation = this.lease.generation;
     let history;
@@ -1395,6 +1427,7 @@ export class ShopRuntime {
   /** 切换模式。转为非自动时，所有对话的旧上下文版本失效。 */
   setMode(mode: ShopMode) {
     if (this.config.mode === mode) return;
+    this.pendingPreparation.clear();
     this.config.mode = mode;
     if (mode !== "auto") for (const conv of this.journal.conversations.values()) if (conv.revision > 0) this.journal.bumpRevision(conv.conversation_id, `mode:${mode}`);
     this.changed();
@@ -1403,6 +1436,7 @@ export class ShopRuntime {
   setTakeover(conversationId: string, on: boolean) {
     if (!this.journal.conversations.has(conversationId)) return;
     if (this.journal.conversation(conversationId).takeover === on) return;
+    if (on) this.pendingPreparation.delete(conversationId);
     this.journal.setTakeover(conversationId, on);
     this.journal.bumpRevision(conversationId, on ? "manual_takeover" : "manual_release");
     this.changed();
