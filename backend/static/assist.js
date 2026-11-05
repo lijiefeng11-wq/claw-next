@@ -5,7 +5,7 @@
 window.setupAdminAssist = function (options) {
   const {state, request, onEdit, renderRules, newRuleId, nextUid, validateRules, handleError} = options;
   const ids = ["chat-file", "chat-import", "chat-clear", "chat-status", "chat-preview", "chat-pairs", "chat-confirm",
-    "chat-import-progress", "chat-analysis-progress", "chat-shop-name", "chat-shop-select", "chat-analysis-plan",
+    "chat-import-progress", "chat-analysis-progress", "chat-shop-name", "chat-shop-select", "chat-analysis-plan", "chat-template-name",
     "rules-generate", "rule-draft-status", "rule-candidates", "rules-apply", "rules-apply-status", "merge-brief", "merge-generate",
     "merge-status", "merge-preview", "merge-before", "merge-result", "merge-notes", "merge-confirm",
     "merge-confirm-label", "merge-apply", "prompt-input"];
@@ -165,6 +165,8 @@ window.setupAdminAssist = function (options) {
     if (importContext && !current(importContext)) { reset(); return; }
     const shop = (state.shops || []).find(item => item.shop_id === state.selectedShopId);
     say("chat-shop-name", shop ? shop.name : "请先选择店铺");
+    const target = document.getElementById("template-name");
+    say("chat-template-name", target && target.value.trim() ? target.value.trim() : "未命名模版");
     const select = el["chat-shop-select"], shops = state.shops || [];
     const signature = JSON.stringify(shops.map(item => [item.shop_id, item.name]));
     if (select.dataset.signature !== signature) {
@@ -191,7 +193,7 @@ window.setupAdminAssist = function (options) {
     el["rules-generate"].disabled = locked || busy || state.model.dirty || !pairs.length || !el["chat-confirm"].checked;
     const selected = draft ? draft.items.filter(i => i.choice.value !== "skip").length : 0;
     el["rules-apply"].disabled = locked || busy || !selected;
-    say("rules-apply", "把选中的草稿填入话术配置（" + selected + " 条）");
+    say("rules-apply", "把选中的草稿填入话术模版（" + selected + " 条）");
     el["merge-generate"].disabled = locked || busy || state.model.dirty || !el["merge-brief"].value.trim() || !el["prompt-input"].value.trim();
     el["merge-apply"].disabled = locked || busy || !merge || !el["merge-result"].value.trim() ||
       (merge.conflicts.length > 0 && !el["merge-confirm"].checked);
@@ -363,7 +365,7 @@ window.setupAdminAssist = function (options) {
     }
     if (next.length > 100) { say("rule-draft-status", "填入后超过 100 条，请减少新增项或选择替换。"); return; }
     if (!changed) return;
-    clearCandidates("已把 " + changed + " 条草稿填入表单，尚未保存。请核对后点击“保存设置”。");
+    clearCandidates("已把 " + changed + " 条草稿填入表单，尚未保存。请核对后点击“保存模版”。");
     state.rules = next; state.rulesPage = 0; renderRules(); onEdit(); sync();
     if (typeof options.onApply === "function") options.onApply();
   });
@@ -405,7 +407,7 @@ window.setupAdminAssist = function (options) {
     sync(); if (el["merge-apply"].disabled || !merge) return;
     const value = el["merge-result"].value.trim();
     if (!value || value.length > 8000) { say("merge-status", "合并稿需为 1–8000 字。"); return; }
-    clearMerge("已填入提示词框，尚未保存。请核对后点击“保存设置”。");
+    clearMerge("已填入提示词框，尚未保存。请核对后点击“保存模版”。");
     el["prompt-input"].value = value; onEdit(); sync();
   });
   sync();

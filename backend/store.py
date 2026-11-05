@@ -438,6 +438,34 @@ class Store:
                             (template_id, name.strip(), json.dumps(content, ensure_ascii=False)))
             return {"template_id": template_id, "name": name.strip(), "version": 1, **content}
 
+    def update_reply_template(self, template_id, p):
+        require(isinstance(template_id, str) and re.fullmatch(r"[0-9a-f]{32}", template_id), "invalid_template")
+        require(isinstance(p, dict) and set(p) == {"name", "version", *TEMPLATE_FIELDS}, "invalid_template")
+        require(type(p["version"]) is int and p["version"] > 0, "invalid_template")
+        name = p["name"]
+        require(isinstance(name, str) and 1 <= len(name.strip()) <= 80, "invalid_template_name")
+        content = self._template_content(validate_settings({**p, "enabled": False}))
+        with self.lock, self.db:
+            row = self.db.execute("SELECT * FROM reply_templates WHERE template_id=?", (template_id,)).fetchone()
+            require(row is not None, "template_not_found", 404)
+            require(p["version"] == row["version"], "template_changed", 409)
+            require(not self.db.execute("SELECT 1 FROM reply_templates WHERE name=? AND template_id<>?",
+                                        (name.strip(), template_id)).fetchone(), "template_name_exists", 409)
+            changed = content != json.loads(row["content"])
+            if changed or name.strip() != row["name"]:
+                self.db.execute("UPDATE reply_templates SET name=?,content=?,version=version+1 WHERE template_id=?",
+                                (name.strip(), json.dumps(content, ensure_ascii=False), template_id))
+                if changed:
+                    for shop in self.db.execute("SELECT s.shop_id,s.settings FROM shops s JOIN shop_reply_templates b "
+                                                "ON s.shop_id=b.shop_id WHERE b.template_id=?", (template_id,)).fetchall():
+                        settings = json.loads(shop["settings"])
+                        settings.update(content)
+                        settings["version"] += 1
+                        self.db.execute("UPDATE shops SET settings=? WHERE shop_id=?",
+                                        (json.dumps(settings, ensure_ascii=False), shop["shop_id"]))
+            return self._template_view(self.db.execute("SELECT * FROM reply_templates WHERE template_id=?",
+                                                       (template_id,)).fetchone())
+
     def shops(self):
         with self.lock:
             return [{"shop_id": r["shop_id"], "name": r["name"], "settings": self._admin_settings(r["shop_id"], json.loads(r["settings"])), "lease": self._public_lease(r["shop_id"])} for r in self.db.execute("SELECT * FROM shops ORDER BY shop_id") if r["shop_id"] in self.shop_ids]

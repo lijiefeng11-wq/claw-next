@@ -4,7 +4,7 @@ const source=fs.readFileSync('backend/static/products.js','utf8');
 class Node { constructor(){this.textContent='';this.value='';this.children=[];this.disabled=false;this.listeners={};} appendChild(n){this.children.push(n);} replaceChildren(){this.children=[];} addEventListener(k,f){this.listeners[k]=f;} }
 const tick=()=>new Promise(r=>setImmediate(r));
 function setup(){
- const nodes=Object.fromEntries(['product-learning','product-source','product-learn','product-status','product-preview'].map(k=>[k,new Node()]));
+ const nodes=Object.fromEntries(['product-learning','product-source','product-learn','product-status','product-preview','product-summary'].map(k=>[k,new Node()]));
  const state={selectedShopId:'a',token:'fictional-admin',epoch:1,route:'scripts'},calls=[],window={};
  const document={hidden:false,getElementById:k=>nodes[k],createElement:()=>new Node()};
  vm.runInNewContext(source,{window,document,setInterval:()=>0});
@@ -13,6 +13,10 @@ function setup(){
 }
 (async()=>{
  let passed=0;
+ const existing=setup();existing.calls[0].resolve({status:'idle',catalog_count:2,products:[]});await tick();
+ assert.match(existing.nodes['product-status'].textContent,/已有 2 件/);assert.match(existing.nodes['product-summary'].textContent,/已学 2 件/);passed++;
+ existing.state.selectedShopId='b';existing.control.refresh();assert.equal(existing.nodes['product-summary'].textContent,'');
+ existing.control.reset();assert.equal(existing.nodes['product-summary'].textContent,'');passed++;
  const h=setup();
  h.calls[0].resolve({status:'idle',products:[]});await tick();
  h.nodes['product-source'].value='https://mobile.yangkeduo.com/mall_page.html?ps=fictional';

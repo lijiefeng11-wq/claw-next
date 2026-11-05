@@ -406,6 +406,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"shops": store.shops(), "templates": store.reply_templates()})
             if path == "/api/v1/admin/reply-templates" and method == "POST":
                 return self._send(201, store.create_reply_template(self._json()))
+            if len(parts) == 5 and parts[3] == "reply-templates" and method == "PUT":
+                return self._send(200, store.update_reply_template(parts[4], self._json()))
             if len(parts) == 6 and parts[3] == "shops" and parts[5] == "product-learning" and method in ("GET", "POST"):
                 if method == "GET":
                     return self._send(200, self.server.products.status(parts[4]))
