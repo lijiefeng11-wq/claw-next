@@ -3017,6 +3017,7 @@ export class PddPageAdapter implements PlatformAdapter {
       await sleep(500);
       // 点行后重读：目标行须仍唯一且仍在刚才点的位置（表格重排/身份变化时可能点到了别人）。确认气泡可能盖住按钮，所以这里不核对遮挡。
       const again = await read<Point | string>(transferTargetRectScript(target, uid)).catch(() => "script_failed");
+      if (again === "conversation_mismatch") return "not_executed:conversation_mismatch";
       if (typeof again === "string" || Math.abs(again.x - btn.x) > 2 || Math.abs(again.y - btn.y) > 2) {
         log({ phase: "not_executed", reason: "target_moved", detail: typeof again === "string" ? again : "moved", dx: typeof again === "string" ? null : again.x - btn.x, dy: typeof again === "string" ? null : again.y - btn.y });
         return "not_executed:target_moved";
