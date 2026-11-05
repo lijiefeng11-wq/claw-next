@@ -3136,8 +3136,9 @@ export class PddPageAdapter implements PlatformAdapter {
 
   private async clearInput(text: string, uid?: string) {
     await this.run(`(() => {
-      ${uid === undefined ? "" : `const keys = [...document.querySelectorAll("li.chat-item .chat-item-box.active[data-random]")].map(e => /^([0-9]{1,32})-/.exec(e.getAttribute("data-random") || "")?.[1]);
-      if (!keys.length || !keys.every(k => k === ${JSON.stringify(uid)})) return;`}
+      const buyer = ${JSON.stringify(uid ?? null)};
+      const keys = [...document.querySelectorAll("li.chat-item .chat-item-box.active[data-random]")].map(e => /^([0-9]{1,32})-/.exec(e.getAttribute("data-random") || "")?.[1]);
+      if (buyer !== null && (!keys.length || !keys.every(k => k === buyer))) return;
       const ta = document.querySelector(${JSON.stringify(TEXTAREA)});
       if (!ta || ta.value !== ${JSON.stringify(text)}) return;
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(ta, "");
