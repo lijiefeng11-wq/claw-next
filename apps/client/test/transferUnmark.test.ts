@@ -5,7 +5,7 @@ import { test } from "node:test";
 const req = Module.createRequire(__filename), electronPath = req.resolve("electron");
 req.cache[electronPath] = { id: electronPath, filename: electronPath, loaded: true, exports: { BrowserWindow: class {}, session: {} } } as unknown as NodeModule;
 const { PddPageAdapter, transferUnmarkScript } = req("../src/main/pddAdapter.js") as typeof import("../src/main/pddAdapter.js");
-const OPEN = { x: 100, y: 100 }, ROW = { x: 300, y: 200 }, CONFIRM = { x: 400, y: 260 }, UNMARK = { x: 500, y: 350 };
+const OPEN = { x: 100, y: 100 }, ROW = { x: 300, y: 200 }, CONFIRM = { x: 400, y: 260 }, UNMARK = { x: 500, y: 350 }, KEEP = { x: 700, y: 350 };
 
 function harness(scenario = "normal") {
   const a = new PddPageAdapter("fictional", "fictional") as any;
@@ -13,9 +13,10 @@ function harness(scenario = "normal") {
   let confirmed = false, epochChanged = false, blocked: string | null = null;
   const page = { isDestroyed: () => false, webContents: { isDestroyed: () => false, debugger: { isAttached: () => true, sendCommand: (_method: string, p: any): Promise<unknown> => {
     if (p.type !== "mousePressed") return Promise.resolve({});
-    const kind = p.x === OPEN.x ? "open" : p.x === ROW.x ? "row" : p.x === CONFIRM.x ? "confirm" : "unmark";
+    const kind = p.x === OPEN.x ? "open" : p.x === ROW.x ? "row" : p.x === CONFIRM.x ? "confirm" : p.x === KEEP.x ? "keep" : "unmark";
     clicks.push(kind);
     if (kind === "confirm") confirmed = true;
+    if (kind === "keep") confirmed = false;
     if (kind === "unmark") {
       assert.equal(intents.length, 1, "intent persisted before any unmark command");
       if (scenario === "sync_throw") throw Error("fictional-command-threw");
@@ -43,7 +44,7 @@ function harness(scenario = "normal") {
         }
         return "ok";
       }
-      return { text: "已收藏", unfav: UNMARK, keep: null };
+      return { text: "已收藏", unfav: UNMARK, keep: KEEP };
     }
     if (script.includes("const popovers")) return { dialogs: 0, popovers: 0 };
     if (script.includes("return { cells")) return [{ cells: ["fictional-main", "online"], button: ROW }];
@@ -80,7 +81,8 @@ for (const scenario of ["ambiguous", "covered", "switch", "input", "lease", "dea
 
 test("permission off preserves favorite, while a failure box left from another attempt prevents all clicks", async () => {
   const off = harness(); assert.equal((await off.a.transferConversation(off.request(false))).status, "unknown");
-  assert(!off.clicks.includes("unmark")); assert.equal(off.intents.length, 0);
+  assert.deepEqual(off.clicks, ["open", "row", "confirm", "keep"]); assert.equal(off.intents.length, 0);
+  assert.equal(await off.a.run(transferUnmarkScript("9001")), null, "the refusal is dismissed without cancelling favorite");
   const old = harness("leftover"); assert.equal((await old.a.transferConversation(old.request())).status, "not_sent");
   assert.deepEqual(old.clicks, []); assert.equal(old.intents.length, 0);
 });
@@ -111,4 +113,18 @@ test("actual generated unmark script checks unique visible failure, buyer and ex
     if (scenario === "ok" || scenario === "same_buyer_twice") assert.equal(result, "ok");
     else assert.notEqual(result, "ok", scenario);
   }
+});
+
+test("actual generated refusal reader retains and validates the keep-favorite button", () => {
+  const unfav = new Element("取消收藏并转移"), keep = new Element("暂不转移收藏会话");
+  const body = new Element().add(new Element().add(new Element("转移失败"), new Element("已收藏的会话不可转移"), unfav, keep));
+  let hit = unfav;
+  const document = { body, querySelectorAll: () => [{ getClientRects: () => [{}], classList: { contains: () => true }, getAttribute: () => "9001-x" }], elementFromPoint: () => hit };
+  const context = { document, getComputedStyle: () => ({ visibility: "visible" }) };
+  const failure = vm.runInNewContext(transferUnmarkScript("9001"), context);
+  assert(failure.keep && Number.isFinite(failure.keep.x), "keep target must survive the actual page reader");
+  hit = keep;
+  assert.equal(vm.runInNewContext(transferUnmarkScript("9001", failure.keep, true), context), "ok");
+  hit = body;
+  assert.notEqual(vm.runInNewContext(transferUnmarkScript("9001", failure.keep, true), context), "ok");
 });

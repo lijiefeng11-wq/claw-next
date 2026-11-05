@@ -871,7 +871,7 @@ const TRANSFER_FAIL_DIALOG = `(() => {
 })()`;
 
 /** 正式转接只认唯一新出现的收藏拒绝框；买家、两个固定按钮及点击命中在同一快照核对。 */
-export function transferUnmarkScript(buyer: string, check?: Point): string {
+export function transferUnmarkScript(buyer: string, check?: Point, keepFavorite = false): string {
   return `(() => {
     const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
     const t = (e) => (e.innerText ?? "").trim();
@@ -887,14 +887,15 @@ export function transferUnmarkScript(buyer: string, check?: Point): string {
       const unfav = leaf(box, "取消收藏并转移"), keep = leaf(box, "暂不转移收藏会话");
       if (!unfav.length || !keep.length) continue;
       if (unfav.length !== 1 || keep.length !== 1 || !t(box).includes("已收藏")) return "failure_invalid";
-      const button = unfav[0];
+      const button = ${keepFavorite ? 'keep[0]' : 'unfav[0]'};
       if (button.closest('button[disabled], [aria-disabled="true"]')) return "unmark_disabled";
       const r = button.getBoundingClientRect();
       const x = Math.round(r.left + r.width / 2), y = Math.round(r.top + r.height / 2);
       const point = ${JSON.stringify(check ?? null)} ?? { x, y };
       const hit = document.elementFromPoint(point.x, point.y);
       if (!hit || !(button === hit || button.contains(hit))) return "unmark_covered";
-      return ${check ? '"ok"' : '{ text: "已收藏", unfav: { x, y }, keep: null }'};
+      const at = (e) => { const r = e.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; };
+      return ${check ? '"ok"' : '{ text: "已收藏", unfav: at(unfav[0]), keep: at(keep[0]) }'};
     }
     return "failure_unrecognized";
   })()`;
@@ -3126,7 +3127,7 @@ export class PddPageAdapter implements PlatformAdapter {
         const blocked = hooks.check();
         if (blocked) return `unknown:${blocked}`;
       }
-      const fail = await (read ?? this.run.bind(this))<{ text: string; unfav: Point | null; keep: Point | null } | string | null>(hooks ? transferUnmarkScript(uid) : TRANSFER_FAIL_DIALOG).catch(() => "script_failed");
+      const fail = await (read ?? this.run.bind(this))<{ text: string; unfav: Point | null; keep: Point | null } | string | null>(hooks ? transferUnmarkScript(uid, undefined, !allowUnfavorite) : TRANSFER_FAIL_DIALOG).catch(() => "script_failed");
       if (typeof fail === "string") return `unknown:${fail}`;
       if (fail && !unfavorited) {
         if (!fail.text.includes("已收藏") || !fail.unfav) {
@@ -3135,7 +3136,12 @@ export class PddPageAdapter implements PlatformAdapter {
         }
         if (!allowUnfavorite) {
           log({ phase: "needs_confirmation", kind: "favorited" });
-          if (fail.keep && (await same())) await this.nativeClick(fail.keep, page, epoch);
+          if (hooks && fail.keep) {
+            const blocked = await gate();
+            if (blocked) return `unknown:${blocked}`;
+            const owned = await read!<string>(transferUnmarkScript(uid, fail.keep, true)).catch(() => "script_failed");
+            if (owned === "ok") await hooks.click(fail.keep, true);
+          } else if (fail.keep && (await same())) await this.nativeClick(fail.keep, page, epoch);
           return "needs_confirmation:unfavorite";
         }
         // 首次转移已点过，结果仍按 unknown；过期或换了对话就不再补做取消收藏。
