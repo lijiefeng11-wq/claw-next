@@ -99,7 +99,7 @@ export type MarkResult =
   | { status: "not_sent"; reason: string }
   | { status: "unknown"; reason: string; page_observed?: PageObserved };
 
-export type TransferRequest = { conversation_id: string; target_id: string; allow_unmark: boolean; attempt_id: string; deadline: number; recheck: () => string | null };
+export type TransferRequest = { conversation_id: string; target_id: string; allow_unmark: boolean; attempt_id: string; deadline: number; recheck: () => string | null; before_unmark?: () => void };
 export type TransferResult = MarkResult;
 
 export type AdapterEvent =

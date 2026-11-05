@@ -138,6 +138,19 @@ class StoreActionTests(unittest.TestCase):
         self.code("delivery_terminal", self.claim)
         self.assertIsNone(self.store.next_job())
 
+    def test_native_unmark_unknown_is_durable_and_never_reclaims_or_becomes_sent(self):
+        self.store.update_settings("a", {**self.settings, "rules": [{"id": "r", "contains": "x", "handling": TRANSFER}]})
+        self.lease = self.heartbeat(ca.CAPABILITIES)
+        self.ready(self.event(marked=True));self.claim()
+        steps = [{"step": "transfer", "status": "not_sent", "reason": "blocked_by_mark"},
+                 {"step": "unmark_and_transfer", "status": "unknown", "unmarked": None}]
+        view = self.receipt("unknown", steps)
+        self.assertEqual(view["delivery"]["steps"], steps)
+        self.assertEqual(self.receipt("unknown", steps)["delivery"], view["delivery"])
+        self.code("delivery_terminal", self.claim)
+        self.code("receipt_conflict", lambda:self.receipt("sent", [steps[0], {**steps[1], "status": "sent", "unmarked": True}]))
+        self.assertIsNone(self.store.next_job())
+
     def test_unknown_receipt_and_expired_claim_are_never_overwritten(self):
         self.ready();self.claim();step = {"step": "mark", "status": "unknown", "color": "red"}
         self.receipt("unknown", [step]);self.code("receipt_conflict", lambda:self.receipt("sent", [{**step, "status": "sent"}]))

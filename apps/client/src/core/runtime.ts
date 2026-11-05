@@ -776,7 +776,7 @@ export class ShopRuntime {
       const marked = read?.marked ?? null;
       request.context.conv_state = { marked, color: marked === true ? (read?.color ?? null) : null, observed_at: this.now() };
     }
-    if (this.config.mode === "auto" && !conv.takeover && this.transferExecutable() && request.context.conv_state?.marked === false) {
+    if (this.config.mode === "auto" && !conv.takeover && this.transferExecutable() && typeof request.context.conv_state?.marked === "boolean") {
       const targets = await measured("transfer_targets", () =>
         this.adapter.readTransferTargets!(conversationId, prepLeft()).catch(() => [] as TransferTarget[]));
       if (this.expired(conversationId, messageId)) return;
@@ -1104,8 +1104,7 @@ export class ShopRuntime {
     if (!d) return "transfer_invalid";
     if (!this.transferExecutable()) return "capability_not_confirmed";
     if (typeof this.eventConvState.get(ev.event_id)?.marked !== "boolean") return "conv_state_not_retained";
-    if (this.eventConvState.get(ev.event_id)?.marked === true) return "transfer_blocked_by_mark";
-    if (d.unmark_policy.allow) return "unmark_not_supported";
+    if (this.eventConvState.get(ev.event_id)?.marked === true && !d.unmark_policy.allow) return "transfer_blocked_by_mark";
     const target = this.eventTransferTargets.get(ev.event_id)?.find(t => t.target_id === d.target_id);
     if (!target || this.now() - target.observed_at > 30) return "transfer_target_unknown";
     return null;
@@ -1255,11 +1254,16 @@ export class ShopRuntime {
       const call = this.adapter.transferConversation && target ? this.adapter.transferConversation({
         conversation_id: ev.conversation_id, target_id: target.target_id, allow_unmark: target.unmark_policy.allow,
         attempt_id: attemptId, deadline, recheck,
+        before_unmark: () => {
+          if (!target.unmark_policy.allow || recheck()) throw Error("unmark_not_authorized");
+          this.journal.setAttempt(ev.event_id, attemptId, "sending", "unmark_and_transfer");
+        },
       }) : Promise.resolve({ status: "not_sent" as const, reason: "capability_not_confirmed" });
       result = await this.timed(ev.event_id, "platform_transfer", () => withTimeout(call, Math.min(this.timing.sendTimeoutMs, sendWindow * 1000) + 1000));
     } catch {
       result = { status: "unknown", reason: "transfer_exception_or_timeout" };
     }
+    if (ev.attempt?.detail === "unmark_and_transfer") result = { status: "unknown", reason: "transfer_binding_unproven", page_observed: result.status === "not_sent" ? "unknown" : result.page_observed };
     if (result.status === "confirmed" && (claimExpiresAt - this.now() < this.timing.itemReceiptReserve || this.platformCheck() || ev.session_id !== this.sessionId)) {
       result = { status: "unknown", reason: "transfer_confirmation_invalid" };
     }
@@ -1433,6 +1437,11 @@ function pendingReceipt(status: ReceiptStatus, platformMessageId: string | null 
 export function receiptExtra(ev: EventRecord, status: ReceiptStatus, detail: string | null, observed?: PageObserved): ReceiptExtra | undefined {
   const d = ev.snapshot?.decision;
   if (d?.action === "transfer" && d.transfer) {
+    if (ev.attempt?.detail === "unmark_and_transfer") return {
+      steps: [{ step: "transfer", status: "not_sent", reason: "blocked_by_mark" },
+        { step: "unmark_and_transfer", status: "unknown", unmarked: null }],
+      ...(observed ? { page_observed: observed } : {}),
+    };
     if (status === "not_sent") return { reason: convActionReason(detail) };
     return { steps: [{ step: "transfer", status }], ...(observed ? { page_observed: observed } : {}) };
   }
