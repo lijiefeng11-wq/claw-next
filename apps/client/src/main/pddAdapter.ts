@@ -2028,9 +2028,9 @@ export class PddPageAdapter implements PlatformAdapter {
   }
 
   /** 点开该买家对话并等它成为当前对话；返回失败原因，成功为 null。 */
-  private async openConversation(uid: string, deadline = Date.now() / 1000 + 7, current?: () => string | null): Promise<string | null> {
+  private async openConversation(uid: string, deadline = Date.now() / 1000 + 7, current?: () => string | null, prepareMs = 5000): Promise<string | null> {
     const page = this.window, epoch = this.watchEpoch;
-    const until = Math.min(Date.now() + 5000, deadline * 1000 - 1500);
+    const until = Math.min(Date.now() + prepareMs, deadline * 1000 - 1500);
     const missingUntil = Math.min(until, Date.now() + 1500);
     const guard = () => this.window !== page || this.watchEpoch !== epoch || !page || page.isDestroyed() ? "pdd_page_changed" :
       current?.() ?? (Date.now() >= deadline * 1000 - 1500 ? "claim_expiring" : null);
@@ -2639,7 +2639,7 @@ export class PddPageAdapter implements PlatformAdapter {
     let hovered = false;
     this.sending = true;
     try {
-      const notOpened = await Promise.race([this.openConversation(uid), sleep(1000).then(() => "pdd_conversation_read_timeout")]);
+      const notOpened = await this.openConversation(uid, request.deadline, () => guard() ?? request.recheck(), 1000);
       if (notOpened) return notSent(notOpened);
       let stop = guard();
       if (stop) return notSent(stop);
