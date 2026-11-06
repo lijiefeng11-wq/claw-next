@@ -34,7 +34,7 @@ class GoodsVehicleIntegrationTests(unittest.TestCase):
         for call in post.call_args_list:
             messages = call.args[1]["messages"]
             view = json.loads(messages[1]["content"])
-            self.assertEqual(view["vehicle_knowledge"], trusted)
+            self.assertEqual(view["vehicle_knowledge"], {**trusted, "fitment_confirmed": False})
             self.assertEqual(view["goods"], ctx["goods"])
             self.assertIn("not fitment approval", messages[0]["content"])
             self.assertIn("Neither is current selling price", messages[0]["content"])

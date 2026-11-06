@@ -26,11 +26,11 @@ class SchedulerTests(unittest.TestCase):
         # Startup DNS behavior is covered separately; it is not this test's clock.
         with patch("socket.getfqdn", return_value="localhost"):
             self.server = create_server({"shops": [{"shop_id": s, "name": "Fictional " + s}
-                                                   for s in ("a", "b", "c")], "clients": []}, self.temp.name)
+                                                   for s in ("a", "b", "c", "d")], "clients": []}, self.temp.name)
         self.addCleanup(self.close)
         self.store = self.server.store
         self.identities, self.leases = {}, {}
-        for shop in ("a", "b", "c"):
+        for shop in ("a", "b", "c", "d"):
             self.identities[shop] = {"shop_id": shop, "client_id": "client-" + shop}
             self.leases[shop] = self.store.heartbeat(self.identities[shop],
                                                    {"instance_id": "instance", "session_id": "session"})
@@ -94,6 +94,7 @@ class SchedulerTests(unittest.TestCase):
         self.server.server_close()
 
     def test_rules_bypass_a_slow_model(self):
+        self.store.update_settings("b", {**self.settings(), "mode": "rules"})
         self.enqueue("a1")
         self.started("a1")
         self.enqueue("b1", "hello")
@@ -103,6 +104,7 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(result["delivery"]["status"], "unclaimed")
 
     def test_two_model_slots_are_fair_and_rules_bypass_a_full_pool(self):
+        self.store.update_settings("d", {**self.settings(), "mode": "rules"})
         with self.store.lock:
             for name in ("a1", "a2", "a3", "b1", "c1"):
                 self.enqueue(name)
@@ -110,8 +112,8 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(set(self.calls), {"a1", "b1"})
         self.assertEqual(self.snapshot("a2")["state"], "pending")
         self.assertEqual(self.snapshot("c1")["state"], "pending")
-        self.enqueue("a4", "hello")
-        self.assertEqual(self.ready("a4")["decision"]["reason"], "rule:hello")
+        self.enqueue("d1", "hello")
+        self.assertEqual(self.ready("d1")["decision"]["reason"], "rule:hello")
         self.gates["b1"].set()
         self.started("c1")
         self.assertNotIn("a2", self.calls)
@@ -132,6 +134,7 @@ class SchedulerTests(unittest.TestCase):
     def test_late_reply_cannot_replace_a_newer_rule_decision(self):
         self.enqueue("a1", conversation="buyer")
         self.started("a1")
+        self.store.update_settings("a", {**self.settings(), "mode": "rules"})
         self.enqueue("a2", "hello", conversation="buyer", revision=2)
         self.assertEqual(self.ready("a2")["decision"]["reason"], "rule:hello")
         self.gates["a1"].set()
@@ -158,6 +161,7 @@ class SchedulerTests(unittest.TestCase):
         self.assertTrue(self.server.worker.is_alive())
 
     def test_rule_backlog_drains_without_waiting_for_model_completions(self):
+        self.store.update_settings("c", {**self.settings(), "mode": "rules"})
         with self.store.lock:
             self.enqueue("a1")
             self.enqueue("b1")
@@ -217,11 +221,13 @@ class SchedulerTests(unittest.TestCase):
         self.ready("a1")
         for _ in range(3):
             self.store.enqueue(self.identities["a"], payload)
+        self.store.update_settings("a", {**self.settings(), "mode": "rules"})
         self.enqueue("a2", "hello")
         self.ready("a2")
         self.assertEqual(self.calls, ["a1"])
 
     def test_unknown_is_preserved_and_does_not_block_the_next_message(self):
+        self.store.update_settings("a", {**self.settings(), "mode": "rules"})
         self.enqueue("a1", "hello", conversation="buyer")
         self.ready("a1")
         self.store.claim(self.identities["a"], "a1", {**self.leases["a"], "attempt_id": "attempt"})
