@@ -902,29 +902,31 @@ export function transferUnmarkScript(buyer: string, check?: Point, keepFavorite 
   })()`;
 }
 
-const TRANSFER_DIALOG_CLOSE = `(() => {
-  const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
-  const dlg = [...document.querySelectorAll("div.el-dialog")].filter(vis).find((d) => (d.querySelector(".el-dialog__title")?.innerText ?? "").trim() === "转移会话");
-  const b = dlg?.querySelector(".el-dialog__headerbtn");
-  if (!b || !vis(b)) return "missing";
-  const r = b.getBoundingClientRect();
-  return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
-})()`;
-
-/**
- * “转移会话”对话框标题文字的中心点：真实平台的确认气泡里没有“取消”，收尾时点对话框标题（气泡之外、无任何动作的位置）
- * 让气泡按“点击外部”关闭。核对该点确实落在标题上（被气泡或别的层盖住时不点）。
- */
-const TRANSFER_DIALOG_TITLE = `(() => {
-  const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
-  const dlg = [...document.querySelectorAll("div.el-dialog")].filter(vis).find((d) => (d.querySelector(".el-dialog__title")?.innerText ?? "").trim() === "转移会话");
-  const el = dlg?.querySelector(".el-dialog__title");
-  if (!el || !vis(el)) return "missing";
-  const r = el.getBoundingClientRect();
-  const x = Math.round(r.left + r.width / 2), y = Math.round(r.top + r.height / 2);
-  const hit = document.elementFromPoint(x, y);
-  return hit && (hit === el || el.contains(hit)) ? { x, y } : "covered";
-})()`;
+/** 只点本次转移弹窗自己的空白遮罩；核对和点击在同一次同步快照内，弹窗消失后不会点穿到聊天区。 */
+export function transferDialogBlankScript(buyer: string, expiresAt: number): string {
+  return `(() => {
+    if (Date.now() > ${expiresAt}) return "expired";
+    const vis = (e) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
+    const dialogs = [...document.querySelectorAll("div.el-dialog")].filter(d => vis(d) && (d.querySelector(".el-dialog__title")?.innerText ?? "").trim() === "转移会话");
+    if (dialogs.length !== 1) return dialogs.length ? "dialog_not_unique" : "missing";
+    const keys = [...document.querySelectorAll(${JSON.stringify(ITEM)})].filter(e => vis(e) && e.classList.contains("active")).map(e => e.getAttribute("data-random") || "");
+    const buyers = new Set(keys.map(k => /^([0-9]{1,32})-/.exec(k)?.[1] ?? null));
+    if (buyers.size !== 1 || !buyers.has(${JSON.stringify(buyer)})) return "conversation_mismatch";
+    const backdrop = dialogs[0].closest("div.el-dialog__wrapper");
+    if (!backdrop || !vis(backdrop)) return "missing";
+    const r = backdrop.getBoundingClientRect(), d = dialogs[0].getBoundingClientRect();
+    const left = Math.max(0, r.left), top = Math.max(0, r.top);
+    const right = Math.min(innerWidth, r.right), bottom = Math.min(innerHeight, r.bottom);
+    for (const [x, y] of [[left + 4, top + 4], [right - 4, top + 4], [left + 4, bottom - 4], [right - 4, bottom - 4]]) {
+      if (x < left || x >= right || y < top || y >= bottom || (x >= d.left && x < d.right && y >= d.top && y < d.bottom)) continue;
+      if (document.elementFromPoint(x, y) !== backdrop) continue;
+      if (Date.now() > ${expiresAt}) return "expired";
+      backdrop.click();
+      return "dispatched";
+    }
+    return "covered";
+  })()`;
+}
 
 /** 确认气泡里各可点击项按固定类别计数（不记录文字原文：转移原因可能是店铺自填内容）。 */
 export function popoverButtonKinds(buttons: { text: string }[]): { cancel: number; direct: number; send: number; other: number } {
@@ -932,9 +934,6 @@ export function popoverButtonKinds(buttons: { text: string }[]): { cancel: numbe
   const cancel = n("取消"), direct = n("无原因直接转移"), send = n("发送");
   return { cancel, direct, send, other: buttons.length - cancel - direct - send };
 }
-
-/** 诊断转移收尾按 Esc 时，每个按键命令（按下 / 松开）最多等这么久。 */
-export const TRANSFER_ESC_TIMEOUT_MS = 1000;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** 自动清理平台引导弹窗的间隔。 */
@@ -2838,23 +2837,10 @@ export class PddPageAdapter implements PlatformAdapter {
           const left = () => Promise.race([this.run<{ dialogs: number; popovers: number } | string>(TRANSFER_LEFTOVERS), sleep(150).then(() => "unavailable" as const)]);
           const cleanup = async () => {
             if (!await same()) return false;
-            const close = await Promise.race([this.run<Point | string>(TRANSFER_DIALOG_CLOSE), sleep(150).then(() => "missing")]).catch(() => "missing");
-            if (typeof close !== "string" && await same()) await dispatchPageClick(page.webContents, close, () => owns() ? null : "page_changed");
-            let remaining = await left();
-            if (typeof remaining !== "string" && remaining.dialogs && !remaining.popovers && await same()) {
-              // Some platform dialogs hide the header close button. Cancel this discovery's dialog only.
-              const key = async (type: "keyDown" | "keyUp") => {
-                if (!await same()) return false;
-                return Promise.race([
-                  Promise.resolve().then(() => owns() ? page.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type, key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }).then(() => true) : false).catch(() => false),
-                  sleep(250).then(() => false),
-                ]);
-              };
-              if (await key("keyDown")) await key("keyUp");
-              if (!owns()) return false;
-              await sleep(50);
-              remaining = await left();
-            }
+            await Promise.race([this.run<string>(transferDialogBlankScript(conversationId, Date.now() + 150)), sleep(150).then(() => "unavailable")]).catch(() => "script_failed");
+            if (!owns()) return false;
+            await sleep(50);
+            const remaining = await left();
             return await same() && typeof remaining !== "string" && remaining.dialogs === 0 && remaining.popovers === 0;
           };
           const closed = await Promise.race([cleanup().catch(() => false), new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), 900); })]);
@@ -2940,52 +2926,16 @@ export class PddPageAdapter implements PlatformAdapter {
       return result ?? hooks?.check() ?? null;
     };
     const clickPage = (pt: Point, action = false) => hooks ? hooks.click(pt, action) : this.nativeClick(pt, page, epoch);
-    const leftovers = () => read<{ dialogs: number; popovers: number } | string>(TRANSFER_LEFTOVERS).catch(() => "script_failed");
-    const clickAt = async (script: string): Promise<string> => {
-      const pt = await read<Point | string>(script).catch(() => "script_failed");
-      if (typeof pt === "string") return pt;
-      const c = await clickPage(pt);
-      return c.status === "dispatched" ? "dispatched" : `${c.status}:${c.reason}`;
-    };
-    // 收尾：逐步关掉确认气泡和对话框，每步之后重读残留并记录。真实平台的气泡里没有“取消”（只有转移原因、“发送”和
-    // “无原因直接转移”），先点对话框标题（气泡之外、无动作）让气泡按点击外部关闭；再点对话框右上角关闭；
-    // 仍有残留且页面未换代时按一次 Esc。都不碰气泡里的任何项，也不重试。
+    const leftovers = () => Promise.race([read<{ dialogs: number; popovers: number } | string>(TRANSFER_LEFTOVERS), sleep(500).then(() => "unavailable")]).catch(() => "script_failed");
+    // 收尾只点转移弹窗自己的空白遮罩，不发全局按键、不碰气泡动作；关不掉就保留未知，不重试。
     const dismiss = async (): Promise<Record<string, unknown>> => {
       const steps: Record<string, unknown>[] = [];
       let left = await leftovers();
-      if (typeof left !== "string" && left.popovers) {
-        const result = await clickAt(TRANSFER_DIALOG_TITLE);
-        await sleep(400);
+      if (typeof left !== "string" && (left.dialogs || left.popovers) && buyer && this.window === page && this.watchEpoch === epoch && !page.isDestroyed() && await Promise.race([same(), sleep(150).then(() => false)])) {
+        const result = await Promise.race([read<string>(transferDialogBlankScript(buyer, Date.now() + 500)), sleep(500).then(() => "unavailable")]).catch(() => "script_failed");
+        await sleep(100);
         left = await leftovers();
-        steps.push({ step: "outside_click", result, left });
-      }
-      // 关闭按钮照旧总是尝试一次：脚本自己只在“转移会话”对话框可见时返回坐标，否则返回 missing、不点击。
-      {
-        const result = await clickAt(TRANSFER_DIALOG_CLOSE);
-        await sleep(400);
-        left = await leftovers();
-        steps.push({ step: "close_button", result, left });
-      }
-      if (typeof left !== "string" && (left.dialogs || left.popovers) && this.watchEpoch === epoch && !page.isDestroyed()) {
-        // 每个按键命令都捕获同步异常并有界等待：超时或失败只记固定分类，不重试；按下没成功就不再发松开。
-        const key = (type: string) =>
-          new Promise<"dispatched" | "failed" | "timeout">((resolve) => {
-            const timer = setTimeout(() => resolve("timeout"), TRANSFER_ESC_TIMEOUT_MS);
-            const done = (r: "dispatched" | "failed") => {
-              clearTimeout(timer);
-              resolve(r);
-            };
-            try {
-              page.webContents.debugger.sendCommand("Input.dispatchKeyEvent", { type, key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }).then(() => done("dispatched"), () => done("failed"));
-            } catch {
-              done("failed");
-            }
-          });
-        const down = await key("keyDown");
-        const result = down === "dispatched" ? ((up) => (up === "dispatched" ? "dispatched" : `keyup_${up}`))(await key("keyUp")) : `keydown_${down}`;
-        await sleep(400);
-        left = await leftovers();
-        steps.push({ step: "escape", result, left });
+        steps.push({ step: "blank_click", result, left });
       }
       return { steps, leftover: left };
     };

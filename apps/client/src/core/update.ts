@@ -6,7 +6,7 @@ import path from "node:path";
  * 发布页的 sha256 与 zip 同源，只用于完整性，不当作来源证明。
  */
 
-export const UPDATE_REPO = "lijiefeng11-wq/claw-next";
+export const UPDATE_REPO = "lijiefeng11-wq/jf-zdhf";
 export const APP_BUNDLE = "Claw-Next-Client.app";
 export const BUNDLE_ID = "com.claw-next.client";
 /** 只允许这些主机（含每一跳重定向）；下载地址实测从 github.com 302 到 release-assets.githubusercontent.com。 */

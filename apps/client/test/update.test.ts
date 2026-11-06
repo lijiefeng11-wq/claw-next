@@ -30,8 +30,8 @@ const rel = (run: number, sha: string, over: Record<string, unknown> = {}) => ({
   draft: false,
   prerelease: true,
   assets: [
-    { id: run * 10, name: ZIP, size: 1000, browser_download_url: `https://github.com/lijiefeng11-wq/claw-next/releases/download/client-${run}-${sha}/${ZIP}` },
-    { id: run * 10 + 1, name: `${ZIP}.sha256`, size: 100, browser_download_url: `https://github.com/lijiefeng11-wq/claw-next/releases/download/client-${run}-${sha}/${ZIP}.sha256` },
+    { id: run * 10, name: ZIP, size: 1000, browser_download_url: `https://github.com/lijiefeng11-wq/jf-zdhf/releases/download/client-${run}-${sha}/${ZIP}` },
+    { id: run * 10 + 1, name: `${ZIP}.sha256`, size: 100, browser_download_url: `https://github.com/lijiefeng11-wq/jf-zdhf/releases/download/client-${run}-${sha}/${ZIP}.sha256` },
   ],
   ...over,
 });
@@ -88,21 +88,21 @@ describe("地址核对（每一跳）", () => {
   const tag = `client-105-${SHA("d")}`;
   test("允许：本仓库 API、本 tag 的发布文件、发布文件实际跳转的主机", () => {
     for (const u of [
-      `https://api.github.com/repos/lijiefeng11-wq/claw-next/releases?per_page=100&page=1`,
-      `https://github.com/lijiefeng11-wq/claw-next/releases/download/${tag}/${ZIP}`,
+      `https://api.github.com/repos/lijiefeng11-wq/jf-zdhf/releases?per_page=100&page=1`,
+      `https://github.com/lijiefeng11-wq/jf-zdhf/releases/download/${tag}/${ZIP}`,
       `https://release-assets.githubusercontent.com/github-production-release-asset/1/2?sig=x`,
-      `https://github.com:443/lijiefeng11-wq/claw-next/releases/download/${tag}/${ZIP}`,
+      `https://github.com:443/lijiefeng11-wq/jf-zdhf/releases/download/${tag}/${ZIP}`,
     ]) assert.equal(checkUpdateUrl(u, tag), null, u);
   });
   test("拒绝：非 HTTPS、非标准端口、带用户信息、其他主机、其他仓库或其他 tag", () => {
     for (const [u, why] of [
-      [`http://github.com/lijiefeng11-wq/claw-next/releases/download/${tag}/${ZIP}`, "url_not_https"],
-      [`https://github.com:8443/lijiefeng11-wq/claw-next/releases/download/${tag}/${ZIP}`, "url_port"],
-      [`https://user:pw@github.com/lijiefeng11-wq/claw-next/releases/download/${tag}/${ZIP}`, "url_userinfo"],
+      [`http://github.com/lijiefeng11-wq/jf-zdhf/releases/download/${tag}/${ZIP}`, "url_not_https"],
+      [`https://github.com:8443/lijiefeng11-wq/jf-zdhf/releases/download/${tag}/${ZIP}`, "url_port"],
+      [`https://user:pw@github.com/lijiefeng11-wq/jf-zdhf/releases/download/${tag}/${ZIP}`, "url_userinfo"],
       [`https://evil.example/x`, "url_host"],
       [`https://github.com.evil.example/x`, "url_host"],
       [`https://github.com/other/claw-next/releases/download/${tag}/${ZIP}`, "url_path"],
-      [`https://github.com/lijiefeng11-wq/claw-next/releases/download/client-1-${SHA("f")}/${ZIP}`, "url_path"],
+      [`https://github.com/lijiefeng11-wq/jf-zdhf/releases/download/client-1-${SHA("f")}/${ZIP}`, "url_path"],
       [`https://api.github.com/repos/other/x/releases`, "url_path"],
       [`not a url`, "url_invalid"],
     ]) assert.equal(checkUpdateUrl(u, tag), why, u);

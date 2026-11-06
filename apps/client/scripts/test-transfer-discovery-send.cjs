@@ -22,8 +22,8 @@ app.whenReady().then(async()=>{
     <li class="chat-item"><div class="chat-item-box active" data-random="9001-fixture"></div></li>
     <button id="open" onclick="opens++;document.querySelector('.el-dialog__wrapper').style.display='block'">转移会话</button>
     <div class="reply-box"><div class="reply-input"><textarea></textarea></div><div class="reply-footer"><div class="send-btn" onclick="sends++;document.querySelector('textarea').value=''">发送</div></div></div>
-    <div class="el-dialog__wrapper"><div class="el-dialog"><span class="el-dialog__title">转移会话</span>${header?'<button class="el-dialog__headerbtn" onclick="closes++;document.querySelector(\'.el-dialog__wrapper\').style.display=\'none\'">X</button>':''}<table><tr class="el-table__row"><td>fictional-main</td><td>fixture</td><td><button onclick="transfers++">转移</button></td></tr></table></div></div>
-    <script>window.opens=0;window.closes=0;window.sends=0;window.transfers=0;window.escapes=0;addEventListener('keydown',e=>{if(e.key==='Escape'){escapes++;document.querySelector('.el-dialog__wrapper').style.display='none'}})</script>`;
+    <div class="el-dialog__wrapper" onclick="if(event.target===this){closes++;this.style.display='none'}"><div class="el-dialog"><span class="el-dialog__title">转移会话</span>${header?'<button class="el-dialog__headerbtn" onclick="closes++;document.querySelector(\'.el-dialog__wrapper\').style.display=\'none\'">X</button>':''}<table><tr class="el-table__row"><td>fictional-main</td><td>fixture</td><td><button onclick="transfers++">转移</button></td></tr></table></div></div>
+    <script>window.opens=0;window.closes=0;window.sends=0;window.transfers=0;window.escapes=0;addEventListener('keydown',e=>{if(e.key==='Escape'){escapes++;document.querySelector('.chat-item-box.active')?.remove()}})</script>`;
    await win.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent(html));
    const a=new PddPageAdapter('fictional','Fictional');a.window=win;a.tracker={status:()=>({logged_in:true,identity:{platform_shop_id:'fictional-mall'}})};a.freshActive=async()=>'9001';a.openConversation=async()=>null;
    wc.debugger.sendCommand=async(method,params={},session)=>{
@@ -39,7 +39,7 @@ app.whenReady().then(async()=>{
    const send=await a.send({conversation_id:'9001',text:'fictional reply',attempt_id:'fictional-only',deadline:Date.now()/1000+10,recheck:()=>null});
    const after=await wc.executeJavaScript('({sends,transfers})');
    cases.push({header_close:header,targets:targets.length,before_send:before,send,after,expected_cleaned_and_sent:!before.open&&send.status==='confirmed'&&after.sends===1&&after.transfers===0,busy_released:!a.sending});
-   assert.equal(targets.length,1);assert.equal(before.open,false);assert.equal(send.status,'confirmed');assert.equal(after.sends,1);assert.equal(after.transfers,0);assert.equal(a.sending,false);
+   assert.equal(targets.length,1);assert.equal(before.open,false);assert.equal(before.escapes,0);assert.equal(await wc.executeJavaScript("document.querySelectorAll('.chat-item-box.active').length"),1);assert.equal(send.status,'confirmed');assert.equal(after.sends,1);assert.equal(after.transfers,0);assert.equal(a.sending,false);
    wc.debugger.sendCommand=native;
   }
  }finally{stopSelector();win.destroy();clearTimeout(timer);if(!parentOwned)fs.rmSync(temp,{recursive:true,force:true});}
