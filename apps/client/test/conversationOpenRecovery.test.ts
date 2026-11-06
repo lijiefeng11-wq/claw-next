@@ -112,8 +112,10 @@ test("收藏准备到时后列表才出现：零迟到点击，后续发送可�
   const request = { conversation_id: "9001", color: "red", deadline: 18, recheck: () => null };
   const result = await finish(t, f.adapter.markConversation(request), 1100);
   assert.equal(f.adapter.sending, false);
-  t.mock.timers.tick(500);
-  await new Promise<void>(resolve => setImmediate(resolve));
+  for (let i = 0; i < 5; i++) {
+    t.mock.timers.tick(100);
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
   assert.equal(f.counts().opens, 0);
   assert.equal(result.reason, "pdd_conversation_not_in_list");
   assert.equal((await finish(t, f.adapter.send(f.request()))).reason, "fictional_stop_after_preparation");
@@ -125,8 +127,9 @@ test("收藏准备脚本挂起：一秒有界释放，迟到脚本不打开会�
   let script = "";
   f.adapter.run = (value: string) => { script = value; return new Promise(() => {}); };
   const request = { conversation_id: "9001", color: "red", deadline: 18, recheck: () => null };
-  assert.equal((await finish(t, f.adapter.markConversation(request), 1100)).reason, "pdd_page_script_timeout");
+  const result = await finish(t, f.adapter.markConversation(request), 1100);
   assert.equal(f.adapter.sending, false);
   assert.equal(f.evaluate(script), false);
   assert.equal(f.counts().opens, 0);
+  assert.equal(result.reason, "pdd_page_script_timeout");
 });
