@@ -372,13 +372,15 @@ describe("拼多多适配器：准备预算与预热（Electron 替身）", () =
 
   test("发送抢占预热：预热在下一步之间停下并关闭对话框，发送不因“忙”被拒", async () => {
     const { adapter, steps } = page({ instructButtons: 3 });
+    // Isolate warm-up preemption from the separately tested delayed-list wait.
+    adapter.clickConversation = async () => { steps.push("open_conversation"); throw new Error("fictional page refusal"); };
     const warm = adapter.warmConversation(BUYER);
     await new Promise((r) => setTimeout(r, 150));
     assert.ok(steps.includes("instruct_open"));
     const started = Date.now();
     const r: SendResult = await adapter.send({ conversation_id: BUYER, text: "虚构回复", attempt_id: "a-1", deadline: Date.now() / 1000 + 8 });
     await warm;
-    assert.deepEqual(r, { status: "not_sent", reason: "pdd_conversation_not_in_list" });
+    assert.deepEqual(r, { status: "not_sent", reason: "pdd_page_script_failed" });
     assert.ok(Date.now() - started < 1000, `preempt took ${Date.now() - started} ms`);
     assert.equal(steps.filter((s) => s === "instruct_open").length, 1);
     assert.ok(steps.indexOf("instruct_close") > steps.indexOf("instruct_open") && steps.indexOf("instruct_close") < steps.indexOf("open_conversation"));
