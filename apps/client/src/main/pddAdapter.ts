@@ -938,6 +938,22 @@ export function popoverButtonKinds(buttons: { text: string }[]): { cancel: numbe
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** 自动清理平台引导弹窗的间隔。 */
 export const POPUP_SWEEP_INTERVAL_MS = 2000;
+
+/** 转接弹窗收尾失败的固定分类：只用于日志与虚构测试，不改变发送语义。 */
+export type TransferCleanupReason = "closed" | "page_changed" | "conversation_changed" | "dialog_left" | "popover_left" | "unavailable";
+
+export function classifyTransferCleanup(input: {
+  bound: boolean;
+  conversationMatched: boolean;
+  leftovers: { dialogs: number; popovers: number } | "unavailable" | "script_failed";
+}): TransferCleanupReason {
+  if (!input.bound) return "page_changed";
+  if (!input.conversationMatched) return "conversation_changed";
+  if (input.leftovers === "unavailable" || input.leftovers === "script_failed") return "unavailable";
+  if (input.leftovers.dialogs > 0) return "dialog_left";
+  if (input.leftovers.popovers > 0) return "popover_left";
+  return "closed";
+}
 /** 清理脚本须在提交后这么久内开始执行，每次点击前也核对；过了就不点击（页面忙时排队迟到的旧脚本不改变页面）。 */
 export const POPUP_SWEEP_START_MS = 1500;
 /** 清理脚本这么久仍未结束（页面卡住）：重新加载平台页面；旧文档销毁且已过点击时限后才解除与发送的互斥。 */
@@ -2835,18 +2851,25 @@ export class PddPageAdapter implements PlatformAdapter {
             this.tracker.status(true).logged_in && this.tracker.status(true).identity?.platform_shop_id === shop;
           const same = async () => owns() && (await Promise.race([active(), sleep(150).then(() => null)])) === conversationId && owns();
           const left = () => Promise.race([this.run<{ dialogs: number; popovers: number } | string>(TRANSFER_LEFTOVERS), sleep(150).then(() => "unavailable" as const)]);
-          const cleanup = async () => {
-            if (!await same()) return false;
+          const cleanup = async (): Promise<TransferCleanupReason> => {
+            if (!owns()) return "page_changed";
             await Promise.race([this.run<string>(transferDialogBlankScript(conversationId, Date.now() + 150)), sleep(150).then(() => "unavailable")]).catch(() => "script_failed");
-            if (!owns()) return false;
+            const bound = owns();
+            if (!bound) return "page_changed";
             await sleep(50);
             const remaining = await left();
-            return await same() && typeof remaining !== "string" && remaining.dialogs === 0 && remaining.popovers === 0;
+            const matched = await same();
+            return classifyTransferCleanup({ bound, conversationMatched: matched, leftovers: typeof remaining === "string" ? "unavailable" : remaining });
           };
-          const closed = await Promise.race([cleanup().catch(() => false), new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), 900); })]);
-          if (!closed) {
+          const outcome = await Promise.race([cleanup().catch(() => "unavailable" as const), new Promise<TransferCleanupReason>(resolve => { timer = setTimeout(() => resolve("unavailable"), 900); })]);
+          if (outcome !== "closed") {
             targets = [];
-            console.log(`[${this.shopId}] transfer target discovery cleanup=unconfirmed`);
+            // 只记录固定分类、计数与绑定布尔；不输出会话、买家或页面内容。
+            const counts = await Promise.race([this.run<{ dialogs: number; popovers: number } | string>(TRANSFER_LEFTOVERS), sleep(120).then(() => "unavailable" as const)]).catch(() => "unavailable" as const);
+            const dialogs = typeof counts === "string" ? -1 : counts.dialogs;
+            const popovers = typeof counts === "string" ? -1 : counts.popovers;
+            const bound = this.window === page && !page.isDestroyed() && this.watchEpoch === epoch;
+            console.log(`[${this.shopId}] transfer target discovery cleanup=unconfirmed reason=${outcome} dialogs=${dialogs} popovers=${popovers} bound=${bound ? 1 : 0}`);
           }
         }
       } finally {
