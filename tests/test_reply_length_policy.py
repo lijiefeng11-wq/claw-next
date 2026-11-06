@@ -70,11 +70,24 @@ class ReplyLengthPolicyTests(unittest.TestCase):
         self.assertEqual(post.call_count, 1)
 
     def test_smallest_explicit_valid_limit_and_legitimate_handoff(self):
-        item = self.item("不要超过30个字，最多20字符。")
+        item = self.item("回答不要超过30个字，回复最多20字符。")
         with patch("backend.engine._post", return_value=output(action="handoff", text="", reason="人工权限")) as post:
             self.assertEqual(decide(item, CONFIG)["action"], "handoff")
         self.assertEqual(post.call_count, 1)
         self.assertIn("at most 20 non-whitespace characters", post.call_args.args[1]["messages"][0]["content"])
+
+    def test_business_character_limits_do_not_limit_generated_replies(self):
+        for prompt, expected in (("商品定制刻字最多4个字。回复时解释定制规则，回答不要超过50个字。", 50),
+                                 ("定制刻字最多4个字。模型自己的回复不能超过20个字。", 20),
+                                 ("备注最多5个字。回复要说明定制刻字最多4个字。", None)):
+            with self.subTest(prompt=prompt):
+                with patch("backend.engine._post", return_value=output("定制刻字最多支持4个字。")) as post:
+                    self.assertEqual(decide(self.item(prompt), CONFIG)["text"], "定制刻字最多支持4个字。")
+                self.assertEqual(post.call_count, 1)
+                system = post.call_args.args[1]["messages"][0]["content"]
+                self.assertEqual("non-whitespace characters" in system, expected is not None)
+                if expected:
+                    self.assertIn(f"at most {expected} non-whitespace characters", system)
 
     def test_incomplete_history_does_not_block_saved_business_handoff_policy(self):
         item = self.item()

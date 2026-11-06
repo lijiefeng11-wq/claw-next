@@ -45,6 +45,13 @@ class VehicleContextTests(unittest.TestCase):
         self.assertEqual(result["candidates"][0]["record_id"], "a")
         self.assertEqual(self.catalog.lookup_context([buyer("示例甲车")] + [buyer("您好")] * 6)["status"], "not_found")
 
+    def test_latest_readable_card_takes_precedence_and_unknown_card_stops_old_car(self):
+        card = {"role": "buyer", "kind": "card", "content": "商品卡片：示例乙车专用遮阳帘"}
+        for messages in ([card], [buyer("示例甲车"), card], [buyer("示例甲车"), card, buyer("您好")]):
+            self.assertEqual(self.catalog.lookup_context(messages)["candidates"][0]["record_id"], "b")
+        for title in ("未知丙车专用遮阳帘", "通用商品卡片", ""):
+            self.assertEqual(self.catalog.lookup_context([buyer("示例甲车"), {**card, "content": title}])["status"], "not_found")
+
     def test_invalid_and_long_latest_input_does_not_resurrect_previous_model(self):
         for value in (None, {}, "wrong", [None], [{"role":"buyer", "kind":"text"}]):
             self.assertEqual(self.catalog.lookup_context(value)["status"], "not_found")

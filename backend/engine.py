@@ -207,8 +207,9 @@ def _bounded(reason):
 
 
 def _reply_limit(prompt):
-    """Honor explicit saved character limits; never infer one from buyer text."""
-    limits = re.findall(r"(?:不(?:要|得)?超过|最多|至多)\s*(\d{1,4})\s*(?:个)?(?:字|字符)", str(prompt))
+    """Only a limit directly naming the reply, never a product's business limit."""
+    limits = re.findall(r"(?:回复|回答|答复|输出)(?:正文|内容|文本|长度|字数)?\s*(?:应|须|必须)?\s*[:：]?\s*"
+                        r"(?:不(?:要|得|能)?超过|最多|至多)\s*(\d{1,4})\s*(?:个)?(?:字|字符)", str(prompt))
     return min((int(n) for n in limits if 0 < int(n) <= 2000), default=None)
 
 

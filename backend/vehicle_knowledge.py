@@ -124,11 +124,12 @@ class VehicleCatalog:
 
     def lookup_context(self, messages):
         """Keep a recent buyer's model for a bare year/window/greeting, never guess a new model."""
-        texts = [m["content"] for m in messages if isinstance(m, dict) and m.get("role") == "buyer"
-                 and m.get("kind") == "text" and isinstance(m.get("content"), str)][-6:] if isinstance(messages, list) else []
+        visible = [m for m in messages if isinstance(m, dict) and m.get("role") == "buyer"
+                   and m.get("kind") in ("text", "card") and isinstance(m.get("content"), str)][-6:] if isinstance(messages, list) else []
         deadline = time.monotonic() + MAX_LOOKUP_SECONDS
         result = self.lookup("")
-        for text in reversed(texts):
+        for message in reversed(visible):
+            text = message["content"]
             if time.monotonic() >= deadline:
                 return {"status": "unavailable", "reason": "lookup_budget_exceeded", "candidates": [],
                         "total_matches": None, "truncated": True}
@@ -137,7 +138,7 @@ class VehicleCatalog:
                 if result.get("candidates") and re.search(r"不是|并非|不要这个|not this", text, re.I):
                     return {**result, "status": "ambiguous"}
                 return result
-            if len(text) > 128:
+            if message["kind"] != "text" or len(text) > 128:
                 break
             # Carry only short follow-ups; an unknown new car must not inherit the old one.
             rest = re.sub(r"\d+(?:\.\d+)?(?:年款|年|款|座)?", "", _normalize(text))
