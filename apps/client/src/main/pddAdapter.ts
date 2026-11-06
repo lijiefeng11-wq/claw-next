@@ -938,6 +938,34 @@ export function popoverButtonKinds(buttons: { text: string }[]): { cancel: numbe
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** 自动清理平台引导弹窗的间隔。 */
 export const POPUP_SWEEP_INTERVAL_MS = 2000;
+
+/** 打开会话的等待上限：按剩余预算等待，但不超过该值，保留发送与回执余量。 */
+export const OPEN_CONVERSATION_WAIT_MAX_MS = 4000;
+/** 未读会话未加载后的短退避：2s、4s、8s… 上限 30s，不再整段停顿 5 分钟。 */
+export const OPEN_RETRY_BASE_MS = 2000;
+export const OPEN_RETRY_MAX_MS = 30_000;
+
+/** 第 attempt 次未加载成功后的重试间隔（attempt 从 1 开始）。 */
+export function nextOpenRetryDelay(attempt: number): number {
+  const n = Math.max(1, Math.min(Math.trunc(attempt) || 1, 16));
+  return Math.min(OPEN_RETRY_MAX_MS, OPEN_RETRY_BASE_MS * 2 ** (n - 1));
+}
+
+/** 转接弹窗收尾失败的固定分类：只用于日志与虚构测试，不改变发送语义。 */
+export type TransferCleanupReason = "closed" | "page_changed" | "conversation_changed" | "dialog_left" | "popover_left" | "unavailable";
+
+export function classifyTransferCleanup(input: {
+  bound: boolean;
+  conversationMatched: boolean;
+  leftovers: { dialogs: number; popovers: number } | "unavailable" | "script_failed";
+}): TransferCleanupReason {
+  if (!input.bound) return "page_changed";
+  if (!input.conversationMatched) return "conversation_changed";
+  if (input.leftovers === "unavailable" || input.leftovers === "script_failed") return "unavailable";
+  if (input.leftovers.dialogs > 0) return "dialog_left";
+  if (input.leftovers.popovers > 0) return "popover_left";
+  return "closed";
+}
 /** 清理脚本须在提交后这么久内开始执行，每次点击前也核对；过了就不点击（页面忙时排队迟到的旧脚本不改变页面）。 */
 export const POPUP_SWEEP_START_MS = 1500;
 /** 清理脚本这么久仍未结束（页面卡住）：重新加载平台页面；旧文档销毁且已过点击时限后才解除与发送的互斥。 */
@@ -1549,11 +1577,11 @@ export class PddPageAdapter implements PlatformAdapter {
       else {
         const f = this.openFailures.get(uid) ?? { count: 0, until: 0 };
         f.count += 1;
-        if (f.count >= 2) {
-          f.until = now + 5 * 60_000;
-          f.count = 0;
-          console.log(`[${this.shopId}] platform auto-open paused for a conversation (not loading)`);
-        } else this.reload("conversation_not_loaded_after_open");
+        // 有上限的短退避：该会话只是延后重试，消息仍保持未处理，不再整段停顿 5 分钟。
+        const delay = nextOpenRetryDelay(f.count);
+        f.until = now + delay;
+        if (f.count === 1) this.reload("conversation_not_loaded_after_open");
+        console.log(`[${this.shopId}] platform auto-open retry attempt=${f.count} delay_ms=${delay}`);
         this.openFailures.set(uid, f);
       }
     }
@@ -2030,7 +2058,8 @@ export class PddPageAdapter implements PlatformAdapter {
   private async openConversation(uid: string, deadline = Date.now() / 1000 + 7, current?: () => string | null, prepareMs = 5000): Promise<string | null> {
     const page = this.window, epoch = this.watchEpoch;
     const until = Math.min(Date.now() + prepareMs, deadline * 1000 - 1500);
-    const missingUntil = Math.min(until, Date.now() + 1500);
+    // 按剩余预算等待会话出现，但不超过上限：既覆盖页面刚刷新后的慢渲染，又保留填入与回执的时间。
+    const missingUntil = Math.min(until, Date.now() + OPEN_CONVERSATION_WAIT_MAX_MS);
     const guard = () => this.window !== page || this.watchEpoch !== epoch || !page || page.isDestroyed() ? "pdd_page_changed" :
       current?.() ?? (Date.now() >= deadline * 1000 - 1500 ? "claim_expiring" : null);
     const readTimeout = new Error("conversation_read_timeout");
@@ -2044,7 +2073,8 @@ export class PddPageAdapter implements PlatformAdapter {
     };
     try {
       let found = false;
-      for (let i = 0; i < 16; i++) {
+      // 迭代上限只作保险，真正的边界是 missingUntil（按剩余预算计算）。
+      for (let i = 0; i < 80; i++) {
         const blocked = guard(); if (blocked) return blocked;
         const clicked = await read(this.clickConversation(uid, missingUntil));
         const changed = guard(); if (changed) return changed;
@@ -2835,18 +2865,25 @@ export class PddPageAdapter implements PlatformAdapter {
             this.tracker.status(true).logged_in && this.tracker.status(true).identity?.platform_shop_id === shop;
           const same = async () => owns() && (await Promise.race([active(), sleep(150).then(() => null)])) === conversationId && owns();
           const left = () => Promise.race([this.run<{ dialogs: number; popovers: number } | string>(TRANSFER_LEFTOVERS), sleep(150).then(() => "unavailable" as const)]);
-          const cleanup = async () => {
-            if (!await same()) return false;
+          const cleanup = async (): Promise<TransferCleanupReason> => {
+            if (!owns()) return "page_changed";
             await Promise.race([this.run<string>(transferDialogBlankScript(conversationId, Date.now() + 150)), sleep(150).then(() => "unavailable")]).catch(() => "script_failed");
-            if (!owns()) return false;
+            const bound = owns();
+            if (!bound) return "page_changed";
             await sleep(50);
             const remaining = await left();
-            return await same() && typeof remaining !== "string" && remaining.dialogs === 0 && remaining.popovers === 0;
+            const matched = await same();
+            return classifyTransferCleanup({ bound, conversationMatched: matched, leftovers: typeof remaining === "string" ? "unavailable" : remaining });
           };
-          const closed = await Promise.race([cleanup().catch(() => false), new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), 900); })]);
-          if (!closed) {
+          const outcome = await Promise.race([cleanup().catch(() => "unavailable" as const), new Promise<TransferCleanupReason>(resolve => { timer = setTimeout(() => resolve("unavailable"), 900); })]);
+          if (outcome !== "closed") {
             targets = [];
-            console.log(`[${this.shopId}] transfer target discovery cleanup=unconfirmed`);
+            // 只记录固定分类、计数与绑定布尔；不输出会话、买家或页面内容。
+            const counts = await Promise.race([this.run<{ dialogs: number; popovers: number } | string>(TRANSFER_LEFTOVERS), sleep(120).then(() => "unavailable" as const)]).catch(() => "unavailable" as const);
+            const dialogs = typeof counts === "string" ? -1 : counts.dialogs;
+            const popovers = typeof counts === "string" ? -1 : counts.popovers;
+            const bound = this.window === page && !page.isDestroyed() && this.watchEpoch === epoch;
+            console.log(`[${this.shopId}] transfer target discovery cleanup=unconfirmed reason=${outcome} dialogs=${dialogs} popovers=${popovers} bound=${bound ? 1 : 0}`);
           }
         }
       } finally {
