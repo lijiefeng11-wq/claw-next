@@ -7,7 +7,8 @@ import { test } from "node:test";
 test("拼多多适配器注入页面的脚本拼接后均可解析", () => {
   const src = fs.readFileSync(path.join(__dirname, "../src/main/pddAdapter.js"), "utf8");
   const scope = { ITEM: "a", VIDEO_ROWS: "b", VIDEO_BTN: "c", CAMERA: "d", TEXTAREA: "e", SEND_BTN: "f", uid: "1", buyer: "1", index: 0, urls: ["https://x.invalid/1"], covers: ["https://x.invalid/c"], text: "t", name: "n", guard: "", ids: ["1"], thumbOf: new Map([["1", "https://x.invalid/t"]]), GOODS_ROW: "g", GOODS_BTN: "h", thumb: "https://x.invalid/t", INSTRUCT_BTN: "i", INSTRUCT_DIALOG: "j", PROBE_WORDS_JSON: "[]", SAFE_CLASSES_JSON: "[]", star: { x: 1, y: 1 }, exclude: ".x", check: null, keepFavorite: false, near: { x: 1, y: 1 }, target: "t", ok: [{ x: 1, y: 1 }], LINK_PROBE: "", transferTargetSnippet: () => "const vis = () => true, t = () => '', trs = [], btn = null;" };
-  const fill = new Function(...Object.keys(scope), "tpl", "return eval(tpl);");
+  const scriptScope = { ...scope, notAfter: 1000 };
+  const fill = new Function(...Object.keys(scriptScope), "tpl", "return eval(tpl);");
   let parsed = 0;
   for (let i = src.indexOf("`("); i !== -1; i = src.indexOf("`(", i)) {
     let j = i + 1;
@@ -22,7 +23,8 @@ test("拼多多适配器注入页面的脚本拼接后均可解析", () => {
     const tpl = src.slice(start, j + 1);
     i = j + 1;
     if (!/^`\((async )?\(\) =>/.test(tpl)) continue;
-    const code = fill(...Object.values(scope), tpl) as string;
+    scriptScope.LINK_PROBE = scope.LINK_PROBE;
+    const code = fill(...Object.values(scriptScope), tpl) as string;
     assert.doesNotThrow(() => new Function(code), `脚本无法解析：${code.slice(0, 80)}`);
     if (src.slice(0, start).endsWith("const LINK_PROBE = ")) scope.LINK_PROBE = code;
     parsed++;

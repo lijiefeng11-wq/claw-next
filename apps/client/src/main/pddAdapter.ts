@@ -1377,8 +1377,9 @@ export class PddPageAdapter implements PlatformAdapter {
     return win.webContents.executeJavaScriptInIsolatedWorld(WORLD, [{ code }]) as Promise<T>;
   }
 
-  private clickConversation(uid: string): Promise<boolean> {
+  private clickConversation(uid: string, notAfter = Date.now() + 5000): Promise<boolean> {
     return this.run<boolean>(`(() => {
+      if (Date.now() >= ${JSON.stringify(notAfter)}) return false;
       const match = (e) => (e.getAttribute("data-random") || "").startsWith(${JSON.stringify(uid + "-")});
       const el = [...document.querySelectorAll("div.all-chat-list " + ${JSON.stringify(ITEM)})].find(match) ?? [...document.querySelectorAll(${JSON.stringify(ITEM)})].find(match);
       if (!el) return false;
@@ -1993,14 +1994,14 @@ export class PddPageAdapter implements PlatformAdapter {
     const page = this.window, epoch = this.watchEpoch;
     this.sending = true;
     try {
-      // 第一阶段：打开对话、检查输入框。失败均未触碰发送按钮。
-      const notOpened = await this.openConversation(uid);
-      if (notOpened) return notSent(notOpened);
-      let didPress = false, didFill = false;
       const deadline = request.deadline ?? Date.now() / 1000 + 8;
       const left = () => deadline - Date.now() / 1000;
       const recheck = () => this.window !== page || this.watchEpoch !== epoch ? "pdd_page_changed" :
         request.recheck?.() ?? (left() < 1.5 ? "claim_expiring" : null);
+      // 第一阶段：打开对话、检查输入框。失败均未触碰发送按钮。
+      const notOpened = await this.openConversation(uid, deadline, recheck);
+      if (notOpened) return notSent(notOpened);
+      let didPress = false, didFill = false;
       let observed: SendResult | null = null;
       const result = new Promise<SendResult>(resolve => {
         this.outgoing = { to_uid: uid, text, matched: null, blocked: 0, recheck, clicked: () => didPress, resolve: r => { observed = r; resolve(r); } };
@@ -2027,14 +2028,44 @@ export class PddPageAdapter implements PlatformAdapter {
   }
 
   /** 点开该买家对话并等它成为当前对话；返回失败原因，成功为 null。 */
-  private async openConversation(uid: string): Promise<string | null> {
-    if (!(await this.clickConversation(uid).catch(() => false))) return "pdd_conversation_not_in_list";
-    for (let i = 0; i < 25; i++) {
-      const scan = await this.run<Scan>(SCAN).catch(() => null);
-      if (scan?.items.some((it) => it.active && buyerFromListKey(it.key) === uid)) return null;
-      await sleep(200);
+  private async openConversation(uid: string, deadline = Date.now() / 1000 + 7, current?: () => string | null, prepareMs = 5000): Promise<string | null> {
+    const page = this.window, epoch = this.watchEpoch;
+    const until = Math.min(Date.now() + prepareMs, deadline * 1000 - 1500);
+    const missingUntil = Math.min(until, Date.now() + 1500);
+    const guard = () => this.window !== page || this.watchEpoch !== epoch || !page || page.isDestroyed() ? "pdd_page_changed" :
+      current?.() ?? (Date.now() >= deadline * 1000 - 1500 ? "claim_expiring" : null);
+    const readTimeout = new Error("conversation_read_timeout");
+    const read = async <T>(operation: Promise<T>): Promise<T> => {
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        return await Promise.race([operation, new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(readTimeout), Math.max(1, until - Date.now()));
+        })]);
+      } finally { if (timer) clearTimeout(timer); }
+    };
+    try {
+      let found = false;
+      for (let i = 0; i < 16; i++) {
+        const blocked = guard(); if (blocked) return blocked;
+        const clicked = await read(this.clickConversation(uid, missingUntil));
+        const changed = guard(); if (changed) return changed;
+        if (clicked) { found = true; break; }
+        if (Date.now() >= missingUntil) return "pdd_conversation_not_in_list";
+        await sleep(Math.min(100, missingUntil - Date.now()));
+      }
+      if (!found) return "pdd_conversation_not_in_list";
+      for (let i = 0; i < 50 && Date.now() < until; i++) {
+        const blocked = guard(); if (blocked) return blocked;
+        const scan = await read(this.run<Scan>(SCAN));
+        const changed = guard(); if (changed) return changed;
+        const active = new Set((scan?.items ?? []).filter(it => it.active).map(it => buyerFromListKey(it.key)));
+        if (active.size === 1 && active.has(uid)) return null;
+        await sleep(Math.min(100, Math.max(0, until - Date.now())));
+      }
+      return guard() ?? "pdd_conversation_not_opened";
+    } catch (error) {
+      return guard() ?? (error === readTimeout ? "pdd_page_script_timeout" : "pdd_page_script_failed");
     }
-    return "pdd_conversation_not_opened";
   }
 
   private nativeClick(pt: { x: number; y: number }, win: PlatformPage | null, epoch: number): Promise<PageClickResult> {
@@ -2608,7 +2639,7 @@ export class PddPageAdapter implements PlatformAdapter {
     let hovered = false;
     this.sending = true;
     try {
-      const notOpened = await Promise.race([this.openConversation(uid), sleep(1000).then(() => "pdd_conversation_read_timeout")]);
+      const notOpened = await this.openConversation(uid, request.deadline, () => guard() ?? request.recheck(), 1000);
       if (notOpened) return notSent(notOpened);
       let stop = guard();
       if (stop) return notSent(stop);

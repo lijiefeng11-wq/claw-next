@@ -121,6 +121,8 @@ export const REASONS: Record<string, string> = {
   pdd_page_changed: "平台页面已变化",
   pdd_conversation_changed: "平台当前打开的对话已切换",
   pdd_conversation_not_in_list: "会话列表里找不到这位买家",
+  pdd_page_script_failed: "读取平台会话失败，未发送",
+  pdd_page_script_timeout: "读取平台会话超时，未发送",
   pdd_conversation_not_opened: "没能打开这位买家的对话",
   pdd_goods_button_covered: "平台页面的商品按钮被遮挡",
   pdd_goods_button_hidden: "平台页面的商品按钮不可见",
