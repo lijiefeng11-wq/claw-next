@@ -2,7 +2,7 @@
 
 ## 选择：一个仓库，两个独立开发目录
 
-仓库是 <https://github.com/lijiefeng11-wq/claw-next>，产品名 Claw-Next。当前阶段共同协议变化较频繁，把前后台放在同一个仓库可让一个 PR 同时展示接口、实现和测试；没有必要先拆成多个仓库再维护不同版本的依赖。
+仓库是 <https://github.com/lijiefeng11-wq/jf-zdhf>，产品名 Claw-Next。当前阶段共同协议变化较频繁，把前后台放在同一个仓库可让一个 PR 同时展示接口、实现和测试；没有必要先拆成多个仓库再维护不同版本的依赖。
 
 | 目录 | 负责人 | 内容 |
 |---|---|---|
@@ -17,7 +17,7 @@
 前台可执行：
 
 ```console
-git clone https://github.com/lijiefeng11-wq/claw-next.git Claw-Next-Frontend
+git clone https://github.com/lijiefeng11-wq/jf-zdhf.git Claw-Next-Frontend
 cd Claw-Next-Frontend
 git switch -c claude/具体任务
 ```

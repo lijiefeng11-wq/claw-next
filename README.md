@@ -2,7 +2,7 @@
 
 独立的客服系统：**前台负责登录和收发，后台负责判断，并提供管理界面。**
 
-仓库：<https://github.com/lijiefeng11-wq/claw-next>。前后台都支持 macOS 与 Windows，首选同机部署在 Mac。
+仓库：<https://github.com/lijiefeng11-wq/jf-zdhf>。前后台都支持 macOS 与 Windows，首选同机部署在 Mac。
 
 ## 当前交付
 
