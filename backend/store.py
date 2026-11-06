@@ -783,7 +783,7 @@ class Store:
     def _action_fallback(job, result):
         """Only saved server policies turn an eligible judgment into an action."""
         if (result.get("action") != "handoff" or job.get("block_reason")
-                or not job["settings"]["enabled"] or not job["payload"]["context"]["history_complete"]):
+                or not job["settings"]["enabled"]):
             return result
         reason = result.get("reason", "")
         if reason == deadlines.REASON:

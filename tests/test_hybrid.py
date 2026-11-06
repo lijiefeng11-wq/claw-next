@@ -35,11 +35,20 @@ class HybridTests(unittest.TestCase):
                 self.assertEqual(result["reason"], "no_matching_rule")
                 post.assert_not_called()
 
-    def test_keyword_hit_never_calls_model(self):
+    def test_rules_keyword_hit_never_calls_model(self):
         with patch("backend.engine._post") as post:
-            result = decide(self.item("dispatch time please"), media.CONFIG)
+            result = decide(self.item("dispatch time please", "rules"), media.CONFIG)
         post.assert_not_called()
         self.assertEqual(result["reason"], "rule:dispatch")
+
+    def test_hybrid_keyword_does_not_bypass_routing_policy(self):
+        job = self.item("I paid days ago; why no dispatch time?")
+        output = completion({"action": "handoff", "text": "", "reason": "Existing order problem"})
+        with patch("backend.engine._post", return_value=output) as post:
+            result = decide(job, media.CONFIG)
+        self.assertEqual(result["action"], "handoff")
+        self.assertEqual(post.call_count, 1)
+        self.assertIn("first apply the shop's routing policy", post.call_args.args[1]["messages"][0]["content"])
 
     def test_text_with_image_never_shortcuts_through_keyword_rule(self):
         for mode in ("rules", "hybrid"):

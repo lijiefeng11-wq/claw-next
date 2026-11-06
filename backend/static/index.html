@@ -327,7 +327,7 @@
                     <select id="mode-input" aria-describedby="mode-help">
                       <option value="rules">按规则自动回复</option>
                       <option value="model">由后台模型判断</option>
-                      <option value="hybrid">混合：规则优先，模型兜底</option>
+                      <option value="hybrid">混合：按语义匹配规则</option>
                     </select>
                   </label>
                   <p id="mode-help" class="field-help">按规则：只做包含匹配，未命中转人工，不调用模型。混合：先匹配规则，未命中时由模型理解意思；语义命中使用规则原文，否则由模型回复。模型方式直接交模型判断。</p>

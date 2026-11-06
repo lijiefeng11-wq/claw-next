@@ -59,7 +59,10 @@ def _record(text):
 def _normalize(text):
     # Spaces separate an ASCII model from its brand/year. Deleting them turns
     # "Brand A6 2022" into one identifier and defeats the matcher's boundaries.
-    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", text).casefold()).strip()
+    text = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", text).casefold()).strip()
+    # Only known brand prefixes may separate a glued ASCII model; arbitrary XA6 must not match A6.
+    text = re.sub(r"\b(wey|byd)(?=[a-z]+\d)", r"\1 ", text)
+    return re.sub(r"([一二三四五六七八九十])代", lambda m: str("一二三四五六七八九十".index(m[1]) + 1) + "代", text)
 
 
 def _aliases(record):
@@ -79,6 +82,9 @@ def _aliases(record):
                     continue
                 value = _normalize(record["family"]) + value
             result.add(value)
+            generation = re.fullmatch(r"(.+?)(\d{1,2})代", value)
+            if generation:
+                result.add(generation[2] + "代" + generation[1].strip())
     return tuple(sorted(result))
 
 
@@ -115,6 +121,30 @@ class VehicleCatalog:
         matches = [self._records[index] for index in sorted(matched)]
         return {"status": "not_found" if not matches else "matched" if len(matches) == 1 else "ambiguous",
                 "candidates": copy.deepcopy(matches[:5]), "total_matches": len(matches), "truncated": len(matches) > 5}
+
+    def lookup_context(self, messages):
+        """Keep a recent buyer's model for a bare year/window/greeting, never guess a new model."""
+        texts = [m["content"] for m in messages if isinstance(m, dict) and m.get("role") == "buyer"
+                 and m.get("kind") == "text" and isinstance(m.get("content"), str)][-6:] if isinstance(messages, list) else []
+        deadline = time.monotonic() + MAX_LOOKUP_SECONDS
+        result = self.lookup("")
+        for text in reversed(texts):
+            if time.monotonic() >= deadline:
+                return {"status": "unavailable", "reason": "lookup_budget_exceeded", "candidates": [],
+                        "total_matches": None, "truncated": True}
+            result = self.lookup(text)
+            if result["status"] != "not_found":
+                if result.get("candidates") and re.search(r"不是|并非|不要这个|not this", text, re.I):
+                    return {**result, "status": "ambiguous"}
+                return result
+            if len(text) > 128:
+                break
+            # Carry only short follow-ups; an unknown new car must not inherit the old one.
+            rest = re.sub(r"\d+(?:\.\d+)?(?:年款|年|款|座)?", "", _normalize(text))
+            rest = re.sub(r"我的是|我的|就是|请问|您好|你好|谢谢|好的|在吗|在么|在的|能用吗|能装吗|可以吗|前挡风|后挡风|前挡|前窗|后窗|中窗|侧三|尾挡|后挡|侧窗|小窗|挡风|窗位|年份|年款|尺寸|的|是|呢|吗|款", "", rest)
+            if re.sub(r"[\s，。？！,.?!~～]", "", rest):
+                break
+        return result
 
 
 def load_directory(path):

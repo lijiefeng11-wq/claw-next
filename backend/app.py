@@ -648,8 +648,8 @@ class Server(ThreadingHTTPServer):
                 if catalog is not None:
                     # Run in this shop's worker, outside the global store lock and
                     # scheduler. Only authenticated shop ownership selects a catalog.
-                    job["vehicle_knowledge"] = catalog.lookup(
-                        job["payload"]["context"]["messages"][-1]["content"])
+                    job["vehicle_knowledge"] = catalog.lookup_context(
+                        job["payload"]["context"]["messages"])
                 if job.get("vehicle_knowledge", {}).get("status") == "unavailable":
                     result = decision("handoff", "vehicle_knowledge_unavailable")
                 elif job.get("deadline_monotonic") is not None:
