@@ -939,6 +939,18 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** 自动清理平台引导弹窗的间隔。 */
 export const POPUP_SWEEP_INTERVAL_MS = 2000;
 
+/** 打开会话的等待上限：按剩余预算等待，但不超过该值，保留发送与回执余量。 */
+export const OPEN_CONVERSATION_WAIT_MAX_MS = 4000;
+/** 未读会话未加载后的短退避：2s、4s、8s… 上限 30s，不再整段停顿 5 分钟。 */
+export const OPEN_RETRY_BASE_MS = 2000;
+export const OPEN_RETRY_MAX_MS = 30_000;
+
+/** 第 attempt 次未加载成功后的重试间隔（attempt 从 1 开始）。 */
+export function nextOpenRetryDelay(attempt: number): number {
+  const n = Math.max(1, Math.min(Math.trunc(attempt) || 1, 16));
+  return Math.min(OPEN_RETRY_MAX_MS, OPEN_RETRY_BASE_MS * 2 ** (n - 1));
+}
+
 /** 转接弹窗收尾失败的固定分类：只用于日志与虚构测试，不改变发送语义。 */
 export type TransferCleanupReason = "closed" | "page_changed" | "conversation_changed" | "dialog_left" | "popover_left" | "unavailable";
 
@@ -1565,11 +1577,11 @@ export class PddPageAdapter implements PlatformAdapter {
       else {
         const f = this.openFailures.get(uid) ?? { count: 0, until: 0 };
         f.count += 1;
-        if (f.count >= 2) {
-          f.until = now + 5 * 60_000;
-          f.count = 0;
-          console.log(`[${this.shopId}] platform auto-open paused for a conversation (not loading)`);
-        } else this.reload("conversation_not_loaded_after_open");
+        // 有上限的短退避：该会话只是延后重试，消息仍保持未处理，不再整段停顿 5 分钟。
+        const delay = nextOpenRetryDelay(f.count);
+        f.until = now + delay;
+        if (f.count === 1) this.reload("conversation_not_loaded_after_open");
+        console.log(`[${this.shopId}] platform auto-open retry attempt=${f.count} delay_ms=${delay}`);
         this.openFailures.set(uid, f);
       }
     }
@@ -2046,7 +2058,8 @@ export class PddPageAdapter implements PlatformAdapter {
   private async openConversation(uid: string, deadline = Date.now() / 1000 + 7, current?: () => string | null, prepareMs = 5000): Promise<string | null> {
     const page = this.window, epoch = this.watchEpoch;
     const until = Math.min(Date.now() + prepareMs, deadline * 1000 - 1500);
-    const missingUntil = Math.min(until, Date.now() + 1500);
+    // 按剩余预算等待会话出现，但不超过上限：既覆盖页面刚刷新后的慢渲染，又保留填入与回执的时间。
+    const missingUntil = Math.min(until, Date.now() + OPEN_CONVERSATION_WAIT_MAX_MS);
     const guard = () => this.window !== page || this.watchEpoch !== epoch || !page || page.isDestroyed() ? "pdd_page_changed" :
       current?.() ?? (Date.now() >= deadline * 1000 - 1500 ? "claim_expiring" : null);
     const readTimeout = new Error("conversation_read_timeout");
@@ -2060,7 +2073,8 @@ export class PddPageAdapter implements PlatformAdapter {
     };
     try {
       let found = false;
-      for (let i = 0; i < 16; i++) {
+      // 迭代上限只作保险，真正的边界是 missingUntil（按剩余预算计算）。
+      for (let i = 0; i < 80; i++) {
         const blocked = guard(); if (blocked) return blocked;
         const clicked = await read(this.clickConversation(uid, missingUntil));
         const changed = guard(); if (changed) return changed;

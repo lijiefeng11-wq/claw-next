@@ -52,12 +52,32 @@ test("列表晚出现：实际点击脚本只打开一次，然后才进入发�
   assert.equal(f.adapter.sending, false);
 });
 
-test("目标一直缺失：有界结束、零填入/发送、释放忙碌", async t => {
+test("目标一直缺失：按剩余预算有界结束（4 秒上限）、零填入/发送、释放忙碌", async t => {
   const f = fixture(t, Infinity);
   assert.deepEqual(await finish(t, f.adapter.send(f.request())), { status: "not_sent", reason: "pdd_conversation_not_in_list" });
   assert.equal(f.counts().opens, 0); assert.equal(f.counts().sends, 0);
   assert.equal(f.adapter.sending, false);
-  assert.ok(Date.now() <= 11_600);
+  // 起点 10_000、准备预算 5_000、截止余量 1_500 → until=15_000；等待上限 4_000 → 14_000 结束。
+  assert.ok(Date.now() <= 14_600, `实际 ${Date.now()}`);
+  assert.ok(Date.now() >= 13_900, `实际 ${Date.now()}`);
+});
+
+test("列表 1.6 秒后出现：仍在预算内完成打开（旧实现 1.5 秒即放弃）", async t => {
+  const f = fixture(t, 1600);
+  const result = await finish(t, f.adapter.send(f.request()));
+  assert.equal(result.reason, "fictional_stop_after_preparation");
+  assert.deepEqual({ opens: f.counts().opens, sends: f.counts().sends }, { opens: 1, sends: 1 });
+  assert.equal(f.adapter.sending, false);
+});
+
+test("已打开的会话：clickConversation 直接返回 true，不产生点击（不能被当作已重新拉取消息）", async t => {
+  const f = fixture(t);
+  let clicks = 0;
+  const activeRow = { getAttribute: () => "9001-fictional", classList: { contains: () => true }, querySelector: () => null, dispatchEvent: () => { clicks += 1; } };
+  f.adapter.run = async (script: string) => vm.runInNewContext(script, { document: { querySelectorAll: () => [activeRow] }, Date, window: {}, MouseEvent: class {} });
+  assert.equal(await f.adapter.clickConversation("9001"), true);
+  assert.equal(clicks, 0);
+  assert.equal(f.counts().opens, 0);
 });
 
 test("脚本拒绝与挂起分类明确，均不触碰发送按钮", async t => {
