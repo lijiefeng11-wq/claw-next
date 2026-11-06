@@ -16,7 +16,6 @@ type Pt = { x: number; y: number };
 type Click = { status: "dispatched" } | { status: "not_sent" | "unknown"; reason: string };
 const OPEN: Pt = { x: 100, y: 100 };
 const ROW: Pt = { x: 300, y: 200 };
-const CLOSE: Pt = { x: 900, y: 50 };
 const CANCEL: Pt = { x: 320, y: 260 };
 const CONFIRM: Pt = { x: 400, y: 260 };
 const same = (a: Pt, b: Pt) => a.x === b.x && a.y === b.y;
@@ -39,8 +38,8 @@ type Opts = {
   duringFinalSnapshot?: "switch" | "expire";
   /** 开始核对之后的残留读数（收尾时）；省略时与 leftovers 相同。 */
   leftoversLater?: { dialogs: number; popovers: number };
-  /** 收尾按 Esc 的 CDP 命令替身：同步抛错、挂起或返回。 */
-  sendCommand?: (method: string, params: { type: string }) => Promise<unknown>;
+  /** 空白遮罩点击的失败/挂起替身；不发任何按键。 */
+  blank?: () => Promise<string>;
 };
 
 function harness(opts: Opts) {
@@ -54,13 +53,14 @@ function harness(opts: Opts) {
   let listReads = 0;
   let armed = false;
   const keys: string[] = [];
+  let dialogOpen = false, popoverOpen = false, blankCalls = 0;
   a.window = {
     isDestroyed: () => false,
     webContents: {
       debugger: {
         sendCommand: (method: string, params: { type: string }) => {
           keys.push(params.type);
-          return opts.sendCommand ? opts.sendCommand(method, params) : Promise.resolve({});
+          throw new Error("cleanup must not send key commands");
         },
       },
     },
@@ -80,6 +80,9 @@ function harness(opts: Opts) {
   a.scanKeepingFresh = async () => ({ items: [{ key: "9001-x", active: true, unread: false }] });
   a.nativeClick = async (pt: Pt): Promise<Click> => {
     clicks.push({ x: pt.x, y: pt.y });
+    if (same(pt, OPEN)) dialogOpen = true;
+    if (same(pt, ROW)) popoverOpen = true;
+    if (same(pt, CANCEL)) popoverOpen = false;
     if (same(pt, ROW) && opts.gateAfterRow) gateValue = opts.gateAfterRow;
     if (same(pt, CANCEL) && opts.cancelClick) return opts.cancelClick;
     return { status: "dispatched" };
@@ -87,9 +90,14 @@ function harness(opts: Opts) {
   a.run = async (script: string) => {
     if (script.includes("const popovers")) {
       const start = opts.leftovers ?? { dialogs: 0, popovers: 0 };
-      return leftoverReads++ === 0 ? start : (opts.leftoversLater ?? start);
+      return leftoverReads++ === 0 ? start : (opts.leftoversLater ?? { dialogs: Number(dialogOpen), popovers: Number(popoverOpen) });
     }
-    if (script.includes("el-dialog__headerbtn")) return CLOSE;
+    if (script.includes("const backdrop =")) {
+      blankCalls++;
+      if (opts.blank) return opts.blank();
+      dialogOpen = false; popoverOpen = false;
+      return "dispatched";
+    }
     if (script.includes("cells")) return [{ cells: [NAME, "在线"], button: ROW }];
     if (script.includes("aria-describedby")) {
       if (script.includes("const check = null")) {
@@ -115,7 +123,7 @@ function harness(opts: Opts) {
   };
   const logFile = path.join(dir, "transfer-test.jsonl");
   const logs = () => (fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
-  return { a, clicks, logs, logFile, checks, keys };
+  return { a, clicks, logs, logFile, checks, keys, blankCalls: () => blankCalls };
 }
 
 // 期限与 Date.now() 同为毫秒；“到期”用时钟偏移模拟。
@@ -142,13 +150,13 @@ test("上次留下的转移对话框或确认气泡还开着：不开始、不�
 test("对话框还在动画中、按钮位置一直在变：不点行内“转移”，关闭对话框", async () => {
   const h = harness({ positions: [0, 1, 2, 3, 4, 5, 6, 7].map((i) => ({ x: 300, y: 260 - i * 10 })) });
   assert.equal(await run(h), "not_executed:target_unstable");
-  assert.deepEqual(h.clicks, [OPEN, CLOSE]);
+  assert.deepEqual(h.clicks, [OPEN]);
 });
 
 test("位置稳定后才点；点行后确认气泡盖住按钮也不误判为挪位；inspect 只点一次“取消”，记实际点击状态", async () => {
   const h = harness({ positions: [{ x: 300, y: 230 }, ROW, ROW], rect: ROW });
   assert.equal(await run(h), "inspected:rows=1,confirm_buttons=1");
-  assert.deepEqual(h.clicks, [OPEN, ROW, CANCEL, CLOSE]);
+  assert.deepEqual(h.clicks, [OPEN, ROW, CANCEL]);
   assert.equal(cancelResultOf(h), "dispatched");
   assert.equal(h.logs().filter((r) => r.phase === "cleanup" && "popover_cancel" in r).length, 0);
   assert.deepEqual(h.logs().filter((r) => r.phase === "cleanup").at(-1).leftover, { dialogs: 0, popovers: 0 });
@@ -157,7 +165,7 @@ test("位置稳定后才点；点行后确认气泡盖住按钮也不误判为�
 test("点行后行真的挪了：不继续，记位移；收尾核对后点一次气泡“取消”再关对话框", async () => {
   const h = harness({ positions: [ROW, ROW], rect: { x: 300, y: 240 } });
   assert.equal(await run(h), "not_executed:target_moved");
-  assert.deepEqual(h.clicks, [OPEN, ROW, CANCEL, CLOSE]);
+  assert.deepEqual(h.clicks, [OPEN, ROW, CANCEL]);
   const moved = h.logs().find((r) => r.reason === "target_moved");
   assert.deepEqual([moved.detail, moved.dx, moved.dy], ["moved", 0, 40]);
   assert.equal(cancelResultOf(h), "dispatched");
@@ -240,41 +248,43 @@ test("扫描读到的买家与请求携带的对话令牌不一致：一开始�
   assert.deepEqual(h.clicks, []);
 });
 
-test("复审反例：收尾按 Esc 时 CDP 同步抛错、按下挂起、松开挂起——都在有界时间内返回并释放忙碌，只记固定分类", async () => {
-  const hang = () => new Promise<unknown>(() => undefined);
-  const cases: [string, NonNullable<Opts["sendCommand"]>, string, string[]][] = [
-    ["同步抛错", () => {
-      throw new Error("debugger detached");
-    }, "keydown_failed", ["keyDown"]],
-    ["按下挂起", hang, "keydown_timeout", ["keyDown"]],
-    ["松开挂起", (_m, p) => (p.type === "keyDown" ? Promise.resolve({}) : hang()), "keyup_timeout", ["keyDown", "keyUp"]],
-    ["按下被拒", () => Promise.reject(new Error("x")), "keydown_failed", ["keyDown"]],
+test("blank cleanup failures or hanging evaluation are bounded, release busy and never send keys", async () => {
+  const cases: [string, () => Promise<string>][] = [
+    ["sync throw", () => { throw new Error("fictional failure"); }],
+    ["rejected", () => Promise.reject(new Error("fictional failure"))],
+    ["hang", () => new Promise(() => {})],
+    ["covered", async () => "covered"],
   ];
-  for (const [name, sendCommand, result, keys] of cases) {
-    // 对话框关不掉（关闭按钮无效）才会走到 Esc。
-    const h = harness({ ...stable, leftoversLater: { dialogs: 1, popovers: 0 }, sendCommand });
+  for (const [name, blank] of cases) {
+    const h = harness({ ...stable, leftoversLater: { dialogs: 1, popovers: 0 }, blank });
     const started = realNow();
     assert.equal(await run(h), "inspected:rows=1,confirm_buttons=1", name);
-    assert.ok(realNow() - started < 8_000, `${name}：收尾有界`);
-    assert.equal(h.a.sending, false, `${name}：释放忙碌`);
-    assert.deepEqual(h.keys, keys, `${name}：不重试按键`);
+    assert.ok(realNow() - started < 5_000, `${name}: bounded cleanup`);
+    assert.equal(h.a.sending, false); assert.deepEqual(h.keys, []); assert.equal(h.blankCalls(), 1);
     const cleanup = h.logs().filter((r) => r.phase === "cleanup").at(-1);
-    assert.equal(cleanup.steps.at(-1).step, "escape", name);
-    assert.equal(cleanup.steps.at(-1).result, result, name);
-    // 下一次诊断不再因忙碌被拒（残留仍在，按既有规则以 leftover_popup 拒绝开始）。
-    assert.equal(await run(h), "not_executed:leftover_popup", `${name}：后续请求不是 busy`);
+    assert.equal(cleanup.steps.at(-1).step, "blank_click");
+    assert.equal(cleanup.steps.at(-1).result, name === "hang" ? "unavailable" : name === "covered" ? "covered" : "script_failed");
+    assert.equal(await run(h), "not_executed:leftover_popup");
+    assert.equal(h.blankCalls(), 1); assert.deepEqual(h.keys, []);
   }
 });
 
-test("复审反例：收尾过程抛异常——仍释放忙碌，记固定分类", async () => {
-  const h = harness({ ...stable });
-  const orig = h.a.nativeClick;
-  h.a.nativeClick = async (pt: Pt) => {
-    // 收尾点关闭按钮时抛出（读脚本自带 catch，点击没有）。
-    if (same(pt, CLOSE)) throw new Error("boom");
-    return orig(pt);
+test("blank cleanup succeeds once, sends no keys and releases busy", async () => {
+  const h = harness(stable);
+  assert.equal(await run(h), "inspected:rows=1,confirm_buttons=1");
+  assert.equal(h.blankCalls(), 1); assert.deepEqual(h.keys, []); assert.equal(h.a.sending, false);
+  assert.deepEqual(h.logs().filter((r) => r.phase === "cleanup").at(-1).leftover, { dialogs: 0, popovers: 0 });
+});
+
+test("cleanup conversation check throwing still releases busy and logs only a fixed category", async () => {
+  const h = harness(stable), orig = h.a.run;
+  h.a.run = async (script: string) => {
+    const r = await orig(script);
+    if (script.includes('"text":"取消"')) h.a.activeConvToken = async () => { throw new Error("fictional private text"); };
+    return r;
   };
   assert.equal(await run(h), "inspected:rows=1,confirm_buttons=1");
-  assert.equal(h.a.sending, false);
+  assert.equal(h.a.sending, false); assert.deepEqual(h.keys, []);
   assert.equal(h.logs().filter((r) => r.phase === "cleanup").at(-1).result, "cleanup_failed");
+  assert(!JSON.stringify(h.logs()).includes("fictional private text"));
 });
