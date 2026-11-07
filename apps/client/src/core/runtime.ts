@@ -193,6 +193,8 @@ export class ShopRuntime {
   private readonly inFlight = new Map<string, number>();
   /** 仅保留失联时尚未创建事件的新消息；不包含任何已尝试发送的事件。 */
   private readonly pendingPreparation = new Map<string, { messageId: string; sessionId: string }>();
+  /** 仅保留本次运行中因后台失联而阻塞、尚未领取许可的 ready 事件。 */
+  private readonly pendingReady = new Map<string, EventRecord>();
   private readonly active = new Set<Promise<unknown>>();
   private readonly resume: EventRecord[] = [];
   private readonly uploading = new Set<string>();
@@ -309,6 +311,7 @@ export class ShopRuntime {
   async stop(wait = true) {
     this.stopped = true;
     this.pendingPreparation.clear();
+    this.pendingReady.clear();
     for (const t of this.checkTimers) clearTimeout(t);
     this.checkTimers.clear();
     if (this.timer) clearInterval(this.timer);
@@ -371,6 +374,7 @@ export class ShopRuntime {
       if (caps.has(CAP_MARK_CONVERSATION) !== this.capabilities.has(CAP_MARK_CONVERSATION)) this.log(`capability mark_conversation=${caps.has(CAP_MARK_CONVERSATION)}`);
       this.capabilities = caps;
       this.resumePreparation();
+      this.resumeReady();
       const request = lease.product_learning;
       if (request && caps.has(CAP_PRODUCT_KNOWLEDGE) && !this.productLearning && !this.productRequests.has(request.request_id)) {
         this.productRequests.add(request.request_id);
@@ -381,6 +385,7 @@ export class ShopRuntime {
       const code = errorCode(err);
       if (err instanceof BackendError && err.code === "lease_busy") {
         this.pendingPreparation.clear();
+        this.pendingReady.clear();
         this.capabilities = new Set();
         this.lease = { state: "busy", generation: 0, valid_until: 0, detail: "lease_busy" };
       } else if (err instanceof BackendError && err.status === 401) {
@@ -475,6 +480,7 @@ export class ShopRuntime {
 
   private newSession() {
     this.pendingPreparation.clear();
+    this.pendingReady.clear();
     this.capabilities = new Set();
     this.sendOptions.clear();
     this.sessionId = `ses-${randomUUID()}`;
@@ -491,6 +497,7 @@ export class ShopRuntime {
         break;
       case "session_ended":
         this.pendingPreparation.clear();
+        this.pendingReady.clear();
         this.orders.clear();
         this.sendOptions.clear();
         this.capabilities = new Set();
@@ -507,7 +514,10 @@ export class ShopRuntime {
         this.setSendOptions(event.conversation_id, event.options);
         break;
       case "status":
-        if (this.platformCheck()) this.pendingPreparation.clear();
+        if (this.platformCheck()) {
+          this.pendingPreparation.clear();
+          this.pendingReady.clear();
+        }
         break;
     }
     this.changed();
@@ -651,6 +661,17 @@ export class ShopRuntime {
       if (pending.sessionId !== this.sessionId || conv.takeover || conv.messages.at(-1)?.id !== pending.messageId) continue;
       if (this.journal.eventForMessage(conversationId, pending.messageId) || this.expired(conversationId, pending.messageId)) continue;
       this.track(this.submitNew(conversationId, pending.messageId));
+    }
+  }
+
+  /** 成功心跳后重新核验首次发送；先移出队列，避免并发心跳重复排队。 */
+  private resumeReady() {
+    if (this.stopped || this.backendState.state !== "ok") return;
+    for (const [eventId, ev] of this.pendingReady) {
+      this.pendingReady.delete(eventId);
+      if (ev.attempt || ev.cancel || ev.stage !== "submitted" || ev.snapshot?.state !== "ready"
+          || ev.snapshot.delivery.status !== "unclaimed" || ev.snapshot.delivery.attempt_id !== null) continue;
+      this.track(this.considerSend(ev));
     }
   }
 
@@ -1169,6 +1190,7 @@ export class ShopRuntime {
     const blocked = this.sendingConversations.has(ev.conversation_id) ? "conversation_busy" : this.sendBlocker(ev);
     if (blocked) {
       this.journal.setBlocked(ev.event_id, blocked);
+      if (blocked === "backend_unavailable" && !ev.attempt) this.pendingReady.set(ev.event_id, ev);
       if (blocked === REPLY_DEADLINE_REASON) {
         this.noteDeadline(ev.conversation_id, ev.message_id);
         this.maybeCancel(ev);
@@ -1439,6 +1461,7 @@ export class ShopRuntime {
   setMode(mode: ShopMode) {
     if (this.config.mode === mode) return;
     this.pendingPreparation.clear();
+    this.pendingReady.clear();
     this.config.mode = mode;
     if (mode !== "auto") for (const conv of this.journal.conversations.values()) if (conv.revision > 0) this.journal.bumpRevision(conv.conversation_id, `mode:${mode}`);
     this.changed();
@@ -1447,7 +1470,10 @@ export class ShopRuntime {
   setTakeover(conversationId: string, on: boolean) {
     if (!this.journal.conversations.has(conversationId)) return;
     if (this.journal.conversation(conversationId).takeover === on) return;
-    if (on) this.pendingPreparation.delete(conversationId);
+    if (on) {
+      this.pendingPreparation.delete(conversationId);
+      for (const [eventId, ev] of this.pendingReady) if (ev.conversation_id === conversationId) this.pendingReady.delete(eventId);
+    }
     this.journal.setTakeover(conversationId, on);
     this.journal.bumpRevision(conversationId, on ? "manual_takeover" : "manual_release");
     this.changed();
