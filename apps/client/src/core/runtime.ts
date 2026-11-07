@@ -11,8 +11,7 @@ import {
   CAP_PRODUCT_KNOWLEDGE,
   ProductLearningRequest,
   CAP_MARK_CONVERSATION,
-  CAP_TRANSFER_CONVERSATION,
-  TransferTarget,
+  CAP_TRANSFER_BY_ACCOUNT,
   CAP_REPLY_DEADLINE,
   CAP_SEND_ITEM,
   ContextMessage,
@@ -215,7 +214,6 @@ export class ShopRuntime {
   private readonly eventConvState = new Map<string, ConvState>();
   private readonly declareMark: boolean;
   private readonly declareTransfer: boolean;
-  private readonly eventTransferTargets = new Map<string, TransferTarget[]>();
   /** 客户端“检查更新”安装期间的全局保持（见 RuntimeOptions.updateHold）。 */
   private readonly updateHold: () => boolean;
   /** 最近一次成功心跳确认的能力，随租约（instance+session+generation）变化重置。 */
@@ -358,7 +356,7 @@ export class ShopRuntime {
     if (!session || this.stopped) return;
     const started = this.now();
     try {
-      const lease = await this.backend.heartbeat(this.instanceId, session, [...(this.adapter.sendItem ? [CAP_SEND_ITEM] : []), CAP_REPLY_DEADLINE, CAP_GOODS_SNAPSHOT, ...(this.adapter.collectProducts ? [CAP_PRODUCT_KNOWLEDGE] : []), ...(this.markDeclared() ? [CAP_MARK_CONVERSATION] : []), ...(this.transferDeclared() ? [CAP_TRANSFER_CONVERSATION] : [])]);
+      const lease = await this.backend.heartbeat(this.instanceId, session, [...(this.adapter.sendItem ? [CAP_SEND_ITEM] : []), CAP_REPLY_DEADLINE, CAP_GOODS_SNAPSHOT, ...(this.adapter.collectProducts ? [CAP_PRODUCT_KNOWLEDGE] : []), ...(this.markDeclared() ? [CAP_MARK_CONVERSATION] : []), ...(this.transferDeclared() ? [CAP_TRANSFER_BY_ACCOUNT] : [])]);
       if (lease.instance_id !== this.instanceId || lease.session_id !== session || lease.shop_id !== this.config.shop_id) {
         this.lease = { state: "error", generation: 0, valid_until: 0, detail: "lease_response_mismatch" };
         return;
@@ -461,11 +459,11 @@ export class ShopRuntime {
   }
 
   private transferDeclared() {
-    return this.declareTransfer && !!this.adapter.readConvState && !!this.adapter.readTransferTargets && !!this.adapter.transferConversation;
+    return this.declareTransfer && !!this.adapter.transferConversation;
   }
 
   transferExecutable() {
-    return this.transferDeclared() && this.lease.state === "held" && this.capabilities.has(CAP_TRANSFER_CONVERSATION);
+    return this.transferDeclared() && this.lease.state === "held" && this.capabilities.has(CAP_TRANSFER_BY_ACCOUNT);
   }
 
   /** 可以执行标星：本客户端声明了能力，且本租约确认了它。 */
@@ -822,22 +820,13 @@ export class ShopRuntime {
     const candidates = this.buildSendOptions(conversationId, conv.revision);
     if (candidates) request.context.send_options = candidates.options;
     // 契约“会话操作（1.3 草案）”：能力确认后必带 conv_state；读不到如实报 marked=null，不捏造 false、不丢弃事件。
-    if (this.markConfirmed() || this.transferExecutable()) {
+    if (this.markConfirmed()) {
       const read = await measured("conv_state", () =>
         withTimeout(this.adapter.readConvState?.(conversationId, prepLeft()) ?? Promise.resolve(null), prepLeft()).catch(() => null),
       );
       if (this.expired(conversationId, messageId)) return;
       const marked = read?.marked ?? null;
       request.context.conv_state = { marked, color: marked === true ? (read?.color ?? null) : null, observed_at: this.now() };
-    }
-    if (this.config.mode === "auto" && !conv.takeover && this.transferExecutable() && typeof request.context.conv_state?.marked === "boolean") {
-      const targets = await measured("transfer_targets", () =>
-        this.adapter.readTransferTargets!(conversationId, prepLeft()).catch(() => [] as TransferTarget[]));
-      if (this.expired(conversationId, messageId)) return;
-      const names = new Set<string>(), ids = new Set<string>();
-      if (targets.length <= 50 && targets.every(t => typeof t.target_id === "string" && t.target_id.length > 0 && t.target_id.length <= 64 &&
-          typeof t.name === "string" && t.name.trim().length > 0 && t.name.length <= 40 && Number.isFinite(t.observed_at) && t.observed_at <= this.now() + 1 && this.now() - t.observed_at <= 30 &&
-          !names.has(t.name) && !ids.has(t.target_id) && !!names.add(t.name) && !!ids.add(t.target_id))) request.context.transfer_targets = targets;
     }
     const images = await measured("images", () => this.latestImages(last));
     if (this.expired(conversationId, messageId)) return;
@@ -873,7 +862,6 @@ export class ShopRuntime {
     if (memoryOnly) this.fullBodies.set(request.event_id, body);
     if (candidates) this.eventOptions.set(request.event_id, candidates.map);
     if (request.context.conv_state) this.eventConvState.set(request.event_id, request.context.conv_state);
-    if (request.context.transfer_targets) this.eventTransferTargets.set(request.event_id, request.context.transfer_targets);
     this.journal.addEvent({
       event_id: request.event_id,
       conversation_id: conversationId,
@@ -1157,10 +1145,6 @@ export class ShopRuntime {
     const d = ev.snapshot?.decision?.transfer;
     if (!d) return "transfer_invalid";
     if (!this.transferExecutable()) return "capability_not_confirmed";
-    if (typeof this.eventConvState.get(ev.event_id)?.marked !== "boolean") return "conv_state_not_retained";
-    if (this.eventConvState.get(ev.event_id)?.marked === true && !d.unmark_policy.allow) return "transfer_blocked_by_mark";
-    const target = this.eventTransferTargets.get(ev.event_id)?.find(t => t.target_id === d.target_id);
-    if (!target || this.now() - target.observed_at > 30) return "transfer_target_unknown";
     return null;
   }
 
@@ -1317,7 +1301,7 @@ export class ShopRuntime {
     try {
       const recheck = () => this.sendBlocker(ev, true) ?? (Date.now() / 1000 >= deadline ? "claim_expiring" : null);
       const call = this.adapter.transferConversation && target ? this.adapter.transferConversation({
-        conversation_id: ev.conversation_id, target_id: target.target_id, allow_unmark: target.unmark_policy.allow,
+        conversation_id: ev.conversation_id, account: target.account, allow_unmark: target.unmark_policy.allow,
         attempt_id: attemptId, deadline, recheck,
         before_unmark: () => {
           if (!target.unmark_policy.allow || recheck()) throw Error("unmark_not_authorized");

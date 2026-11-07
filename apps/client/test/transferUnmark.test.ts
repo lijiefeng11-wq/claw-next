@@ -28,7 +28,7 @@ function harness(scenario = "normal") {
   a.window = page; a.tracker = { status: () => ({ logged_in: true, identity: { platform_shop_id: "mall-1" } }) };
   a.freshActive = async () => "9001";
   a.scanKeepingFresh = async () => ({ items: [{ key: "9001-x", active: true }] });
-  a.formalTransferTargets.set("target", { account: "fictional-main", page, epoch: a.watchEpoch, shop: "mall-1", at: Date.now() });
+  a.starMarked = async () => false;
   a.run = async (script: string) => {
     if (script.includes('"转移失败"')) {
       if (!confirmed && scenario !== "leftover") return null;
@@ -54,7 +54,7 @@ function harness(scenario = "normal") {
     if (script.includes("freshBuyer")) return { items: [{ key: "9001-x", active: true }] };
     throw Error("Unexpected fictional script");
   };
-  const request = (allow = true) => ({ conversation_id: "9001", target_id: "target", allow_unmark: allow,
+  const request = (allow = true) => ({ conversation_id: "9001", account: "fictional-main", allow_unmark: allow,
     before_unmark: () => { intents.push("unmark_and_transfer"); }, attempt_id: "fictional-attempt", deadline: Date.now() / 1000 + 8, recheck: () => blocked });
   return { a, clicks, intents, request };
 }

@@ -68,8 +68,7 @@ export type PageObserved = "marked" | "left_list" | "unchanged" | "unknown";
 /** mark 只有一个步骤；只列已开始的步骤。 */
 export type MarkStep = { step: "mark"; status: ReceiptStatus; color: MarkColor };
 /** 转接（1.3）：能力名、目标与“转接前取消标星”策略。 */
-export const CAP_TRANSFER_CONVERSATION = "transfer_conversation";
-export type TransferTarget = { target_id: string; name: string; observed_at: number };
+export const CAP_TRANSFER_BY_ACCOUNT = "transfer_by_account";
 /** transfer 只有一个步骤；unmarked=null 表示本次没有可靠读到取消标星结果。 */
 export type TransferStep = { step: "transfer"; status: ReceiptStatus; reason?: ConvActionReason };
 export type UnmarkTransferStep = { step: "unmark_and_transfer"; status: ReceiptStatus; unmarked: boolean | null; reason?: ConvActionReason };
@@ -82,6 +81,8 @@ export type ReceiptExtra = { steps?: (MarkStep | TransferStep | UnmarkTransferSt
  */
 export function convActionReason(detail: string | null | undefined): ConvActionReason {
   switch (detail) {
+    case "transfer_blocked_by_mark":
+      return "blocked_by_mark";
     case "conv_state_changed":
     case "conv_state_unavailable":
       return detail;
@@ -125,7 +126,7 @@ export type EventRequest = {
   received_at: number;
   /** 契约 A：仅在本租约确认 reply_deadline 后提交；冻结后不再改变。 */
   remaining_budget_ms?: number;
-  context: { history_complete: boolean; messages: ContextMessage[]; orders?: ContextOrder[]; goods?: GoodsSnapshot[]; send_options?: SendOptions; conv_state?: ConvState; transfer_targets?: TransferTarget[] };
+  context: { history_complete: boolean; messages: ContextMessage[]; orders?: ContextOrder[]; goods?: GoodsSnapshot[]; send_options?: SendOptions; conv_state?: ConvState };
 };
 
 /**
@@ -133,7 +134,7 @@ export type EventRequest = {
  * mark（契约 1.3）不附文字，mark.color 与 policy_version（正整数）只在 mark 时存在。
  * transfer（契约 1.3）不附文字；transfer 只在 transfer 时存在，policy_version 为本事件策略版本。
  */
-export type Decision = { action: Action; text: string; reason: string; expires_at: number; item?: SendItem; mark?: { color: MarkColor }; transfer?: { target_id: string; unmark_policy: { allow: boolean; version: number } }; policy_version?: number };
+export type Decision = { action: Action; text: string; reason: string; expires_at: number; item?: SendItem; mark?: { color: MarkColor }; transfer?: { account: string; unmark_policy: { allow: boolean; version: number } }; policy_version?: number };
 
 export type Delivery = {
   status: DeliveryStatus;
@@ -276,20 +277,21 @@ export function parseLease(value: unknown): Lease {
 const ITEM_TYPES: readonly string[] = ["instruction", "goods_card", "video"];
 
 /**
- * transfer 的严格校验：transfer 与 unmark_policy 为普通对象；target_id 为非空字符串且 ≤64；
+ * transfer 的严格校验：transfer 与 unmark_policy 为普通对象；account 为已去首尾空白的完整账号名，1–40 字；
  * allow 为真布尔；unmark_policy.version 与 policy_version 为相等的正整数。不合格返回 null。
  */
-function transferFields(value: unknown, policyVersion: unknown): { target_id: string; allow: boolean; version: number } | null {
+function transferFields(value: unknown, policyVersion: unknown): { account: string; allow: boolean; version: number } | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const t = value as Record<string, unknown>;
-  if (typeof t.target_id !== "string" || t.target_id.trim().length === 0 || t.target_id.length > 64) return null;
+  if (Object.keys(t).some(k => k !== "account" && k !== "unmark_policy") || typeof t.account !== "string"
+      || !t.account || t.account.length > 40 || t.account !== t.account.trim()) return null;
   const p = t.unmark_policy;
   if (typeof p !== "object" || p === null || Array.isArray(p)) return null;
   const u = p as Record<string, unknown>;
-  if (typeof u.allow !== "boolean") return null;
+  if (Object.keys(u).some(k => k !== "allow" && k !== "version") || typeof u.allow !== "boolean") return null;
   if (typeof u.version !== "number" || !Number.isInteger(u.version) || u.version <= 0) return null;
   if (typeof policyVersion !== "number" || !Number.isInteger(policyVersion) || policyVersion <= 0 || policyVersion !== u.version) return null;
-  return { target_id: t.target_id, allow: u.allow, version: u.version };
+  return { account: t.account, allow: u.allow, version: u.version };
 }
 
 /** 不认识的 action（或格式不对的 send_item / mark / transfer）一律按 none 记录，绝不执行。 */
@@ -312,7 +314,7 @@ function parseDecision(value: unknown): Decision | null {
   }
   if (v.action === "transfer") {
     const t = transferFields(v.transfer, v.policy_version);
-    if (t) return { action: "transfer", text: "", ...base, transfer: { target_id: t.target_id, unmark_policy: { allow: t.allow, version: t.version } }, policy_version: t.version };
+    if (t) return { action: "transfer", text: "", ...base, transfer: { account: t.account, unmark_policy: { allow: t.allow, version: t.version } }, policy_version: t.version };
   }
   return { action: "none", text: "", reason: `unsupported_action:${typeof v.action === "string" ? v.action.slice(0, 32) : "invalid"}`, expires_at: base.expires_at };
 }

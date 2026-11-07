@@ -6,9 +6,8 @@ from backend import conversation_actions as ca
 from backend.store import ApiError, require, validate_settings
 
 
-def context(marked=False, color=None, targets=None):
-    return {"conv_state": {"marked": marked, "color": color, "observed_at": 100},
-            "transfer_targets": targets if targets is not None else [{"target_id": "t1", "name": "虚构客服", "observed_at": 100}]}
+def context(marked=False, color=None):
+    return {"conv_state": {"marked": marked, "color": color, "observed_at": 100}}
 
 
 def resolved(policy, ctx=None, caps=ca.CAPABILITIES):
@@ -43,14 +42,13 @@ class ActionDataTests(unittest.TestCase):
         for change in ({"marked": 0}, {"marked": None, "color": "red"}, {"observed_at": True}, {"observed_at": float("inf")}, {"color": []}, {"extra": "x"}):
             ctx = context();ctx["conv_state"].update(change)
             with self.subTest(change=change), self.assertRaises(ApiError):ca.validate_context(ctx, require)
-        for targets in ([None], [{"target_id": [], "name": "x", "observed_at": 1}], context()["transfer_targets"] * 2, context()["transfer_targets"] * 51):
-            with self.assertRaises(ApiError):ca.validate_context({"transfer_targets": targets}, require)
 
-    def test_only_explicit_policy_and_readable_state_can_resolve(self):
+    def test_explicit_policy_and_negotiated_capability_are_required(self):
         self.assertEqual(ca.READY_CAPABILITIES, ca.CAPABILITIES)
+        for ctx in (context(None), {}):
+            self.assertEqual(resolved(MARK, ctx)["action"], "handoff")
         for policy in (MARK, TRANSFER):
-            for ctx, caps in ((context(None), ca.CAPABILITIES), ({}, ca.CAPABILITIES), (context(), [])):
-                self.assertEqual(resolved(policy, ctx, caps)["action"], "handoff")
+            self.assertEqual(resolved(policy, caps=[])["action"], "handoff")
         self.assertEqual(resolved(MARK)["action"], "mark")
         self.assertEqual(resolved(MARK, context(True, "red"))["action"], "none")
         self.assertEqual(resolved(MARK, context(True, None))["action"], "none")
@@ -66,11 +64,20 @@ class ActionDataTests(unittest.TestCase):
                 self.assertFalse(ca.valid_decision(result, context(marked, color), ca.CAPABILITIES, 3))
         self.assertTrue(ca.valid_decision(result, context(False), ca.CAPABILITIES, 3))
 
-    def test_recipient_requires_one_exact_name(self):
-        target = context()["transfer_targets"][0]
-        for targets in ([], [{**target, "name": "虚构客服乙"}], [target, {**target, "target_id": "t2"}]):
-            self.assertEqual(resolved(TRANSFER, context(targets=targets))["action"], "handoff")
-        self.assertEqual(resolved(TRANSFER)["transfer"]["target_id"], "t1")
+    def test_transfer_uses_saved_account_without_recipient_discovery_or_state(self):
+        for ctx in ({}, context(None), context(True)):
+            result = resolved(TRANSFER, ctx)
+            self.assertEqual(result["action"], "transfer")
+            self.assertEqual(result["transfer"], {"account": "虚构客服", "unmark_policy": {"allow": True, "version": 3}})
+            self.assertTrue(ca.valid_decision(result, ctx, ca.CAPABILITIES, 3))
+        self.assertEqual(resolved(TRANSFER, caps=["transfer_conversation"])["action"], "handoff")
+
+    def test_transfer_rejects_old_ids_and_malformed_accounts(self):
+        result = resolved(TRANSFER)
+        for target in ({"target_id": "t1", "unmark_policy": result["transfer"]["unmark_policy"]},
+                       *({**result["transfer"], "account": value} for value in (None, [], "", " ", " x", "x ", "x" * 41))):
+            with self.subTest(target=target):
+                self.assertFalse(ca.valid_decision({**result, "transfer": target}, {}, ca.CAPABILITIES, 3))
 
     def test_current_version_and_unambiguous_target_are_rechecked(self):
         for policy in (MARK, TRANSFER):
@@ -78,7 +85,7 @@ class ActionDataTests(unittest.TestCase):
             self.assertTrue(ca.valid_decision(result, context(), ca.CAPABILITIES, 3))
             for changed in ({"policy_version": True}, {"policy_version": 2}, {"text": "x"}, {"expires_at": float("inf")}):
                 self.assertFalse(ca.valid_decision({**result, **changed}, context(), ca.CAPABILITIES, 3))
-            self.assertFalse(ca.valid_decision(result, context(None), ca.CAPABILITIES, 3))
+            self.assertEqual(ca.valid_decision(result, context(None), ca.CAPABILITIES, 3), policy["action"] == "transfer")
             self.assertFalse(ca.valid_decision(result, context(), [], 3))
 
 

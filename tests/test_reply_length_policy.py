@@ -92,15 +92,13 @@ class ReplyLengthPolicyTests(unittest.TestCase):
     def test_incomplete_history_does_not_block_saved_business_handoff_policy(self):
         item = self.item()
         item["settings"].update({"version": 7, "fallback": {"unhandled": {"action": "transfer", "account": "虚构客服"}}})
-        item["payload"]["context"].update({"history_complete": False,
-            "conv_state": {"marked": False, "color": None, "observed_at": 1},
-            "transfer_targets": [{"target_id": "fictional-target", "name": "虚构客服", "observed_at": 1}]})
-        item["capabilities"] = ["transfer_conversation"]
+        item["payload"]["context"]["history_complete"] = False
+        item["capabilities"] = ["transfer_by_account"]
         result = {"action": "handoff", "text": "", "reason": "model:primary:需要人工处理的已购订单", "expires_at": 100}
         before = copy.deepcopy(item)
         decided = Store._action_fallback(item, result)
         self.assertEqual(decided["action"], "transfer")
-        self.assertEqual(decided["transfer"]["target_id"], "fictional-target")
+        self.assertEqual(decided["transfer"]["account"], "虚构客服")
         self.assertEqual(item, before)
         item["capabilities"] = []
         self.assertEqual(Store._action_fallback(item, result)["action"], "handoff")

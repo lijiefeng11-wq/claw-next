@@ -29,8 +29,7 @@ class StoreActionTests(unittest.TestCase):
         caps = self.lease["capabilities"] if caps is None else caps
         now = time.time()
         ctx = {"history_complete": True, "messages": [{"id": name, "role": "buyer", "kind": "text", "content": "x", "created_at": now}]}
-        if any(cap in caps for cap in ca.CAPABILITIES):ctx["conv_state"] = {"marked": marked, "color": None, "observed_at": now}
-        if "transfer_conversation" in caps:ctx["transfer_targets"] = [{"target_id": "t1", "name": "虚构客服", "observed_at": now}]
+        if "mark_conversation" in caps:ctx["conv_state"] = {"marked": marked, "color": None, "observed_at": now}
         return {"event_id": name, "conversation_id": "buyer", "message_id": name, "received_at": now,
                 **{k:self.lease[k] for k in ("instance_id", "session_id", "generation")}, "context_revision": revision, "context": ctx, **extra}
 
@@ -59,11 +58,11 @@ class StoreActionTests(unittest.TestCase):
 
     def test_capability_combinations_and_required_fields(self):
         self.store.update_settings("a", {**self.settings, "fallback": {"unhandled": TRANSFER}})
-        for i, caps in enumerate(([], ["mark_conversation"], ["transfer_conversation"], list(ca.CAPABILITIES))):
+        for i, caps in enumerate(([], ["mark_conversation"], ["transfer_by_account"], list(ca.CAPABILITIES))):
             self.lease = self.heartbeat(caps)
             value = self.event("e"+str(i), i+1, caps=caps)
             self.store.enqueue(self.identity, value)
-            if caps:
+            if "mark_conversation" in caps:
                 missing = self.event("missing"+str(i), i+10, caps=caps);del missing["context"]["conv_state"]
                 self.code("conv_state_required", lambda:self.store.enqueue(self.identity, missing))
 
@@ -74,8 +73,8 @@ class StoreActionTests(unittest.TestCase):
         self.store.update_settings("a", {**self.settings, "rules": [], "fallback": {"unhandled": TRANSFER}})
         self.lease = self.heartbeat(ca.CAPABILITIES)
         _, result = self.ready(self.event("other", 2))
-        self.assertEqual(result["action"], "transfer");self.assertEqual(result["transfer"]["target_id"], "t1")
-        self.assertNotIn("虚构客服", str(result));self.assertNotIn("text", result)
+        self.assertEqual(result["action"], "transfer");self.assertEqual(result["transfer"]["account"], "虚构客服")
+        self.assertNotIn("text", result)
 
     def test_unknown_state_does_not_discard_normal_reply(self):
         _, result = self.ready(self.event(marked=None));self.assertEqual(result["action"], "handoff")
@@ -173,9 +172,34 @@ class StoreActionTests(unittest.TestCase):
         self.code("delivery_terminal", self.claim)
         self.assertIsNone(self.store.next_job())
 
-    def test_transfer_discovery_negotiated_only_for_explicit_saved_policy(self):
-        self.assertNotIn("transfer_conversation", self.heartbeat(ca.CAPABILITIES)["capabilities"])
+    def test_transfer_without_discovery_or_state_is_claimable(self):
+        self.store.update_settings("a", {**self.settings, "rules": [], "fallback": {"unhandled": TRANSFER}})
+        self.lease = self.heartbeat([ca.TRANSFER_CAPABILITY])
+        event = self.event()
+        self.assertNotIn("conv_state", event["context"])
+        self.assertNotIn("transfer_targets", event["context"])
+        _, result = self.ready(event)
+        self.assertEqual(result["transfer"]["account"], TRANSFER["account"])
+        self.assertEqual(self.claim()["delivery"]["status"], "claimed")
+
+    def test_legacy_transfer_client_cannot_receive_account_action(self):
+        self.store.update_settings("a", {**self.settings, "rules": [], "fallback": {"unhandled": TRANSFER}})
+        self.lease = self.heartbeat(["transfer_conversation"])
+        self.assertEqual(self.lease["capabilities"], [])
+        _, result = self.ready(self.event())
+        self.assertEqual(result["action"], "handoff")
+        self.code("not_reply", self.claim)
+
+    def test_account_cannot_be_substituted_for_saved_policy(self):
+        self.store.update_settings("a", {**self.settings, "rules": [{"id": "r", "contains": "x", "handling": TRANSFER}]})
+        self.lease = self.heartbeat([ca.TRANSFER_CAPABILITY])
+        self.store.enqueue(self.identity, self.event());job = self.store.next_job();result = decide(job)
+        result["transfer"]["account"] = "另一个虚构账号"
+        self.assertEqual(self.store.finish(job, result)["reason"], "invalid_conversation_action")
+
+    def test_transfer_negotiated_only_for_explicit_saved_policy(self):
+        self.assertNotIn("transfer_by_account", self.heartbeat(ca.CAPABILITIES)["capabilities"])
         self.store.update_settings("a", {**self.settings, "fallback": {"error": {**TRANSFER, "allow_unmark": False}}})
-        self.assertIn("transfer_conversation", self.heartbeat(ca.CAPABILITIES)["capabilities"])
+        self.assertIn("transfer_by_account", self.heartbeat(ca.CAPABILITIES)["capabilities"])
         self.store.update_settings("a", self.settings)
-        self.assertNotIn("transfer_conversation", self.heartbeat(ca.CAPABILITIES)["capabilities"])
+        self.assertNotIn("transfer_by_account", self.heartbeat(ca.CAPABILITIES)["capabilities"])

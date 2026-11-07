@@ -133,7 +133,7 @@ describe("标星：适用范围（claim 之前）", () => {
   }
 
   test("transfer 未声明能力：保留决定但不 claim", async () => {
-    const fake = fakeBackend({ decision: { action: "transfer", transfer: { target_id: "t-1", unmark_policy: { allow: false, version: 3 } }, policy_version: 3, reason: "fallback:unhandled", expires_at: Date.now() / 1000 + 120 } });
+    const fake = fakeBackend({ decision: { action: "transfer", transfer: { account: "fictional-main", unmark_policy: { allow: false, version: 3 } }, policy_version: 3, reason: "fallback:unhandled", expires_at: Date.now() / 1000 + 120 } });
     const h = await shop(fake);
     const ev = await decided(fake, h);
     assert.equal(ev.snapshot?.decision?.action, "transfer");
