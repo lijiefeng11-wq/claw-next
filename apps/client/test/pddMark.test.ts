@@ -176,7 +176,7 @@ describe("决定解析：mark", () => {
     ["缺 policy_version", { action: "mark", mark: { color: "red" } }],
     ["policy_version 为 0", { action: "mark", mark: { color: "red" }, policy_version: 0 }],
     ["policy_version 是小数", { action: "mark", mark: { color: "red" }, policy_version: 1.5 }],
-    ["transfer 策略版本不一致", { action: "transfer", transfer: { target_id: "t-1", unmark_policy: { allow: false, version: 4 } }, policy_version: 3 }],
+    ["transfer 策略版本不一致", { action: "transfer", transfer: { account: "fictional-main", unmark_policy: { allow: false, version: 4 } }, policy_version: 3 }],
   ] as const) {
     test(`${name}：按 none 记录，不执行`, () => {
       const r = snap({ ...d, ...base });

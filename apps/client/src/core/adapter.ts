@@ -1,4 +1,3 @@
-import type { TransferTarget } from "./protocol.js";
 import type { Card, ImageMime, Kind, MarkColor, PageObserved, Role } from "./protocol.js";
 import type { PlatformOrder } from "./pddOrders.js";
 import type { PageHealthView } from "./pageHealth.js";
@@ -99,7 +98,7 @@ export type MarkResult =
   | { status: "not_sent"; reason: string }
   | { status: "unknown"; reason: string; page_observed?: PageObserved };
 
-export type TransferRequest = { conversation_id: string; target_id: string; allow_unmark: boolean; attempt_id: string; deadline: number; recheck: () => string | null; before_unmark?: () => void };
+export type TransferRequest = { conversation_id: string; account: string; allow_unmark: boolean; attempt_id: string; deadline: number; recheck: () => string | null; before_unmark?: () => void };
 export type TransferResult = MarkResult;
 
 export type AdapterEvent =
@@ -139,8 +138,7 @@ export interface PlatformAdapter {
    * 按该请求自己的响应判定。只有成功判据全部满足才返回 confirmed。
    */
   markConversation?(request: MarkRequest): Promise<MarkResult>;
-  /** Read current-account rows only; IDs stay in memory. Resolves after bounded cleanup has released the page. */
-  readTransferTargets?(conversationId: string, timeoutMs: number): Promise<TransferTarget[]>;
+  /** 按后台指定的完整账号名，在执行时打开本会话转接弹窗并唯一匹配接收人。 */
   transferConversation?(request: TransferRequest): Promise<TransferResult>;
   /**
    * 通过平台页面自身按钮发送一项已有内容。只有平台明确成功且聊天记录相对点击前恰好新增一条

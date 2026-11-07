@@ -1,7 +1,9 @@
 """Conversation actions negotiated with explicitly enabled compatible clients."""
 from .orders import unix_seconds
 
-CAPABILITIES = ("mark_conversation", "transfer_conversation")
+TRANSFER_CAPABILITY = "transfer_by_account"
+ACTION_CAPABILITIES = {"mark": "mark_conversation", "transfer": TRANSFER_CAPABILITY}
+CAPABILITIES = tuple(ACTION_CAPABILITIES.values())
 # Older clients and missing explicit saved policies remain inert.
 READY_CAPABILITIES = CAPABILITIES
 COLORS = ("red", "orange", "blue", "green")
@@ -41,15 +43,6 @@ def validate_context(context, require):
         require(state["marked"] is None or type(state["marked"]) is bool, "invalid_conv_state")
         require(state["color"] is None or state["marked"] is True and state["color"] in COLORS, "invalid_conv_state")
         require(unix_seconds(state["observed_at"]), "invalid_conv_state")
-    if "transfer_targets" in context:
-        targets = context["transfer_targets"]
-        require(isinstance(targets, list) and len(targets) <= 50, "invalid_transfer_targets")
-        seen = set()
-        for target in targets:
-            require(isinstance(target, dict) and set(target) == {"target_id", "name", "observed_at"}, "invalid_transfer_target")
-            require(_text(target["target_id"], 64) and target["target_id"] not in seen
-                    and _text(target["name"], 40) and unix_seconds(target["observed_at"]), "invalid_transfer_target")
-            seen.add(target["target_id"])
 
 
 def resolve(policy, context, capabilities, version, reason):
@@ -57,28 +50,26 @@ def resolve(policy, context, capabilities, version, reason):
     legacy = {"action": action if action in ("none", "handoff") else "handoff", "text": "", "reason": reason}
     if action in ("none", "handoff"):
         return legacy
-    state = context.get("conv_state") or {}
-    if type(state.get("marked")) is not bool or action + "_conversation" not in capabilities:
+    if ACTION_CAPABILITIES[action] not in capabilities:
         return legacy
     if action == "mark":
+        state = context.get("conv_state") or {}
+        if type(state.get("marked")) is not bool:
+            return legacy
         if state["marked"] is True:
             return {**legacy, "action": "none"}
         target = {"mark": {"color": policy["color"]}}
     else:
-        matches = [target for target in context.get("transfer_targets", []) if target["name"] == policy["account"]]
-        if len(matches) != 1:
-            return legacy
-        target = {"transfer": {"target_id": matches[0]["target_id"],
+        target = {"transfer": {"account": policy["account"],
                                "unmark_policy": {"allow": policy.get("allow_unmark", False), "version": version}}}
     return {"action": action, **target, "policy_version": version, "reason": reason}
 
 
 def valid_decision(result, context, capabilities, version):
     action = result.get("action")
-    if action not in ("mark", "transfer") or action + "_conversation" not in capabilities:
+    if action not in ("mark", "transfer") or ACTION_CAPABILITIES[action] not in capabilities:
         return False
-    state = context.get("conv_state") or {}
-    if type(state.get("marked")) is not bool or type(result.get("policy_version")) is not int or result["policy_version"] != version:
+    if type(result.get("policy_version")) is not int or result["policy_version"] != version:
         return False
     if (set(result) != {"action", action, "policy_version", "reason", "expires_at"}
             or not _text(result.get("reason"), 600) or not unix_seconds(result.get("expires_at"))):
@@ -86,13 +77,13 @@ def valid_decision(result, context, capabilities, version):
     target = result[action]
     if action == "mark":
         return (isinstance(target, dict) and set(target) == {"color"} and target["color"] in COLORS
-                and state["marked"] is False)
-    if not isinstance(target, dict) or set(target) != {"target_id", "unmark_policy"}:
+                and (context.get("conv_state") or {}).get("marked") is False)
+    if not isinstance(target, dict) or set(target) != {"account", "unmark_policy"}:
         return False
     policy = target["unmark_policy"]
-    return (isinstance(policy, dict) and set(policy) == {"allow", "version"}
-            and type(policy["allow"]) is bool and type(policy["version"]) is int and policy["version"] == version
-            and sum(item["target_id"] == target["target_id"] for item in context.get("transfer_targets", [])) == 1)
+    return (_text(target["account"], 40) and target["account"] == target["account"].strip()
+            and isinstance(policy, dict) and set(policy) == {"allow", "version"}
+            and type(policy["allow"]) is bool and type(policy["version"]) is int and policy["version"] == version)
 
 
 def receipt(action, expected, payload, require):

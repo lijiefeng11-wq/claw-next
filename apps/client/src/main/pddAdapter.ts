@@ -1,6 +1,5 @@
 import { clickSendWithPlaywright } from "./playwrightSend.js";
 import type { TransferRequest, TransferResult } from "../core/adapter.js";
-import type { TransferTarget } from "../core/protocol.js";
 import { session } from "electron";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -951,21 +950,6 @@ export function nextOpenRetryDelay(attempt: number): number {
   return Math.min(OPEN_RETRY_MAX_MS, OPEN_RETRY_BASE_MS * 2 ** (n - 1));
 }
 
-/** 转接弹窗收尾失败的固定分类：只用于日志与虚构测试，不改变发送语义。 */
-export type TransferCleanupReason = "closed" | "page_changed" | "conversation_changed" | "dialog_left" | "popover_left" | "unavailable";
-
-export function classifyTransferCleanup(input: {
-  bound: boolean;
-  conversationMatched: boolean;
-  leftovers: { dialogs: number; popovers: number } | "unavailable" | "script_failed";
-}): TransferCleanupReason {
-  if (!input.bound) return "page_changed";
-  if (!input.conversationMatched) return "conversation_changed";
-  if (input.leftovers === "unavailable" || input.leftovers === "script_failed") return "unavailable";
-  if (input.leftovers.dialogs > 0) return "dialog_left";
-  if (input.leftovers.popovers > 0) return "popover_left";
-  return "closed";
-}
 /** 清理脚本须在提交后这么久内开始执行，每次点击前也核对；过了就不点击（页面忙时排队迟到的旧脚本不改变页面）。 */
 export const POPUP_SWEEP_START_MS = 1500;
 /** 清理脚本这么久仍未结束（页面卡住）：重新加载平台页面；旧文档销毁且已过点击时限后才解除与发送的互斥。 */
@@ -1028,7 +1012,6 @@ export class PddPageAdapter implements PlatformAdapter {
   /** 诊断转移（transferTest）的上下文：seq 为本进程内递增的诊断批次序号；账号名只在内存里比较，不写盘。 */
   private transferProbeCtx: { seq: number; target: string; epoch: number; startedAt: number; attemptAt: number | null } | null = null;
   private transferDiagSeq = 0;
-  private formalTransferTargets = new Map<string, { account: string; page: PlatformPage; epoch: number; shop: string; at: number }>();
   /**
    * 诊断模式下各客服列表类接口（/latitude/assign/*，按路径区分来源）最近一次结果：候选与键值，只在内存里与转移请求的 csid 比较，不写盘。
    * at 为该响应对应请求的发出时间（迟到的响应不重新计时）；candidates/tokens 为 null 表示该来源最近一次无法解析或读取失败。
@@ -2818,96 +2801,17 @@ export class PddPageAdapter implements PlatformAdapter {
     }
   }
 
-  /** Read complete account names from the current shop/conversation; never choose a recipient by position. */
-  async readTransferTargets(conversationId: string, timeoutMs: number): Promise<TransferTarget[]> {
+  async transferConversation(request: TransferRequest): Promise<TransferResult> {
     const page = this.window, epoch = this.watchEpoch, status = this.tracker.status(true);
     const shop = status.identity?.platform_shop_id;
-    if (!page || page.isDestroyed() || !status.logged_in || !shop || this.sending || this.outgoing || this.popupSweep || this.warmRun || timeoutMs < 300) return [];
-    const deadline = Date.now() + Math.min(timeoutMs, 2000);
-    const valid = () => this.window === page && !page.isDestroyed() && this.watchEpoch === epoch && this.tracker.status(true).logged_in && this.tracker.status(true).identity?.platform_shop_id === shop && Date.now() < deadline;
-    const read = <T>(script: string): Promise<T> => Promise.race([
-      this.run<T>(script), sleep(Math.max(1, Math.min(500, deadline - Date.now()))).then(() => { throw Error("transfer_read_timeout"); }),
-    ]);
-    const active = () => Promise.race([this.freshActive(epoch), sleep(500).then(() => null)]);
-    this.sending = true;
-    let opened = false;
-    let targets: TransferTarget[] = [];
-    try {
-      if ((await active()) !== conversationId || !valid()) return [];
-      const cached = [...this.formalTransferTargets].filter(([, t]) => t.page === page && t.epoch === epoch && t.shop === shop && Date.now() - t.at < 30000);
-      if (cached.length) return cached.map(([target_id, t]) => ({ target_id, name: t.account, observed_at: t.at / 1000 }));
-      const left = await read<{ dialogs: number; popovers: number } | string>(TRANSFER_LEFTOVERS).catch(() => "script_failed");
-      if (typeof left === "string" || left.dialogs || left.popovers || !valid()) return [];
-      const pt = await read<Point | string>(textTargetScript("转移会话", ".chat-list, li.chat-item, .el-dialog")).catch(() => "script_failed");
-      if (typeof pt === "string" || !valid()) return [];
-      const click = await dispatchPageClick(page.webContents, pt, () => valid() ? null : "page_changed");
-      if (click.status === "not_sent") return [];
-      opened = true;
-      let rows: TransferRow[] | string = "dialog_missing";
-      while (valid() && (typeof rows === "string" || rows.length === 0)) {
-        await sleep(100);
-        rows = await read<TransferRow[] | string>(FORMAL_TRANSFER_ROWS).catch(() => "script_failed");
-      }
-      if (!valid() || (await active()) !== conversationId || !valid() || typeof rows === "string" || rows.length > 50) return [];
-      const names = rows.map(row => row.cells[0]);
-      if (names.some(n => typeof n !== "string" || !n || n !== n.trim() || n.length > 40) || new Set(names).size !== names.length || rows.some(row => !row.button)) return [];
-      const at = Date.now();
-      targets = names.map(name => {
-        const id = crypto.createHash("sha256").update(JSON.stringify([this.shopId, shop, epoch, name])).digest("hex").slice(0, 32);
-        return { target_id: id, name, observed_at: at / 1000 };
-      });
-    } finally {
-      let cleaning = true;
-      let timer: NodeJS.Timeout | undefined;
-      try {
-        if (opened) {
-          const owns = () => cleaning && this.window === page && !page.isDestroyed() && this.watchEpoch === epoch &&
-            this.tracker.status(true).logged_in && this.tracker.status(true).identity?.platform_shop_id === shop;
-          const same = async () => owns() && (await Promise.race([active(), sleep(150).then(() => null)])) === conversationId && owns();
-          const left = () => Promise.race([this.run<{ dialogs: number; popovers: number } | string>(TRANSFER_LEFTOVERS), sleep(150).then(() => "unavailable" as const)]);
-          const cleanup = async (): Promise<TransferCleanupReason> => {
-            if (!owns()) return "page_changed";
-            await Promise.race([this.run<string>(transferDialogBlankScript(conversationId, Date.now() + 150)), sleep(150).then(() => "unavailable")]).catch(() => "script_failed");
-            const bound = owns();
-            if (!bound) return "page_changed";
-            await sleep(50);
-            const remaining = await left();
-            const matched = await same();
-            return classifyTransferCleanup({ bound, conversationMatched: matched, leftovers: typeof remaining === "string" ? "unavailable" : remaining });
-          };
-          const outcome = await Promise.race([cleanup().catch(() => "unavailable" as const), new Promise<TransferCleanupReason>(resolve => { timer = setTimeout(() => resolve("unavailable"), 900); })]);
-          if (outcome !== "closed") {
-            targets = [];
-            // 只记录固定分类、计数与绑定布尔；不输出会话、买家或页面内容。
-            const counts = await Promise.race([this.run<{ dialogs: number; popovers: number } | string>(TRANSFER_LEFTOVERS), sleep(120).then(() => "unavailable" as const)]).catch(() => "unavailable" as const);
-            const dialogs = typeof counts === "string" ? -1 : counts.dialogs;
-            const popovers = typeof counts === "string" ? -1 : counts.popovers;
-            const bound = this.window === page && !page.isDestroyed() && this.watchEpoch === epoch;
-            console.log(`[${this.shopId}] transfer target discovery cleanup=unconfirmed reason=${outcome} dialogs=${dialogs} popovers=${popovers} bound=${bound ? 1 : 0}`);
-          }
-        }
-      } finally {
-        cleaning = false;
-        if (timer) clearTimeout(timer);
-        this.sending = false;
-      }
-    }
-    const now = Date.now();
-    for (const [id, target] of this.formalTransferTargets) if (now - target.at > 30000 || target.epoch !== epoch) this.formalTransferTargets.delete(id);
-    for (const target of targets) this.formalTransferTargets.set(target.target_id, { account: target.name, page, epoch, shop, at: target.observed_at * 1000 });
-    return targets;
-  }
-
-  async transferConversation(request: TransferRequest): Promise<TransferResult> {
-    const target = this.formalTransferTargets.get(request.target_id);
-    if (!target || (request.allow_unmark && !request.before_unmark) || Date.now() - target.at > 30000) return { status: "not_sent", reason: "transfer_target_unknown" };
-    const { page, epoch, shop, account } = target;
+    if (!page || page.isDestroyed() || !status.logged_in || !shop) return { status: "not_sent", reason: "platform_logged_out" };
+    if (request.allow_unmark && !request.before_unmark) return { status: "not_sent", reason: "unmark_not_authorized" };
+    do await this.yieldWarm(); while (this.popupSweep || this.warmRun);
     if (this.sending || this.outgoing || this.markWatch) return { status: "not_sent", reason: "pdd_send_busy" };
     const watch = newMarkWatch(request.conversation_id, 2, epoch);
     let started = false;
     const checkPage = () => {
       if (watch.invalid) return watch.invalid;
-      if (Date.now() - target.at > 30000) return watch.invalid = "transfer_target_expired";
       if (this.window !== page || page.isDestroyed() || this.watchEpoch !== epoch) return watch.invalid = "conv_state_changed";
       const status = this.tracker.status(true);
       if (!status.logged_in || status.identity?.platform_shop_id !== shop) return watch.invalid = "platform_changed";
@@ -2917,16 +2821,22 @@ export class PddPageAdapter implements PlatformAdapter {
     this.markWatch = watch; this.markPage = page; this.markCheck = check;
     const click = async (pt: Point, action: boolean, beforePress?: () => void) => {
       watch.expected = ["mouseDown", "mouseUp"];
-      try { return await dispatchPageClick(page.webContents, pt, action ? check : checkPage, action ? () => { beforePress?.(); started = true; } : undefined); }
+      try { return await dispatchPageClick(page.webContents, pt, check, action ? () => { beforePress?.(); started = true; } : undefined); }
       finally { watch.expected = []; }
     };
     try {
-      const result = await this.performTransfer(account, true, this.convTokenFor(request.conversation_id), request.deadline * 1000, request.allow_unmark,
+      const blocked = check();
+      if (blocked) return { status: "not_sent", reason: blocked };
+      const result = await this.performTransfer(request.account, true, this.convTokenFor(request.conversation_id), request.deadline * 1000, request.allow_unmark,
         { check, click, unmark: pt => click(pt, true, request.before_unmark) });
       // Without positive request-origin binding, all attempted transfers remain unknown.
-      return started ? { status: "unknown", reason: "transfer_binding_unproven", page_observed: result.includes("left_list_observed") ? "left_list" : "unknown" } : { status: "not_sent", reason: "not_started" };
+      if (started) return { status: "unknown", reason: "transfer_binding_unproven", page_observed: result.includes("left_list_observed") ? "left_list" : "unknown" };
+      const detail = result.startsWith("not_executed:") ? result.slice("not_executed:".length) : "not_started";
+      const reason = detail.startsWith("transfer_") || detail.startsWith("conv_state_") ? detail : "transfer_" + detail;
+      console.log(`[${this.shopId}] transfer not_started reason=${reason}`);
+      return { status: "not_sent", reason };
     } catch {
-      return started ? { status: "unknown", reason: "transfer_exception_or_timeout" } : { status: "not_sent", reason: "not_started" };
+      return started ? { status: "unknown", reason: "transfer_exception_or_timeout" } : { status: "not_sent", reason: "transfer_read_failed" };
     } finally {
       watch.closed = true; this.markWatch = null; this.markPage = null; this.markCheck = null;
     }
@@ -3016,6 +2926,13 @@ export class PddPageAdapter implements PlatformAdapter {
       // 这次扫描读到的买家须与请求携带的对话令牌一致，之后的页面快照按这个买家核对。
       if (this.convTokenFor(uid) !== conv) return "not_executed:conversation_mismatch";
       buyer = uid;
+      if (hooks) {
+        const marked = await Promise.race([
+          this.starMarked(uid, page, epoch), sleep(Math.max(1, Math.min(500, exp - Date.now()))).then(() => null),
+        ]).catch(() => null);
+        if (marked === null) return "not_executed:conv_state_unavailable";
+        if (marked && !allowUnfavorite) return "not_executed:transfer_blocked_by_mark";
+      }
       if (hooks && await read(transferUnmarkScript(uid)).catch(() => "script_failed") !== null) return "not_executed:leftover_failure";
       // 上次留下的对话框或确认气泡还开着时，点“转移会话”可能只是关掉气泡；不在这种状态下开始。
       const left = await read<{ dialogs: number; popovers: number } | string>(TRANSFER_LEFTOVERS).catch(() => "script_failed");
@@ -3033,19 +2950,21 @@ export class PddPageAdapter implements PlatformAdapter {
       opened = true;
       if (openClick.status === "unknown") log({ phase: "open_click", result: "unknown", reason: openClick.reason });
       let rows: TransferRow[] | string = "dialog_missing";
-      for (let i = 0; i < 10 && (typeof rows === "string" || !rows.length); i++) {
+      for (let i = 0; i < 10 && Date.now() < exp && (typeof rows === "string" || !rows.length); i++) {
         await sleep(300);
         rows = await read<TransferRow[] | string>(hooks ? FORMAL_TRANSFER_ROWS : TRANSFER_ROWS).catch(() => "script_failed");
       }
+      if (Date.now() >= exp) return "not_executed:expired";
       if (typeof rows === "string") return `not_executed:${rows}`;
       // 只认第一列（客服名）与用户指定名称完全相同；备注、状态等其他列命中不算。
       const matches = rows.filter((r) => r.cells[0] === target);
       log({ phase: "rows", rows: rows.length, matches: matches.length });
-      if (matches.length !== 1 || !matches[0].button) return `not_executed:target_${matches.length ? "not_unique_or_no_button" : "missing"}`;
+      if (matches.length !== 1) return `not_executed:target_${matches.length ? "ambiguous" : "missing"}`;
+      if (!matches[0].button) return "not_executed:target_button_missing";
       // 对话框打开有动画：连续两次（间隔 300ms）读到同一位置才算稳定，否则不点。
       let btn: Point | string = await read<Point | string>(transferTargetScript(target, uid)).catch(() => "script_failed");
       let stable = false;
-      for (let i = 0; i < 6 && typeof btn !== "string" && !stable; i++) {
+      for (let i = 0; i < 6 && Date.now() < exp && typeof btn !== "string" && !stable; i++) {
         await sleep(300);
         const next = await read<Point | string>(transferTargetScript(target, uid)).catch(() => "script_failed");
         stable = typeof next !== "string" && Math.abs(next.x - btn.x) <= 1 && Math.abs(next.y - btn.y) <= 1;

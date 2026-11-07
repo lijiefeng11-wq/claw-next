@@ -349,11 +349,10 @@ class Store:
             lease = {"shop_id": identity["shop_id"], "client_id": identity["client_id"], "instance_id": p["instance_id"], "session_id": p["session_id"], "generation": gen, "expires_at": now + 60}
             lease["capabilities"] = [cap for cap in (senditems.CAPABILITY, deadlines.CAPABILITY, goods_snapshot.CAPABILITY, "product_knowledge",
                                                     *conversation_actions.READY_CAPABILITIES) if cap in caps]
-            # Do not open the transfer dialog on ordinary replies when no saved policy uses it.
             settings = self._settings(identity["shop_id"])
             policies = [rule.get("handling", {}) for rule in settings["rules"]] + list(settings.get("fallback", {}).values())
-            if "transfer_conversation" in lease["capabilities"] and not any(policy.get("action") == "transfer" for policy in policies):
-                lease["capabilities"].remove("transfer_conversation")
+            if conversation_actions.TRANSFER_CAPABILITY in lease["capabilities"] and not any(policy.get("action") == "transfer" for policy in policies):
+                lease["capabilities"].remove(conversation_actions.TRANSFER_CAPABILITY)
             self.db.execute("INSERT OR REPLACE INTO leases VALUES (?,?)", (identity["shop_id"], json.dumps(lease)))
             self._resolve_recovery(identity["shop_id"], lease, now)
             return lease
@@ -614,13 +613,10 @@ class Store:
             lease = self._check_lease(identity, p)
             caps = lease.get("capabilities", [])
             has_mark = "mark_conversation" in caps
-            has_transfer = "transfer_conversation" in caps
             if "conv_state" in p["context"]:
-                require(has_mark or has_transfer, "capability_not_confirmed")
-            if has_mark or has_transfer:
+                require(has_mark, "capability_not_confirmed")
+            if has_mark:
                 require("conv_state" in p["context"], "conv_state_required")
-            if "transfer_targets" in p["context"]:
-                require(has_transfer, "capability_not_confirmed")
             if "goods" in p["context"] or any("items" in order for order in p["context"].get("orders", [])):
                 require(goods_snapshot.CAPABILITY in lease.get("capabilities", []), "capability_not_confirmed")
             if any(g.get("product_key") for g in p["context"].get("goods", [])) or any((m.get("card") or {}).get("product_key") for m in p["context"]["messages"]):

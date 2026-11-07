@@ -14,8 +14,7 @@ def job(caps=ca.CAPABILITIES):
     now=time.time()
     return {"payload":{"received_at":now,"context":{"history_complete":True,
             "messages":[{"id":"fake","role":"buyer","kind":"text","content":"请帮我核对","created_at":now}],
-            "conv_state":{"marked":False,"color":None,"observed_at":now},
-            "transfer_targets":[{"target_id":"opaque-fake","name":"虚构专用账号","observed_at":now}]}},
+            "conv_state":{"marked":False,"color":None,"observed_at":now}}},
             "settings":{"enabled":True,"mode":"hybrid","version":3,"system_prompt":"虚构政策", "rules":[
                 {"id":"r","contains":"维修","description":"需要人工协助核对", "handling":{"action":"transfer","account":"虚构专用账号","allow_unmark":False}}]},
             "capabilities":list(caps)}
@@ -29,7 +28,7 @@ class EngineActionTests(unittest.TestCase):
         with patch('backend.engine._post',return_value=output({'rule_id':'r'})) as post:
             result=decide(job(),CONFIG)
         self.assertEqual(result['action'],'transfer')
-        self.assertEqual(result['transfer'],{'target_id':'opaque-fake','unmark_policy':{'allow':False,'version':3}})
+        self.assertEqual(result['transfer'],{'account':'虚构专用账号','unmark_policy':{'allow':False,'version':3}})
         self.assertNotIn('text',result)
         request=json.dumps(post.call_args.args[1],ensure_ascii=False)
         for private in ('transfer_targets','conv_state','虚构专用账号','opaque-fake','allow_unmark'):
