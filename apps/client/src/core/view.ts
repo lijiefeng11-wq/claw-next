@@ -245,7 +245,7 @@ function markStatus(ev: EventRecord, color: MarkColor | undefined): MessageStatu
 
 function transferStatus(ev: EventRecord): MessageStatus {
   const attempt = ev.attempt;
-  if (attempt?.phase === "sent") return { label: "已转人工", tone: "ok", reason: "平台已确认" };
+  if (attempt?.phase === "sent") return { label: "转接成功", tone: "ok", reason: "会话已转交，处理完成" };
   if (attempt?.phase === "unknown" || ev.snapshot?.delivery.status === "unknown") return { label: "转接结果待核查", tone: "error", reason: "请到平台核对接收账号，不会重试。" };
   if (attempt && ["not_sent", "aborted_before_send", "claim_failed"].includes(attempt.phase)) return { label: "未转接", tone: "warn", reason: reasonText(attempt.detail) };
   if (attempt) return { label: "转接中", tone: "wait", reason: "" };

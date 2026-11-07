@@ -5,7 +5,7 @@
  * 覆盖：inspect 只打开对话框和确认气泡、点取消并关闭，不点确认；execute 只点唯一匹配行的确认，点击前写尝试记录；
  * 目标不唯一/缺失时不点确认；无已打开对话、非诊断模式不执行；会话列表每行自带的“转移会话”按钮不点；
  * 已收藏会话被平台拒绝时，请求允许才点一次“取消收藏并转移”，默认点“暂不转移”并返回需确认；
- * 会话离开非空列表只记观察（业务 unknown），临时空列表不算；日志不含客服名；
+ * 确认转接后会话离开非空列表即完成，临时空列表不算；日志不含客服名；
  * 目标行在表格滚动区外时先滚动到可见、核对点击点确实落在该按钮上；
  * 反例：备注列含目标名、包含关系、同名、点行后重排、点行后弹出别的客服的气泡、按钮未关联气泡、
  * 别的气泡的同名按钮盖住目标确认按钮（另有页面别处同名按钮不遮挡的控制例）、
@@ -151,7 +151,7 @@ app.whenReady().then(async () => {
       const first = await adapter.transferTest(T, false, conv, Date.now() + 60_000);
       const second = await adapter.transferTest(T, true, conv, Date.now() + 60_000);
       const clicks = await wc.executeJavaScript("window.clicks.slice()");
-      check("先 inspect 后真实转移（同一页面）：不因残留拒绝，只确认目标一次", first.startsWith("inspected:") && second === "unknown:left_list_observed" && JSON.stringify(clicks) === `["open","row:${T}","blank","open","row:${T}","ok:${T}"]`, { first, second, clicks });
+      check("先 inspect 后真实转移（同一页面）：不因残留拒绝，只确认目标一次", first.startsWith("inspected:") && second === "confirmed:left_list_observed" && JSON.stringify(clicks) === `["open","row:${T}","blank","open","row:${T}","ok:${T}"]`, { first, second, clicks });
     }
     {
       const { r, clicks, log } = await run(page(true, ["虚构客服A", T]), { confirm: false, before: noCancel + "; document.getElementById('x').remove()" });
@@ -165,7 +165,7 @@ app.whenReady().then(async () => {
     }
     {
       const { r, clicks, log, fresh } = await run(page(true, ["虚构客服A", T]));
-      check("execute：只确认名称列精确匹配的行；离开列表只记观察，业务 unknown", r === "unknown:left_list_observed" && JSON.stringify(clicks) === `["open","row:${T}","ok:${T}"]`, { r, clicks });
+      check("execute：只确认名称列精确匹配的行；确认后离开非空列表即转接成功", r === "confirmed:left_list_observed" && JSON.stringify(clicks) === `["open","row:${T}","ok:${T}"]`, { r, clicks });
       check("执行期间的扫描不吞掉新买家消息标记", fresh === true, fresh);
       const ai = log.findIndex((l) => l.phase === "attempt");
       check("execute：确认前写尝试记录，日志不含客服名", ai >= 0 && log[ai + 1]?.observed === "left_list" && !JSON.stringify(log).includes(T), log);
@@ -176,7 +176,7 @@ app.whenReady().then(async () => {
     }
     {
       const { r, clicks, log } = await run(page(true, [T], true), { allow: true });
-      check("已收藏且请求允许取消收藏：点一次“取消收藏并转移”", r === "unknown:left_list_observed,unfavorited" && JSON.stringify(clicks) === `["open","row:${T}","ok:${T}","unfav"]`, { r, clicks });
+      check("已收藏且请求允许取消收藏：点一次“取消收藏并转移”", r === "confirmed:left_list_observed,unfavorited" && JSON.stringify(clicks) === `["open","row:${T}","ok:${T}","unfav"]`, { r, clicks });
       check("已收藏：记录取消收藏步骤", log.some((l) => l.phase === "unfavorite_and_transfer"), log);
     }
     {
@@ -206,7 +206,7 @@ app.whenReady().then(async () => {
     {
       const fillers = Array.from({ length: 12 }, (_, i) => "虚构客服" + i);
       const { r, clicks } = await run(page(true, [...fillers, T]));
-      check("目标行在表格滚动区外：先滚动到可见再点，仍只确认目标", r === "unknown:left_list_observed" && JSON.stringify(clicks) === `["open","row:${T}","ok:${T}"]`, { r, clicks });
+      check("目标行在表格滚动区外：先滚动到可见再点，仍只确认目标", r === "confirmed:left_list_observed" && JSON.stringify(clicks) === `["open","row:${T}","ok:${T}"]`, { r, clicks });
     }
     {
       const { r, clicks } = await run(page(true, ["虚构客服A", T]), { before: "window.hijackOnRow = true" });
@@ -222,7 +222,7 @@ app.whenReady().then(async () => {
     }
     {
       const { r, clicks } = await run(page(true, ["虚构客服A", T]), { before: "window.decoyOnRow = true" });
-      check("页面别处另有同名按钮但没有遮挡：照常只确认目标", r === "unknown:left_list_observed" && JSON.stringify(clicks) === `["open","row:${T}","ok:${T}"]`, { r, clicks });
+      check("页面别处另有同名按钮但没有遮挡：照常只确认目标", r === "confirmed:left_list_observed" && JSON.stringify(clicks) === `["open","row:${T}","ok:${T}"]`, { r, clicks });
     }
     {
       const { wc } = await adapterFor(win, page(true, ["虚构客服A", T]));
@@ -252,7 +252,7 @@ app.whenReady().then(async () => {
     }
     {
       const { r, clicks, log } = await run(page(true, ["虚构客服A", T]), { before: "window.blockOnOpen = 1500" });
-      check("打开对话框点击回执不确定但对话框已打开：不补点、按页面观察继续，仍只确认目标", r === "unknown:left_list_observed" && JSON.stringify(clicks) === `["open","row:${T}","ok:${T}"]`, { r, clicks });
+      check("打开对话框点击回执不确定但对话框已打开：不补点、按页面观察继续，仍只确认目标", r === "confirmed:left_list_observed" && JSON.stringify(clicks) === `["open","row:${T}","ok:${T}"]`, { r, clicks });
       check("打开对话框点击回执不确定：写 open_click/unknown 记录，日志不含客服名", log.some((l) => l.phase === "open_click" && l.result === "unknown" && typeof l.reason === "string") && !JSON.stringify(log).includes("虚构客服A") && !JSON.stringify(log).includes(T), log);
     }
     {

@@ -56,7 +56,7 @@ app.whenReady().then(async () => {
       if (process.env.CLAW_NEXT_TRANSFER_SHOT && !header) fs.writeFileSync(process.env.CLAW_NEXT_TRANSFER_SHOT, (await wc.capturePage()).toPNG());
       const matched = await a.transferConversation(request('fictional-main'));
       const after = await wc.executeJavaScript('({opens,sends,rows,transfers,escapes})');
-      assert.equal(matched.status, 'unknown'); assert.equal(matched.reason, 'transfer_binding_unproven');
+      assert.equal(matched.status, 'confirmed'); assert.equal(matched.page_observed, 'left_list');
       assert.deepEqual(after, { opens: 2, sends: 2, rows: 1, transfers: 1, escapes: 0 });
       assert.equal(a.sending, false);
       cases.push({ header_close: header, ordinary, missing, before_match: beforeMatch, matched, after });
