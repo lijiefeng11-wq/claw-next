@@ -10,7 +10,7 @@ const OPEN = { x: 100, y: 100 }, ROW = { x: 300, y: 200 }, CONFIRM = { x: 400, y
 function harness(scenario = "normal") {
   const a = new PddPageAdapter("fictional", "fictional") as any;
   const clicks: string[] = [], intents: string[] = [];
-  let confirmed = false, epochChanged = false, blocked: string | null = null;
+  let confirmed = false, transferred = false, epochChanged = false, blocked: string | null = null;
   const page = { isDestroyed: () => false, webContents: { isDestroyed: () => false, debugger: { isAttached: () => true, sendCommand: (_method: string, p: any): Promise<unknown> => {
     if (p.type !== "mousePressed") return Promise.resolve({});
     const kind = p.x === OPEN.x ? "open" : p.x === ROW.x ? "row" : p.x === CONFIRM.x ? "confirm" : p.x === KEEP.x ? "keep" : "unmark";
@@ -22,6 +22,14 @@ function harness(scenario = "normal") {
       if (scenario === "sync_throw") throw Error("fictional-command-threw");
       if (scenario === "reject") return Promise.reject(Error("fictional-command-rejected"));
       if (scenario === "hang") return new Promise(() => {});
+      if (["native_request", "wrong_request", "duplicate_request", "wrong_page"].includes(scenario)) {
+        const dbg = { sendCommand: async () => ({}) };
+        const params = { requestId: "fictional-unmark", request: { postData: JSON.stringify({ data: { uid: scenario === "wrong_request" ? "9002" : "9001" } }) } };
+        a.onMarkPaused(dbg, params, "unmark", scenario === "wrong_page" ? {} : page);
+        if (scenario === "duplicate_request") a.onMarkPaused(dbg, params, "unmark", page);
+      }
+      confirmed = false;
+      transferred = scenario !== "no_departure";
     }
     return Promise.resolve({});
   } } } };
@@ -51,7 +59,7 @@ function harness(scenario = "normal") {
     if (script.includes("aria-describedby")) return script.includes("const check = null") ? [{ text: "无原因直接转移", ...CONFIRM }] : "ok";
     if (script.includes("target_button_not_unique")) return ROW;
     if (script.includes('"转移会话"')) return OPEN;
-    if (script.includes("freshBuyer")) return { items: [{ key: "9001-x", active: true }] };
+    if (script.includes("freshBuyer")) return { items: [{ key: transferred ? "9002-x" : "9001-x", active: !transferred }] };
     throw Error("Unexpected fictional script");
   };
   const request = (allow = true) => ({ conversation_id: "9001", account: "fictional-main", allow_unmark: allow,
@@ -59,13 +67,16 @@ function harness(scenario = "normal") {
   return { a, clicks, intents, request };
 }
 
-for (const scenario of ["normal", "sync_throw", "reject", "hang"]) {
+for (const scenario of ["normal", "native_request", "wrong_request", "duplicate_request", "wrong_page", "sync_throw", "reject", "hang"]) {
   test(`${scenario}: actual formal helper tries the native combined button once, records intent first and releases busy`, async () => {
     const h = harness(scenario), start = Date.now();
     const result = await h.a.transferConversation(h.request());
-    assert.equal(result.status, "unknown"); assert.equal(result.reason, "transfer_binding_unproven");
+    const success = scenario === "normal" || scenario === "native_request";
+    assert.equal(result.status, success ? "confirmed" : "unknown");
+    if (success) assert.equal(result.unmarked, true);
+    else assert.equal(result.reason, "transfer_binding_unproven");
     assert.deepEqual(h.clicks, ["open", "row", "confirm", "unmark"]); assert.equal(h.intents.length, 1);
-    assert.equal(h.a.sending, false); assert.equal(h.a.markWatch, null);
+    assert.equal(h.a.sending, false); assert.equal(h.a.markWatch, null); assert.equal(h.a.transferUnmarkWatch, null);
     assert(Date.now() - start < 4000); await new Promise(resolve => setTimeout(resolve, 40));
     assert.equal(h.clicks.filter(c => c === "unmark").length, 1);
   });
@@ -78,6 +89,14 @@ for (const scenario of ["ambiguous", "covered", "switch", "input", "lease", "dea
     assert(!h.clicks.includes("unmark")); assert.equal(h.a.sending, false);
   });
 }
+
+test("combined button dispatched without observed departure remains unknown and is not clicked twice", async () => {
+  const h = harness("no_departure");
+  const result = await h.a.transferConversation({ ...h.request(), deadline: Date.now() / 1000 + 3 });
+  assert.equal(result.status, "unknown");
+  assert.equal(h.clicks.filter(c => c === "unmark").length, 1);
+  assert.equal(h.intents.length, 1);
+});
 
 test("permission off preserves favorite, while a failure box left from another attempt prevents all clicks", async () => {
   const off = harness(); assert.equal((await off.a.transferConversation(off.request(false))).status, "unknown");

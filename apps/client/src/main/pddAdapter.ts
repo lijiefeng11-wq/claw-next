@@ -1007,6 +1007,8 @@ export class PddPageAdapter implements PlatformAdapter {
   });
   /** 标星进行中的守护记录与点击窗口（仅内存，见 pddMark.ts）。 */
   private markWatch: MarkWatch | null = null;
+  /** 本次组合按钮已派发，等待其同页、同买家的第一条取消收藏请求。 */
+  private transferUnmarkWatch: MarkWatch | null = null;
   /** 标星进行中：页面与登录归属是否仍是开始时那一个；失效返回原因。 */
   private markCheck: (() => string | null) | null = null;
   /** 诊断转移（transferTest）的上下文：seq 为本进程内递增的诊断批次序号；账号名只在内存里比较，不写盘。 */
@@ -1325,7 +1327,14 @@ export class PddPageAdapter implements PlatformAdapter {
     const w = this.markWatch;
     if (!w || !w.open || w.closed) {
       // 点击前（守护期间）出现的请求照常放行，但本次放弃点击（契约“来源绑定·点击前静默”）。
-      if (w && !w.closed) w.before += 1;
+      if (w && !w.closed) {
+        const body = jsonOrNull(params.request?.postData);
+        const data = body && typeof body === "object" && "data" in body ? body.data : null;
+        const expectedUnmark = kind === "unmark" && this.transferUnmarkWatch === w && source === this.markPage
+          && w.epoch === this.watchEpoch && data && typeof data === "object" && "uid" in data && data.uid === w.buyer;
+        if (expectedUnmark) this.transferUnmarkWatch = null;
+        else w.before += 1;
+      }
       void dbg.sendCommand("Fetch.continueRequest", { requestId: params.requestId }).catch(() => undefined);
       return;
     }
@@ -2821,7 +2830,13 @@ export class PddPageAdapter implements PlatformAdapter {
     this.markWatch = watch; this.markPage = page; this.markCheck = check;
     const click = async (pt: Point, action: boolean, beforePress?: () => void) => {
       watch.expected = ["mouseDown", "mouseUp"];
-      try { return await dispatchPageClick(page.webContents, pt, check, action ? () => { beforePress?.(); started = true; } : undefined); }
+      try {
+        return await dispatchPageClick(page.webContents, pt, check, action ? () => {
+          beforePress?.();
+          if (beforePress) this.transferUnmarkWatch = watch;
+          started = true;
+        } : undefined);
+      }
       finally { watch.expected = []; }
     };
     try {
@@ -2829,7 +2844,11 @@ export class PddPageAdapter implements PlatformAdapter {
       if (blocked) return { status: "not_sent", reason: blocked };
       const result = await this.performTransfer(request.account, true, this.convTokenFor(request.conversation_id), request.deadline * 1000, request.allow_unmark,
         { check, click, unmark: pt => click(pt, true, request.before_unmark) });
-      // Without positive request-origin binding, all attempted transfers remain unknown.
+      const completed = result === "confirmed:left_list_observed" || result === "confirmed:left_list_observed,unfavorited";
+      const completionBlocker = completed ? check() : null;
+      if (started && completed && (!completionBlocker || completionBlocker === "reply_deadline_exceeded")) {
+        return { status: "confirmed", page_observed: "left_list", ...(result.endsWith(",unfavorited") ? { unmarked: true as const } : {}) };
+      }
       if (started) return { status: "unknown", reason: "transfer_binding_unproven", page_observed: result.includes("left_list_observed") ? "left_list" : "unknown" };
       const detail = result.startsWith("not_executed:") ? result.slice("not_executed:".length) : "not_started";
       const reason = detail.startsWith("transfer_") || detail.startsWith("conv_state_") ? detail : "transfer_" + detail;
@@ -2838,7 +2857,7 @@ export class PddPageAdapter implements PlatformAdapter {
     } catch {
       return started ? { status: "unknown", reason: "transfer_exception_or_timeout" } : { status: "not_sent", reason: "transfer_read_failed" };
     } finally {
-      watch.closed = true; this.markWatch = null; this.markPage = null; this.markCheck = null;
+      watch.closed = true; this.markWatch = null; this.markPage = null; this.markCheck = null; this.transferUnmarkWatch = null;
     }
   }
 
@@ -3018,7 +3037,7 @@ export class PddPageAdapter implements PlatformAdapter {
       }
       opened = false;
       popoverMaybe = false;
-      return await this.settleTransfer(uid, page, epoch, same, gate, allowUnfavorite, log, hooks ? read : undefined, hooks);
+      return await this.settleTransfer(uid, page, epoch, exp, same, gate, allowUnfavorite, log, hooks ? read : undefined, hooks);
     } finally {
       // 收尾出错不得让本适配器一直处于忙碌：无论收尾结果如何都释放 sending。
       try {
@@ -3044,18 +3063,25 @@ export class PddPageAdapter implements PlatformAdapter {
 
   /**
    * 点了转移后观察页面：平台提示“已收藏的会话不可转移”时，allowUnfavorite 才点一次“取消收藏并转移”，
-   * 否则点“暂不转移收藏会话”（保持原状）并返回需确认。会话离开非空列表只记为观察结果，业务上仍是 unknown
-   * （没有平台回执与目标关联）；其他失败对话框记为页面失败。不重试。
+   * 否则点“暂不转移收藏会话”（保持原状）并返回需确认。
+   * 确认转接后，在原页面、店铺和期限内观察到会话离开非空列表即成功；未确认完成则不重试。
    */
-  private async settleTransfer(uid: string, page: PlatformPage, epoch: number, same: () => Promise<boolean>, gate: () => Promise<string | null>, allowUnfavorite: boolean, log: (rec: Record<string, unknown>) => void,
+  private async settleTransfer(uid: string, page: PlatformPage, epoch: number, expiresAt: number, same: () => Promise<boolean>, gate: () => Promise<string | null>, allowUnfavorite: boolean, log: (rec: Record<string, unknown>) => void,
     read?: <T>(script: string) => Promise<T>, hooks?: TransferHooks): Promise<string> {
+    const shop = this.tracker.status(true).identity?.platform_shop_id;
+    const valid = () => this.window === page && !page.isDestroyed() && this.watchEpoch === epoch && Date.now() < expiresAt
+      && this.tracker.status(true).logged_in && this.tracker.status(true).identity?.platform_shop_id === shop;
+    // 20秒限制开始动作；确认后的结果观察仍受原许可和确认期限约束。
+    const observationBlocker = () => {
+      const blocked = hooks?.check();
+      return blocked === "reply_deadline_exceeded" ? null : blocked;
+    };
     let unfavorited = false;
     for (let i = 0; i < 30; i++) {
       await sleep(300);
-      if (hooks) {
-        const blocked = hooks.check();
-        if (blocked) return `unknown:${blocked}`;
-      }
+      if (!valid()) return "unknown:transfer_observation_invalid";
+      const blocked = observationBlocker();
+      if (blocked) return `unknown:${blocked}`;
       const fail = await (read ?? this.run.bind(this))<{ text: string; unfav: Point | null; keep: Point | null } | string | null>(hooks ? transferUnmarkScript(uid, undefined, !allowUnfavorite) : TRANSFER_FAIL_DIALOG).catch(() => "script_failed");
       if (typeof fail === "string") return `unknown:${fail}`;
       if (fail && !unfavorited) {
@@ -3084,8 +3110,9 @@ export class PddPageAdapter implements PlatformAdapter {
           const owned = await read!<string>(transferUnmarkScript(uid, fail.unfav)).catch(() => "script_failed");
           if (owned !== "ok") return `unknown:${owned}`;
           const click = await hooks.unmark(fail.unfav);
-          // 平台按钮同时取消收藏并转移；结果无法确认时不再另点、恢复收藏或补做转接。
-          return `unknown:unmark_and_transfer_${click.status}`;
+          if (click.status !== "dispatched") return `unknown:unmark_and_transfer_${click.status}`;
+          unfavorited = true;
+          continue;
         }
         log({ phase: "unfavorite_and_transfer" });
         const click = await this.nativeClick(fail.unfav, page, epoch);
@@ -3098,10 +3125,13 @@ export class PddPageAdapter implements PlatformAdapter {
       }
       const scan = read ? await read<Scan>(SCAN).catch(() => null) : await this.scanKeepingFresh();
       if (scan?.freshBuyer) this.pendingFreshBuyer = true;
+      if (!valid()) return "unknown:transfer_observation_invalid";
+      const afterReadBlocker = observationBlocker();
+      if (afterReadBlocker) return `unknown:${afterReadBlocker}`;
       // 列表为空可能是筛选/刷新/加载中，不算观察到离开。
-      if (!fail && scan && scan.items.length > 0 && !scan.items.some((it) => buyerFromListKey(it.key) === uid)) {
-        log({ phase: "unknown", observed: "left_list", unfavorited });
-        return `unknown:left_list_observed${unfavorited ? ",unfavorited" : ""}`;
+      if (!fail && scan && scan.items.length > 0 && scan.items.every((it) => buyerFromListKey(it.key) !== null) && !scan.items.some((it) => buyerFromListKey(it.key) === uid)) {
+        log({ phase: "confirmed", observed: "left_list", unfavorited });
+        return `confirmed:left_list_observed${unfavorited ? ",unfavorited" : ""}`;
       }
     }
     log({ phase: "unknown", observed: "none", unfavorited });

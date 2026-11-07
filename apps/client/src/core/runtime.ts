@@ -1312,7 +1312,9 @@ export class ShopRuntime {
     } catch {
       result = { status: "unknown", reason: "transfer_exception_or_timeout" };
     }
-    if (ev.attempt?.detail === "unmark_and_transfer") result = { status: "unknown", reason: "transfer_binding_unproven", page_observed: result.status === "not_sent" ? "unknown" : result.page_observed };
+    if (ev.attempt?.detail === "unmark_and_transfer" && !(result.status === "confirmed" && result.unmarked === true)) {
+      result = { status: "unknown", reason: "transfer_binding_unproven", page_observed: result.status === "not_sent" ? "unknown" : result.page_observed };
+    }
     if (result.status === "confirmed" && (claimExpiresAt - this.now() < this.timing.itemReceiptReserve || this.platformCheck() || ev.session_id !== this.sessionId)) {
       result = { status: "unknown", reason: "transfer_confirmation_invalid" };
     }
@@ -1494,7 +1496,7 @@ export function receiptExtra(ev: EventRecord, status: ReceiptStatus, detail: str
   if (d?.action === "transfer" && d.transfer) {
     if (ev.attempt?.detail === "unmark_and_transfer") return {
       steps: [{ step: "transfer", status: "not_sent", reason: "blocked_by_mark" },
-        { step: "unmark_and_transfer", status: "unknown", unmarked: null }],
+        { step: "unmark_and_transfer", status: status === "sent" ? "sent" : "unknown", unmarked: status === "sent" ? true : null }],
       ...(observed ? { page_observed: observed } : {}),
     };
     if (status === "not_sent") return { reason: convActionReason(detail) };

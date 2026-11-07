@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { afterEach, test } from "node:test";
-import type { FetchLike } from "../src/core/backend.js";
+import { BackendError, type FetchLike } from "../src/core/backend.js";
 import type { TransferRequest } from "../src/core/adapter.js";
 import { CAP_TRANSFER_BY_ACCOUNT, parseSnapshot } from "../src/core/protocol.js";
 import { receiptExtra, ShopRuntime } from "../src/core/runtime.js";
+import { messageStatus } from "../src/core/view.js";
 import { makeShop, eventsOf, waitFor, settle, startBackend, type TestBackend } from "./helpers.js";
 
 const running: { rt: ShopRuntime; dir: string }[] = [];
@@ -13,7 +14,7 @@ afterEach(async () => {
 });
 
 type Options = {
-  declare?: boolean; capability?: string | null; account?: string; allowUnmark?: boolean; unmarkStart?: boolean;
+  declare?: boolean; capability?: string | null; account?: string; allowUnmark?: boolean; unmarkStart?: boolean; unmarked?: true;
   reply?: boolean; mode?: "auto" | "observe" | "manual"; takeover?: boolean;
   result?: "unknown" | "confirmed" | "not_sent"; reason?: string; deadlineAtExecution?: boolean;
 };
@@ -55,7 +56,7 @@ async function harness(opts: Options = {}) {
     if (blocked) return { status: "not_sent", reason: blocked };
     state.transfers.push(request);
     if (opts.unmarkStart) request.before_unmark!();
-    return opts.result === "confirmed" ? { status: "confirmed", page_observed: "left_list" } : opts.result === "not_sent" ? { status: "not_sent", reason: opts.reason ?? "transfer_target_missing" } : { status: "unknown", reason: "transfer_binding_unproven", page_observed: "left_list" };
+    return opts.result === "confirmed" ? { status: "confirmed", page_observed: "left_list", ...(opts.unmarked ? { unmarked: true } : {}) } : opts.result === "not_sent" ? { status: "not_sent", reason: opts.reason ?? "transfer_target_missing" } : { status: "unknown", reason: "transfer_binding_unproven", page_observed: "left_list" };
   };
   h.mock.send = async () => { state.sends++; return { status: "confirmed", platform_message_id: "fictional-reply-1" }; };
   await h.mock.login(); await waitFor(() => h.rt.lease.state === "held", "lease");
@@ -94,6 +95,24 @@ test("无需预采集名单或收藏状态：后台账号直接进入领取后�
   assert.equal(h.state.transfers.length, 1); assert.equal(h.state.claims.length, 1);
   assert.equal(h.event.attempt?.attempt_id, attemptId);
 });
+
+for (const unmark of [false, true]) {
+  test(`转接已确认完成${unmark ? "（含取消收藏）" : ""}：显示成功、回执 sent，完结后不重转`, async () => {
+    const h = await harness({ result: "confirmed", ...(unmark ? { allowUnmark: true, unmarkStart: true, unmarked: true } : {}) });
+    assert.equal(h.event.attempt?.phase, "sent"); assert.equal(h.event.attempt?.receipt?.upload, "uploaded");
+    assert.equal(h.state.receipts[0].status, "sent");
+    assert.deepEqual(h.state.receipts[0].steps, unmark
+      ? [{ step: "transfer", status: "not_sent", reason: "blocked_by_mark" }, { step: "unmark_and_transfer", status: "sent", unmarked: true }]
+      : [{ step: "transfer", status: "sent" }]);
+    const conv = h.rt.journal.conversation(h.event.conversation_id);
+    const message = conv.messages.find(m => m.id === h.event.message_id)!;
+    assert.equal(messageStatus(message, h.event, conv.notes[message.id])?.label, "转接成功");
+    const attemptId = h.event.attempt!.attempt_id;
+    h.mock.redeliver(h.message); await Promise.all([h.rt.refresh(), h.rt.refresh()]); await settle(h.rt);
+    assert.equal(h.state.transfers.length, 1); assert.equal(h.state.claims.length, 1);
+    assert.equal(h.event.attempt?.attempt_id, attemptId);
+  });
+}
 
 test("普通回复在转接能力开启时也不读取名单或打开转接窗口", async () => {
   const h = await harness({ reply: true });
@@ -143,34 +162,45 @@ test("转接解析拒绝旧编号、无效账号、非布尔权限及不一致�
   assert.equal(old.decision!.action, "none");
 });
 
-test("真实本机测试后台：无名单事件生成账号决定，领取后执行并上传 unknown，重复推送不重转", async () => {
-  const backend = await startBackend();
-  let h: Awaited<ReturnType<typeof makeShop>> | undefined;
-  let transfers = 0;
-  try {
-    await backend.settings("shop-a", true, [{ id: "human", contains: "人工", handling: { action: "transfer", account: "fictional-main", allow_unmark: false } }] as any);
-    h = await makeShop({ backend, login: false, declareTransfer: true, timing: { unknownCheckDelaysMs: [] } });
-    (h.mock as any).transferConversation = async (request: TransferRequest) => {
-      assert.equal(request.account, "fictional-main"); assert.equal(request.recheck(), null);
-      transfers++;
-      return { status: "unknown", reason: "transfer_binding_unproven" };
-    };
-    await h.mock.login(); await waitFor(() => h!.rt.transferExecutable(), "account capability");
-    const message = h.mock.injectBuyerMessage({ conversation_id: "fictional-buyer", content: "人工" });
-    await waitFor(() => eventsOf(h!.rt)[0]?.attempt?.receipt?.upload === "uploaded", "account transfer receipt");
-    const ev = eventsOf(h.rt)[0];
-    assert.equal(JSON.parse(ev.body).context.transfer_targets, undefined);
-    assert.equal(JSON.parse(ev.body).context.conv_state, undefined);
-    assert.equal(ev.snapshot?.decision?.transfer?.account, "fictional-main");
-    const saved = await backend.events("shop-a");
-    assert.equal(saved.length, 1); assert.equal(saved[0].delivery.status, "unknown");
-    h.mock.redeliver(message); await h.rt.refresh(); await settle(h.rt);
-    assert.equal(transfers, 1);
-  } finally {
-    if (h) { await h.rt.stop(); fs.rmSync(h.dir, { recursive: true, force: true }); }
-    await backend.stop();
-  }
-});
+for (const completion of ["sent", "unmark_sent", "unknown"] as const) {
+  test(`真实本机测试后台：${completion} 回执落库，终态消息重复推送不重转`, async () => {
+    const unmark = completion === "unmark_sent";
+    const expected = completion === "unknown" ? "unknown" : "sent";
+    const backend = await startBackend();
+    let h: Awaited<ReturnType<typeof makeShop>> | undefined;
+    let transfers = 0;
+    try {
+      await backend.settings("shop-a", true, [{ id: "human", contains: "人工", handling: { action: "transfer", account: "fictional-main", allow_unmark: unmark } }] as any);
+      h = await makeShop({ backend, login: false, declareTransfer: true, timing: { unknownCheckDelaysMs: [] } });
+      (h.mock as any).transferConversation = async (request: TransferRequest) => {
+        assert.equal(request.account, "fictional-main"); assert.equal(request.recheck(), null);
+        transfers++;
+        if (unmark) request.before_unmark!();
+        return expected === "unknown" ? { status: "unknown", reason: "transfer_binding_unproven" }
+          : { status: "confirmed", page_observed: "left_list", ...(unmark ? { unmarked: true } : {}) };
+      };
+      await h.mock.login(); await waitFor(() => h!.rt.transferExecutable(), "account capability");
+      const message = h.mock.injectBuyerMessage({ conversation_id: "fictional-buyer", content: "人工" });
+      await waitFor(() => eventsOf(h!.rt)[0]?.attempt?.receipt?.upload === "uploaded", "account transfer receipt");
+      const ev = eventsOf(h.rt)[0];
+      assert.equal(JSON.parse(ev.body).context.transfer_targets, undefined);
+      assert.equal(JSON.parse(ev.body).context.conv_state, undefined);
+      assert.equal(ev.snapshot?.decision?.transfer?.account, "fictional-main");
+      const saved = await backend.events("shop-a");
+      assert.equal(saved.length, 1); assert.equal(saved[0].delivery.status, expected);
+      assert.equal(ev.attempt?.phase, expected);
+      if (unmark) assert.equal(saved[0].delivery.steps[1].unmarked, true);
+      await assert.rejects(() => h!.rt.backend.claim(ev.event_id,
+        { instance_id: ev.instance_id, session_id: ev.session_id, generation: ev.generation }, "att-duplicate"),
+        error => error instanceof BackendError && error.code === "delivery_terminal");
+      h.mock.redeliver(message); await h.rt.refresh(); await settle(h.rt);
+      assert.equal(transfers, 1);
+    } finally {
+      if (h) { await h.rt.stop(); fs.rmSync(h.dir, { recursive: true, force: true }); }
+      await backend.stop();
+    }
+  });
+}
 
 for (const opts of [{ mode: "observe" }, { mode: "manual" }, { mode: "auto", takeover: true }] as const) {
   test(`${opts.mode}${"takeover" in opts ? " with takeover" : ""}：不准备名单、不领取、不转接`, async () => {
