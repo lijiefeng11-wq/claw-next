@@ -197,7 +197,7 @@ app.whenReady().then(async () => {
     }
     {
       const { r, clicks } = await run(page(true, [T, T]));
-      check("同名两行：不点行、不确认", r.startsWith("not_executed:target_not_unique") && JSON.stringify(clicks) === '["open","blank"]', { r, clicks });
+      check("同名两行：不点行、不确认", r === "not_executed:target_ambiguous" && JSON.stringify(clicks) === '["open","blank"]', { r, clicks });
     }
     {
       const { r, clicks } = await run(page(true, ["虚构客服A", T]), { before: "window.reorderOnRow = true" });
